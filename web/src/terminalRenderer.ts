@@ -49,6 +49,11 @@ import { installTerminalImeFocusRedirect } from "./terminalImeFocus";
 
 const TERMINAL_FONT_FAMILY =
   'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "DejaVu Sans Mono", "JetBrainsMono Nerd Font Mono", monospace';
+
+function terminalFontFamily() {
+  return getComputedStyle(document.documentElement).getPropertyValue("--mono").trim() ||
+    TERMINAL_FONT_FAMILY;
+}
 const TERMINAL_TEXT_INPUT_TAP_GRACE_MS = 4000;
 const TOUCH_SELECTION_LONG_PRESS_MS = 600;
 const TOUCH_SELECTION_TOLERANCE_PX = 10;
@@ -199,7 +204,7 @@ export class GhosttyRenderer implements TerminalRenderer {
     const terminal = new Terminal({
       convertEol: false,
       cursorBlink: this.#cursorBlink,
-      fontFamily: TERMINAL_FONT_FAMILY,
+      fontFamily: terminalFontFamily(),
       fontSize: this.#fontSizePx,
       scrollback: 8000,
       smoothScrollDuration: 0,
@@ -316,7 +321,7 @@ export class GhosttyRenderer implements TerminalRenderer {
     const terminal = this.#requireTerminal();
     return refreshTerminalFontRendering(
       terminal,
-      TERMINAL_FONT_FAMILY,
+      terminalFontFamily(),
       this.#fontSizePx,
       () => this.fit(),
     );
@@ -1605,7 +1610,7 @@ function positionGhosttyTextareaForInput(
   textarea.style.background = "transparent";
   textarea.style.caretColor = "transparent";
   textarea.style.overflow = "hidden";
-  textarea.style.fontFamily = TERMINAL_FONT_FAMILY;
+  textarea.style.fontFamily = terminalFontFamily();
   textarea.style.fontSize = `${anchor.fontSizePx}px`;
   textarea.style.lineHeight = `${anchor.height}px`;
   textarea.style.zIndex = "5";
@@ -1642,7 +1647,7 @@ function updateImePreeditOverlay(
   overlay.style.left = `${anchorLeft}px`;
   overlay.style.top = `${anchorTop}px`;
   overlay.style.maxWidth = `${maxWidth}px`;
-  overlay.style.fontFamily = TERMINAL_FONT_FAMILY;
+  overlay.style.fontFamily = terminalFontFamily();
   overlay.style.fontSize = `${fontSize}px`;
   overlay.style.lineHeight = lineHeight;
   overlay.style.minHeight = lineHeight;

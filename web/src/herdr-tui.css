@@ -1,0 +1,303 @@
+/* Herdr TUI — measured from the public herdr.dev session mock.
+   All overrides are opt-in at the root; Web keeps the upstream appearance. */
+@font-face {
+  font-family: "Herdr Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/JetBrainsMonoNerdFontMono-Regular.woff2") format("woff2");
+}
+
+/* Captions are presentational; pane focus and actions stay with the real pane. */
+.tui-pane-caption { display: none; }
+.tui-agent-meta { display: none; }
+
+:root[data-appearance="tui"] {
+  --ui: "Herdr Mono", "JetBrains Mono", Consolas, monospace;
+  --mono: "Herdr Mono", "JetBrains Mono", Consolas, monospace;
+  --app-bg: #11111b;
+  --sidebar-bg: #181825;
+  --term-bg: #11111b;
+  --row-hover: #1e1e2e;
+  --row-active: #1e1e2e;
+  --line: #313244;
+  --line-soft: #242435;
+  --accent: #cba6f7;
+  --accent-soft: rgb(203 166 247 / 10%);
+  --overlay1: #9399b2;
+  --r-sm: 0px;
+  --r-md: 0px;
+  --r-lg: 0px;
+  font-size: 12px;
+  font-synthesis: weight;
+  font-variant-ligatures: none;
+}
+
+:root[data-appearance="tui"] :is(button, input, select, textarea) {
+  font-family: var(--ui);
+}
+
+:root[data-appearance="tui"] :is(button, [tabindex="0"], input, select, textarea):focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -2px;
+}
+
+:root[data-appearance="tui"] .sidebar::before { display: none; }
+:root[data-appearance="tui"] .sidebar { border-color: var(--line); }
+:root[data-appearance="tui"] .list { gap: 0; padding: 0; }
+
+:root[data-appearance="tui"] .sb-head {
+  height: 34px;
+  gap: 4px;
+  padding: 0 9px;
+  border-top: 1px solid var(--line);
+  background: var(--sidebar-bg);
+}
+
+:root[data-appearance="tui"] .brand-mark { gap: 6px; font-size: 12px; }
+:root[data-appearance="tui"] .brand-logo { display: none; }
+:root[data-appearance="tui"] .brand-dot { box-shadow: none; }
+:root[data-appearance="tui"] .brand-sub { display: none; }
+
+:root[data-appearance="tui"] .icon-btn { width: 28px; height: 28px; }
+:root[data-appearance="tui"] .icon-btn svg { width: 14px; height: 14px; }
+:root[data-appearance="tui"] .icon-btn:hover { background: var(--base); }
+
+:root[data-appearance="tui"] :is(.sidebar-mode, .sidebar-scope) {
+  margin: 0;
+  padding: 0;
+  gap: 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+  background: transparent;
+}
+
+:root[data-appearance="tui"] :is(.sidebar-mode, .sidebar-scope) button {
+  height: 27px;
+  font-size: 11px;
+  font-weight: 400;
+  text-transform: lowercase;
+}
+
+:root[data-appearance="tui"] :is(.sidebar-mode, .sidebar-scope) button[data-on="true"] {
+  color: var(--accent);
+  background: var(--base);
+}
+
+:root[data-appearance="tui"] .host-scope:has(> button:only-child) { display: none; }
+
+:root[data-appearance="tui"] .sec-head {
+  height: 30px;
+  min-height: 30px;
+  padding: 0 8px 0 13px;
+  gap: 5px;
+}
+
+:root[data-appearance="tui"] .sec-label {
+  text-transform: lowercase;
+  letter-spacing: 0;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--overlay1);
+}
+
+:root[data-appearance="tui"] .sec-rule { background: none; }
+:root[data-appearance="tui"] .sec-add { width: 22px; height: 22px; border-color: transparent; }
+:root[data-appearance="tui"] .sec-add:hover { border-color: var(--line); }
+
+:root[data-appearance="tui"] :is(.space-row, .pane-row) {
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  gap: 8px;
+  padding: 6px 12px;
+  border: 0;
+  min-height: 42px;
+  animation: none;
+}
+
+:root[data-appearance="tui"] :is(.space-row, .pane-row)[data-active="true"] {
+  box-shadow: none;
+  background: var(--base);
+}
+
+:root[data-appearance="tui"] :is(.space-name, .pane-name) {
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+:root[data-appearance="tui"] :is(.space-sub, .pane-meta) {
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+:root[data-appearance="tui"] .space-row[data-active="true"] .space-sub { color: var(--accent); }
+:root[data-appearance="tui"] .agent-row .agent-icon { display: none; }
+:root[data-appearance="tui"] .agent-row > .pane-word { display: none; }
+:root[data-appearance="tui"] .tui-agent-meta { display: block; order: 1; }
+:root[data-appearance="tui"] .agent-row .web-agent-meta {
+  order: 2;
+  font-size: 9px;
+  color: var(--overlay1);
+}
+:root[data-appearance="tui"] .agent-row[data-status="working"] .pane-meta { color: var(--yellow); }
+:root[data-appearance="tui"] .agent-row[data-status="blocked"] .pane-meta { color: var(--red); }
+:root[data-appearance="tui"] .agent-row[data-status="done"] .pane-meta { color: var(--teal); }
+
+:root[data-appearance="tui"] .pane-word {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 10px;
+}
+
+:root[data-appearance="tui"] .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  box-shadow: none;
+}
+
+:root[data-appearance="tui"] .dot::after { display: none; }
+:root[data-appearance="tui"] .dot[data-status="idle"] { border: 1px solid var(--green); background: transparent; }
+:root[data-appearance="tui"] .dot[data-status="blocked"] { outline: 1px solid var(--red); outline-offset: 1px; }
+
+:root[data-appearance="tui"] .grp-space {
+  margin: 0;
+  border-radius: 0;
+  font-size: 10px;
+  color: var(--overlay1);
+}
+
+:root[data-appearance="tui"] .tabbar {
+  height: 26px;
+  gap: 0;
+  padding: 0;
+  background: var(--base);
+}
+
+:root[data-appearance="tui"] .tabbar-scroll { flex: 0 1 auto; gap: 0; }
+:root[data-appearance="tui"] .tabbar-tab {
+  height: 25px;
+  padding: 0 12px;
+  gap: 6px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--overlay1);
+}
+
+:root[data-appearance="tui"] .tabbar-tab[data-active="true"] {
+  color: var(--crust);
+  background: var(--accent);
+  font-weight: 600;
+}
+
+:root[data-appearance="tui"] .tabbar-tab[data-active="true"] .dot {
+  background: var(--crust);
+  outline: 0;
+  border-color: var(--crust);
+}
+
+:root[data-appearance="tui"] .tabbar-add { width: 32px; height: 25px; border: 0; border-right: 1px solid var(--line); }
+
+:root[data-appearance="tui"] .stage-bar {
+  height: 32px;
+  gap: 6px;
+  padding: 0 8px;
+  background: var(--sidebar-bg);
+}
+
+:root[data-appearance="tui"] .stage-id { flex-direction: row; align-items: center; gap: 12px; }
+:root[data-appearance="tui"] .stage-title { font-size: 11px; color: var(--accent); flex: 0 1 auto; }
+:root[data-appearance="tui"] .stage-sub { font-size: 10px; flex: 1; }
+:root[data-appearance="tui"] .badge { height: 22px; padding: 0 5px; border: 0; background: transparent; font-size: 10px; }
+
+:root[data-appearance="tui"] .pane-grid { margin: 8px 5px 5px; }
+:root[data-appearance="tui"] .pane-cell {
+  overflow: visible;
+  border: 0;
+  padding: 15px 5px 5px;
+}
+
+:root[data-appearance="tui"] .pane-cell::before {
+  position: absolute;
+  inset: 7px 3px 3px;
+  border: 1px solid var(--line);
+  content: "";
+  pointer-events: none;
+}
+
+:root[data-appearance="tui"] .pane-cell[data-selected="true"] { box-shadow: none; }
+:root[data-appearance="tui"] .pane-cell[data-selected="true"]::before { border-color: var(--accent); }
+:root[data-appearance="tui"] .pane-cell .terminal-host { padding: 4px 4px 4px 5px; }
+
+:root[data-appearance="tui"] .tui-pane-caption {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  left: 13px;
+  display: block;
+  max-width: calc(100% - 32px);
+  overflow: hidden;
+  padding: 0 5px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--overlay1);
+  background: var(--term-bg);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+:root[data-appearance="tui"] .pane-cell[data-selected="true"] .tui-pane-caption { color: var(--accent); }
+
+:root[data-appearance="tui"] .stage > .terminal-stage {
+  margin: 8px;
+  border: 1px solid var(--accent);
+}
+
+:root[data-appearance="tui"] :is(.dialog, .context-menu, .sidebar-options-menu, .terminal-overlay) {
+  box-shadow: 0 8px 32px rgb(0 0 0 / 30%);
+  border-color: var(--line);
+}
+
+/* Keep both lists visible like the TUI. Auxiliary controls live below them.
+   Sections scroll independently, including when either has many entries. */
+@media (min-width: 761px) {
+  :root[data-appearance="tui"] .app[data-compact="false"] > .sidebar > .list { order: 0; overflow: hidden; }
+  :root[data-appearance="tui"] .app[data-compact="false"] .sidebar-mode { order: 1; }
+  :root[data-appearance="tui"] .app[data-compact="false"] .sidebar-scope { order: 2; }
+  :root[data-appearance="tui"] .app[data-compact="false"] .sb-head { order: 3; }
+  :root[data-appearance="tui"] .app[data-compact="false"] .list > .sec {
+    flex: 1 1 0;
+    min-height: 0;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--surface0) transparent;
+  }
+  :root[data-appearance="tui"] .app[data-compact="false"] .list > .sec + .sec { border-top: 1px solid var(--line); }
+  :root[data-appearance="tui"] .app[data-compact="false"] .sec-head {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    flex-shrink: 0;
+    background: var(--sidebar-bg);
+  }
+  :root[data-appearance="tui"] .app[data-compact="false"] .sec > .space-row-shell { flex-shrink: 0; }
+  :root[data-appearance="tui"] .app[data-compact="false"] .stage-bar { order: 3; border-top: 1px solid var(--line); border-bottom: 0; }
+}
+
+/* Preserve touch-sized controls and the upstream switcher/detail navigation. */
+:root[data-appearance="tui"] .app[data-compact="true"] :is(.sb-head, .stage-bar) { height: 48px; }
+:root[data-appearance="tui"] .app[data-compact="true"] .icon-btn { width: 40px; height: 40px; }
+:root[data-appearance="tui"] .app[data-compact="true"] :is(.sidebar-mode, .sidebar-scope) button { height: 40px; }
+:root[data-appearance="tui"] .app[data-compact="true"] .stage-id { flex-direction: column; align-items: stretch; gap: 2px; }
+:root[data-appearance="tui"] .app[data-compact="true"] :is(.space-row, .pane-row) { min-height: 48px; }
+:root[data-appearance="tui"] .app[data-compact="true"] .sec-head { min-height: 40px; }
+:root[data-appearance="tui"] .app[data-compact="true"] .sec-add { width: 32px; height: 32px; }
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-appearance="tui"] *, :root[data-appearance="tui"] *::after { animation: none !important; transition: none !important; }
+}

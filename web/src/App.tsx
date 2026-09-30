@@ -67,6 +67,8 @@ import type { AgentPinsListResponse } from "./agentPins";
 import { applyActivityMessage, parseActivityEventData, replayActivityMessages } from "./activity";
 import type { ActivityLogEntry } from "./activity";
 import { BackendSettingsDialog } from "./BackendSettingsDialog";
+import { readAppearance, useAppearance } from "./appearance";
+import { spaceScrollContainer } from "./sidebarScroll";
 import { useBridge } from "./bridge";
 import type { BridgeId, BridgeRuntime } from "./bridge";
 import { createCommands, createdPaneId } from "./commands";
@@ -464,7 +466,7 @@ const LEGACY_DISPLAY_PREFS_KEY = "herdr.mobileWeb.displayPrefs.v1";
 const MOBILE_SIDEBAR_HISTORY_KEY = "herdrWebMobileSidebar";
 const MOBILE_DETAIL_HISTORY_KEY = "herdrWebMobileDetail";
 const DEFAULT_SIDEBAR_WIDTH = 320;
-const MIN_SIDEBAR_WIDTH = 260;
+const MIN_SIDEBAR_WIDTH = 220;
 const MAX_SIDEBAR_WIDTH = 560;
 const DEFAULT_NOTES_PANEL_WIDTH = 560;
 const MIN_NOTES_PANEL_WIDTH = 420;
@@ -476,7 +478,7 @@ const MAX_NOTES_LIST_PANE_WIDTH = 420;
 function readDisplayPrefs(): DisplayPrefs {
   const fallback: DisplayPrefs = {
     hostScope: "selected",
-    scope: "space",
+    scope: readAppearance() === "tui" ? "all" : "space",
     sidebarView: "agents",
     agentSort: "attention",
     agentGroup: "none",
@@ -487,7 +489,7 @@ function readDisplayPrefs(): DisplayPrefs {
     agentActiveOnly: false,
     agentFeaturesInTabs: DEFAULT_AGENT_FEATURES_IN_TABS,
     multiHostSpaceSelection: DEFAULT_MULTI_HOST_SPACE_SELECTION,
-    sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
+    sidebarWidth: readAppearance() === "tui" ? 240 : DEFAULT_SIDEBAR_WIDTH,
     notesPanelWidth: DEFAULT_NOTES_PANEL_WIDTH,
     notesListPaneWidth: DEFAULT_NOTES_LIST_PANE_WIDTH,
     notesListPaneCollapsed: true,
@@ -5980,6 +5982,7 @@ function SplitGrid({
             style={style}
             onPointerDown={() => onSelectPane(pane)}
           >
+            <span className="tui-pane-caption" aria-hidden="true">{paneTitle(pane)}</span>
             <TerminalView
               bridgeId={bridgeId}
               pane={pane}
@@ -6237,6 +6240,7 @@ function Switcher({
   const [spaceOptionsMenu, setSpaceOptionsMenu] = useState<{ x: number; y: number } | null>(null);
   const [spaceDragTarget, setSpaceDragTarget] = useState<string | null | undefined>(undefined);
   const spaceDragRef = useRef<SpaceDragState | null>(null);
+  const appearance = useAppearance();
   const spaceListRef = useRef<HTMLDivElement | null>(null);
   const spaceRowRefs = useRef(new Map<string, HTMLDivElement>());
   const spaceReorderCardRef = useRef<HTMLButtonElement | null>(null);
@@ -6631,13 +6635,14 @@ function Switcher({
     if (!drag || drag.pointerId !== event.pointerId) {
       return;
     }
-    const listRect = spaceListRef.current?.getBoundingClientRect();
+    const scrollContainer = spaceScrollContainer(spaceListRef.current);
+    const listRect = scrollContainer?.getBoundingClientRect();
     if (listRect) {
       const edge = 42;
       if (event.clientY < listRect.top + edge) {
-        spaceListRef.current?.scrollBy({ top: -12 });
+        scrollContainer?.scrollBy({ top: -12 });
       } else if (event.clientY > listRect.bottom - edge) {
-        spaceListRef.current?.scrollBy({ top: 12 });
+        scrollContainer?.scrollBy({ top: 12 });
       }
     }
     const beforeWorkspaceId = reorderTargetAtY(event.clientY);
@@ -7418,7 +7423,7 @@ function Switcher({
         ) : (
           <>
             {/* SPACES ---------------------------------------------------- */}
-            {scope === "space" && hostBridgeViews.some((view) => view.snapshot) ? (
+            {(scope === "space" || appearance === "tui") && hostBridgeViews.some((view) => view.snapshot) ? (
             <section className="sec" data-sidebar-section="spaces">
               <div className="sec-head">
                 <span className="sec-label">spaces</span>
@@ -9080,7 +9085,10 @@ function AgentRow({
           ) : null}
           <span className="pane-title-text">{agentTitle(pane)}</span>
         </span>
-        <span className="pane-meta mono">{agentSubtitle(pane, workspace, tabLabel, bridgeLabel)}</span>
+        <span className="pane-meta mono web-agent-meta">{agentSubtitle(pane, workspace, tabLabel, bridgeLabel)}</span>
+        <span className="pane-meta mono tui-agent-meta">
+          {statusLabel(pane.agent_status).toLowerCase()} · {pane.display_agent || pane.agent || "terminal"}
+        </span>
       </span>
       {isLoud(pane.agent_status) ? (
         <span className="pane-word" data-status={pane.agent_status}>

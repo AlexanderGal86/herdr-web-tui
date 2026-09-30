@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>Herdr · Theme preview</title>
+    <style>
+      #theme-preview-banner {
+        position: relative; z-index: 2147483647; box-sizing: border-box;
+        display: flex; align-items: center; justify-content: center;
+        height: 28px; padding: 0 8px; overflow: hidden;
+        background: #242035; color: #cba6f7; border-bottom: 1px solid #514164;
+        font: 10px/1.2 ui-monospace, Consolas, monospace; text-align: center;
+      }
+      html body #root { height: calc(100dvh - 28px); }
+      html body #root .app[data-compact="true"] :is(.sidebar, .stage, .notes-surface) {
+        top: calc(28px + var(--content-inset-top));
+        height: calc(100dvh - 28px - var(--content-inset-top) - var(--content-inset-bottom));
+      }
+    </style>
+  </head>
+  <body>
+    <div id="theme-preview-banner" role="status">THEME PREVIEW · sample sessions · no live connection</div>
+    <div id="root"></div>
+    <script type="module" src="/src/theme-preview.tsx"></script>
+  </body>
+</html>

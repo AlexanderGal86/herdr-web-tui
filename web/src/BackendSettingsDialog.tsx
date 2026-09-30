@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent } from "react";
+import { AppearanceSetting } from "./AppearanceSetting";
 import {
   duplicateBackend,
   fallbackBackendColor,
@@ -552,6 +553,7 @@ export function BackendSettingsDialog({
 
             {activeArea === "display" ? (
               <div className="settings-section settings-section-flat">
+                <AppearanceSetting />
                 <div className="settings-label">Sidebar</div>
                 <div className="settings-row">
                   <span title="Choose whether this browser follows pane selections from other clients">

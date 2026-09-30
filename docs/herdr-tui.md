@@ -1,0 +1,76 @@
+# Herdr TUI appearance
+
+This checkout adds a default **Herdr TUI** appearance to [kcosr/herdr-web](https://github.com/kcosr/herdr-web), based on the interactive session illustration at [herdr.dev](https://herdr.dev/). Upstream base: `f1312e2ffbe8d5b62db57ced66c3c56c4cdebdfb`.
+
+## Use
+
+Open **Settings → Display → Appearance** and choose **Herdr TUI** or **Web**. The selection persists in this browser and synchronizes with other tabs on the same origin. Existing navigation/layout preferences are preserved. Fresh TUI installations use a 240px resizable sidebar and the All scope, displaying workspaces and agents together. The original Web layout remains selectable.
+
+The terminal and interface use the bundled JetBrains Mono Nerd Font in TUI appearance; no external font service is needed. Changing the appearance remeasures existing terminals without replacing their connections. All existing menus, shortcuts, pane splits, notes, uploads, bridge settings and mobile controls remain available.
+
+## Linux startup
+
+Requirements: Node.js 24.x, npm, Rust stable, and a platform C toolchain. With Herdr already running under the same user:
+
+```bash
+npm ci --prefix web
+npm run build
+HOST=127.0.0.1 PORT=8787 bash scripts/run-bridge.sh
+```
+
+The existing wrapper selects `${XDG_CONFIG_HOME:-$HOME/.config}/herdr/herdr.sock`, respects an explicit `HERDR_SOCKET_PATH`, and serves the production assets at `http://127.0.0.1:8787`. For a remote Linux host, use SSH forwarding as documented in the [README](../README.md). These commands follow the upstream Linux launcher; this fork's Linux runtime has not yet been verified.
+
+## Windows startup
+
+From the repository root, with Herdr already running:
+
+```powershell
+npm ci --prefix web
+npm run build
+.\scripts\start-tui.ps1
+```
+
+Open `http://127.0.0.1:8787`. The startup script binds only to loopback and points debug bridge builds at the stable `%APPDATA%\herdr\herdr.sock` endpoint. It respects `HERDR_SOCKET_PATH` and accepts `-Port 8788`. For `-Session NAME`, first set `$env:HERDR_CONFIG_DIR = Join-Path $env:APPDATA 'herdr'` (or your actual configuration directory): the compatibility crate does not automatically select APPDATA, and an explicit session ignores `HERDR_SOCKET_PATH`. It does not start, stop or replace the Herdr daemon. Runtime notes, pins, and uploads created by the bridge in the working directory are ignored by Git.
+
+For frontend development on Linux, run `npm run dev` using the upstream launcher. On Windows, its Node.js `spawn("npm.cmd", ...)` call fails with EINVAL; use two terminals instead: `.\scripts\start-tui.ps1` for the bridge and `npm run dev:web` for Vite. See the [root README](../README.md) for installation from OneDev, platform requirements, updates, and bridge options. The [original README](../README.upstream.md) is retained separately as upstream reference, not as the platform-specific guide for this fork.
+
+## Visual preview
+
+Run `npm run dev:web` and open `http://127.0.0.1:5173/theme-preview.html`. This development-only entry renders the real application with three sample workspaces, four agent states and a split terminal. A persistent banner identifies the fixture. Selections work locally; terminal input, commands, uploads and outgoing bridge requests are refused. Preview settings are isolated from your real client. This page is excluded from the default production build.
+
+## Reference investigation
+
+The public website hero is a **DOM mock**, not a connected terminal client. Inspected its HTML, inline selection handlers and browser-computed styles on 2026-09-30. Clicking workspaces/tabs/agents changes active elements; a timer animates working status. Its dialogue and command text were treated as sample output, not instructions.
+
+| Element | Reference value | Implementation |
+| --- | --- | --- |
+| Terminal | `#11111b` | Existing Ghostty canvas and surrounding frame |
+| Sidebar | `#181825` | Two equal scrollable sections on desktop |
+| Selection/tab strip | `#1e1e2e` | Flat, square rows and tabs |
+| Focus/active tab | `#cba6f7` | Thin frame; filled active tab |
+| Border | `#313244` | 1px frame and separators |
+| Text | `#cdd6f4` | Monospace labels and terminal text |
+| Muted text | `#6c7086`, `#9399b2` | Secondary labels |
+| Status | Yellow/pink/green/teal | Working/blocked/idle/done indicators |
+| Font | JetBrains Mono | Bundled local Nerd Font variant |
+
+The website scales a fixed illustration with its width. This app uses readable text, a resizable sidebar, independently scrollable lists and touch-sized controls in compact mode. Auxiliary actions are retained in a compact footer. Terminal contents come from actual sessions, so their text, branch labels and agent-specific colors naturally differ from the screenshot.
+
+## Implementation
+
+- `web/src/herdr-tui.css`: scoped visual overrides; no generic global restyling of Web appearance.
+- `web/src/appearance.ts`, `AppearanceSetting.tsx`: persistent preference and accessible selector.
+- `web/src/App.tsx`: TUI default layout, workspaces in All scope and split captions.
+- `web/src/terminalRenderer.ts`, `TerminalView.tsx`: font selection and remeasurement without reconnecting.
+- The upstream Rust bridge, protocol and command allow-list are unchanged.
+
+## Verification (Windows, 2026-09-30)
+
+- Frontend ESLint: passed. Vitest: **440 tests passed**, including preference persistence, preview isolation, terminal connection retention and drag-scroll regression checks.
+- TypeScript and Vite production build: passed. The existing Ghostty bundle size warning remains. Confirmed `theme-preview.html` is absent from production output.
+- Rust bridge: built successfully; live snapshot and capabilities return HTTP 200. The production page renders the existing Herdr 0.9.1 / protocol 22 terminal; browser error/warning logs are empty.
+- Compatibility crate: **141 tests passed**. Both Rust format checks passed. Vendor layout check passed through Git Bash.
+- Browser: TUI/Web switching, agent-to-workspace navigation, split captions, compact view at 390 × 844 and return to switcher verified. Screenshot: `docs/images/herdr-tui-preview.png` (sample sessions).
+- Source review: clipping, drag scrolling and agent-context findings were fixed and re-reviewed; no outstanding findings.
+
+The entire upstream check is **not green on Windows**: `npm run check` first stops because npm's Windows shell cannot execute `scripts/check-vendor.sh` directly. The vendor check passes when invoked explicitly through Git Bash. The latest unchanged bridge tests finish with **136 passed / 16 failed**, all failures in Windows notes/pins file replacement. An earlier run finished with 135 passed / 17 failed, including a test requiring `HOME`; the count depends on the shell environment. Retrying file replacement failures outside the sandbox did not resolve them. Unchanged development/release script tests previously finished with 4 passed / 7 failed because their executable/shebang mocks and `npm` spawning assume Unix. These files were not modified for the theme. Before the OneDev publication, frontend lint, all 440 tests, the production build, the Rust bridge build, both Rust format checks, and the explicit Git Bash vendor check were rerun successfully. This is a verified theme/frontend build and live connection, not a claim that upstream Windows packaging or every backend feature is fully validated.

@@ -1,4 +1,8 @@
 /node_modules/
+/.npm-cache/
+/herdr-web-agent-pins/
+/herdr-web-notes/
+/herdr-web-uploads/
 /web/node_modules/
 /web/dist/
 /web/.vite/

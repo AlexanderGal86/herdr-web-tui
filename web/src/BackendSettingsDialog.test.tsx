@@ -47,6 +47,20 @@ afterEach(async () => {
 });
 
 describe("BackendSettingsDialog terminal accessibility", () => {
+  it("offers appearance as the first setting in Display", async () => {
+    const { container } = await render(<BackendSettingsDialog {...settingsProps()} />);
+    const displayTab = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="tab"]'))
+      .find((button) => button.textContent === "Display");
+    expect(displayTab).toBeDefined();
+    await act(async () => displayTab!.click());
+
+    const firstRow = container.querySelector('.settings-panel .settings-row');
+    expect(firstRow?.textContent).toContain("Appearance");
+    const buttons = Array.from(firstRow?.querySelectorAll("button") ?? []);
+    expect(buttons.map((button) => button.textContent)).toEqual(["Herdr TUI", "Web"]);
+    expect(buttons[0]?.getAttribute("aria-pressed")).toBe("true");
+  });
+
   it("offers mobile refocus independently of expanding input", async () => {
     const onFocusChange = vi.fn();
     const { container } = await render(

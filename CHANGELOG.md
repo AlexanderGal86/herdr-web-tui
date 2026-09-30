@@ -6,6 +6,10 @@
 
 ### Added
 
+- Add the default Herdr TUI appearance inspired by the interactive herdr.dev shell, with
+  monospace navigation, compact tabs, split-pane captions and mauve focus borders.
+  Settings > Display > Appearance switches back to the original Web appearance.
+
 - Allow configured bridge URLs to include a reverse-proxy path prefix for same-origin multi-bridge
   deployments. [PR #94](https://github.com/kcosr/herdr-web/pull/94), contributed by
   [Will Hampson (@Whamp)](https://github.com/Whamp).

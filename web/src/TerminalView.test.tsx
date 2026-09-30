@@ -9,6 +9,7 @@ import { CommandDraftContext, createCommandDraftStore } from "./commandDrafts";
 import type { TerminalRenderer, TerminalSize } from "./terminalRenderer";
 import { TerminalView } from "./TerminalView";
 import type { PaneInfo } from "./types";
+import { setAppearance } from "./appearance";
 
 const MOUNTED_TERMINAL_SIZE: TerminalSize = { cols: 80, rows: 24 };
 const REFRESHED_TERMINAL_SIZE: TerminalSize = { cols: 120, rows: 48 };
@@ -142,6 +143,7 @@ beforeEach(() => {
 
   FakeWebSocket.instances.length = 0;
   terminalRenderers.length = 0;
+  setAppearance("tui");
 });
 
 afterEach(async () => {
@@ -157,6 +159,25 @@ afterEach(async () => {
 });
 
 describe("TerminalView mobile refitting", () => {
+  it("updates theme metrics without replacing the renderer or terminal connection", async () => {
+    const drafts = createCommandDraftStore();
+    await renderTerminalView(testPane("terminal-1"), drafts);
+    const renderer = terminalRenderers[0]!;
+    await act(async () => renderer.completeMount());
+    const socket = FakeWebSocket.instances.at(-1)!;
+    await act(async () => {
+      socket.open();
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    const priorRefreshes = renderer.refreshedSizes.length;
+    await act(async () => setAppearance("web"));
+    expect(terminalRenderers).toEqual([renderer]);
+    expect(FakeWebSocket.instances).toEqual([socket]);
+    expect(socket.readyState).toBe(FakeWebSocket.OPEN);
+    expect(renderer.refreshedSizes).toHaveLength(priorRefreshes + 1);
+    expect(socket.sent.at(-1)).toBe(JSON.stringify({ type: "resize", cols: 120, rows: 48 }));
+  });
+
   it("starts refit retries only after the current terminal renderer mounts", async () => {
     const drafts = createCommandDraftStore();
     const root = await renderTerminalView(testPane("terminal-1"), drafts);
