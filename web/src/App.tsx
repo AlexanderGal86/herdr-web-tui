@@ -67,7 +67,7 @@ import type { AgentPinsListResponse } from "./agentPins";
 import { applyActivityMessage, parseActivityEventData, replayActivityMessages } from "./activity";
 import type { ActivityLogEntry } from "./activity";
 import { BackendSettingsDialog } from "./BackendSettingsDialog";
-import { readAppearance, useAppearance } from "./appearance";
+import { defaultDisplayScope, defaultSidebarWidth, useAppearance } from "./appearance";
 import { spaceScrollContainer } from "./sidebarScroll";
 import { useBridge } from "./bridge";
 import type { BridgeId, BridgeRuntime } from "./bridge";
@@ -478,7 +478,7 @@ const MAX_NOTES_LIST_PANE_WIDTH = 420;
 function readDisplayPrefs(): DisplayPrefs {
   const fallback: DisplayPrefs = {
     hostScope: "selected",
-    scope: readAppearance() === "tui" ? "all" : "space",
+    scope: defaultDisplayScope("space"),
     sidebarView: "agents",
     agentSort: "attention",
     agentGroup: "none",
@@ -489,7 +489,7 @@ function readDisplayPrefs(): DisplayPrefs {
     agentActiveOnly: false,
     agentFeaturesInTabs: DEFAULT_AGENT_FEATURES_IN_TABS,
     multiHostSpaceSelection: DEFAULT_MULTI_HOST_SPACE_SELECTION,
-    sidebarWidth: readAppearance() === "tui" ? 240 : DEFAULT_SIDEBAR_WIDTH,
+    sidebarWidth: defaultSidebarWidth(DEFAULT_SIDEBAR_WIDTH),
     notesPanelWidth: DEFAULT_NOTES_PANEL_WIDTH,
     notesListPaneWidth: DEFAULT_NOTES_LIST_PANE_WIDTH,
     notesListPaneCollapsed: true,
