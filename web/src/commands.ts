@@ -78,12 +78,14 @@ export function createdPaneId(result: CommandResult): string | null {
   const agent = result.agent as { pane_id?: string } | undefined;
   const moveResult = result.move_result as { pane?: { pane_id?: string } } | undefined;
   const focus = result.focus as { focused_pane_id?: string | null } | undefined;
+  const zoom = result.zoom as { pane_id?: string } | undefined;
   return (
     paneId ??
     rootPane?.pane_id ??
     pane?.pane_id ??
     agent?.pane_id ??
     moveResult?.pane?.pane_id ??
+    zoom?.pane_id ??
     focus?.focused_pane_id ??
     null
   );
@@ -115,8 +117,12 @@ export function createCommands(httpUrl: BridgeHttpUrl = sameOriginHttpUrl) {
     closeTab: (tabId: string) => runCommand(httpUrl, "tab.close", { tab_id: tabId }),
     focusTab: (tabId: string) => runCommand(httpUrl, "tab.focus", { tab_id: tabId }),
 
-    renamePane: (paneId: string, label: string) =>
+    renamePane: (paneId: string, label: string | null) =>
       runCommand(httpUrl, "pane.rename", { pane_id: paneId, label }),
+    zoomPane: (paneId: string, mode: "toggle" | "on" | "off" = "toggle") =>
+      runCommand(httpUrl, "pane.zoom", { pane_id: paneId, mode }),
+    swapPanes: (sourcePaneId: string, targetPaneId: string) =>
+      runCommand(httpUrl, "pane.swap", { source_pane_id: sourcePaneId, target_pane_id: targetPaneId }),
     closePane: (paneId: string) => runCommand(httpUrl, "pane.close", { pane_id: paneId }),
     // Layout-mutating: requires the bridge allow-list to include `pane.split`.
     splitPane: (targetPaneId: string, direction: SplitDirection) =>

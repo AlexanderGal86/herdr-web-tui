@@ -156,6 +156,7 @@ export type TerminalRenderer = {
   focus(): void;
   focusTextInput(): void;
   clearSelection(): void;
+  paste(text: string): void;
   setScrollSensitivity(value: number): void;
   dispose(): void;
 };
@@ -275,6 +276,10 @@ export class GhosttyRenderer implements TerminalRenderer {
   onInput(callback: (data: string) => void) {
     const disposable = this.#requireTerminal().onData(callback);
     return () => disposable.dispose();
+  }
+
+  paste(text: string) {
+    this.#terminal?.paste(text);
   }
 
   onScroll(callback: (lines: number) => void) {

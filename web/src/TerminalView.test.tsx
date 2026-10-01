@@ -1,7 +1,7 @@
 /**
  * @vitest-environment jsdom
  */
-import { act } from "react";
+import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -18,7 +18,14 @@ class FakeTerminalRenderer implements TerminalRenderer {
   readonly refreshedSizes: TerminalSize[] = [];
   private pendingMountCompletion: (() => void) | null = null;
 
-  mount() {
+  readonly input = document.createElement("textarea");
+  readonly childEvents = vi.fn();
+
+  mount(host: HTMLElement) {
+    host.appendChild(this.input);
+    for (const type of ["mousedown", "mouseup", "pointerdown", "pointerup", "contextmenu", "keydown", "keyup"]) {
+      this.input.addEventListener(type, this.childEvents, { capture: true });
+    }
     return new Promise<TerminalSize>((resolve) => {
       this.pendingMountCompletion = () => resolve(MOUNTED_TERMINAL_SIZE);
     });
@@ -68,6 +75,8 @@ class FakeTerminalRenderer implements TerminalRenderer {
 
   clearSelection() {}
 
+  paste = vi.fn();
+
   setScrollSensitivity() {}
 
   dispose() {}
@@ -116,6 +125,7 @@ class FakeWebSocket extends EventTarget {
   }
 }
 
+const terminalUrl = (path: string) => path;
 const roots: Root[] = [];
 const terminalRenderers: FakeTerminalRenderer[] = [];
 
@@ -287,12 +297,13 @@ describe("TerminalView mobile refitting", () => {
 async function renderTerminalView(
   pane: PaneInfo,
   drafts: ReturnType<typeof createCommandDraftStore>,
+  overrides: Partial<ComponentProps<typeof TerminalView>> = {},
 ) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
   roots.push(root);
-  await renderPane(root, pane, drafts);
+  await renderPane(root, pane, drafts, overrides);
   return root;
 }
 
@@ -300,6 +311,7 @@ async function renderPane(
   root: Root,
   pane: PaneInfo,
   drafts: ReturnType<typeof createCommandDraftStore>,
+  overrides: Partial<ComponentProps<typeof TerminalView>> = {},
 ) {
   await act(async () => {
     root.render(
@@ -309,13 +321,14 @@ async function renderPane(
           pane={pane}
           connectionKey="test-connection"
           resumeToken={0}
-          httpUrl={(path) => path}
-          wsUrl={(path) => path}
+          httpUrl={terminalUrl}
+          wsUrl={terminalUrl}
           autoFocus={false}
           mobileControls
           terminalOutputCoalesceMs={0}
           selected
           createTerminalRenderer={createFakeTerminalRenderer}
+          {...overrides}
         />
       </CommandDraftContext.Provider>,
     );
@@ -333,3 +346,135 @@ function testPane(terminalId: string): PaneInfo {
     revision: 1,
   };
 }
+
+
+describe("TerminalView context menu capture", () => {
+  async function mountMenu(rightClickPassthrough = false) {
+    const onContextMenu = vi.fn();
+    const onActivate = vi.fn();
+    const drafts = createCommandDraftStore();
+    const pane = testPane("terminal-menu");
+    const root = await renderTerminalView(pane, drafts, { onContextMenu, onActivate, rightClickPassthrough });
+    const renderer = terminalRenderers[0]!;
+    await act(async () => renderer.completeMount());
+    const socket = FakeWebSocket.instances.at(-1)!;
+    await act(async () => socket.open());
+    return { onContextMenu, onActivate, renderer, socket, root, drafts, pane };
+  }
+
+  function mouse(input: HTMLElement, type: string, init: MouseEventInit = {}) {
+    const event = new MouseEvent(type, { bubbles: true, cancelable: true, button: 2, clientX: 91, clientY: 72, ...init });
+    input.dispatchEvent(event);
+    return event;
+  }
+
+  it("pastes middle-click clipboard text once and intercepts native mouse input", async () => {
+    const readText = vi.fn().mockResolvedValue("one\ntwo");
+    vi.stubGlobal("navigator", { clipboard: { readText } });
+    const { renderer, onContextMenu, onActivate } = await mountMenu();
+    await act(async () => {
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "auxclick"]) {
+        expect(mouse(renderer.input, type, { button: 1 }).defaultPrevented).toBe(true);
+      }
+    });
+    expect(readText).toHaveBeenCalledOnce();
+    expect(renderer.paste).toHaveBeenCalledExactlyOnceWith("one\ntwo");
+    expect(onActivate).toHaveBeenCalledOnce();
+    expect(document.activeElement).toBe(renderer.input);
+    expect(renderer.childEvents).not.toHaveBeenCalled();
+    expect(onContextMenu).not.toHaveBeenCalled();
+  });
+
+  it("does not paste after the target terminal is replaced while clipboard access is pending", async () => {
+    let resolveRead!: (text: string) => void;
+    vi.stubGlobal("navigator", { clipboard: { readText: () => new Promise<string>(resolve => { resolveRead = resolve; }) } });
+    const { renderer, root, drafts } = await mountMenu();
+    await act(async () => { mouse(renderer.input, "mousedown", { button: 1 }); });
+    await renderPane(root, testPane("replacement"), drafts);
+    await act(async () => resolveRead("do not send"));
+    expect(renderer.paste).not.toHaveBeenCalled();
+    expect(terminalRenderers.at(-1)!.paste).not.toHaveBeenCalled();
+  });
+
+  it("reports denied clipboard access without sending input", async () => {
+    vi.stubGlobal("navigator", { clipboard: { readText: vi.fn().mockRejectedValue(new Error("denied")) } });
+    const { renderer } = await mountMenu();
+    await act(async () => { mouse(renderer.input, "mousedown", { button: 1 }); });
+    expect(renderer.paste).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("Clipboard unavailable");
+  });
+
+  it("blocks right mouse and pointer input before native child capture, preserves focus target and connection", async () => {
+    const { onContextMenu, renderer, socket, root, drafts, pane } = await mountMenu();
+    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "contextmenu"]) {
+      expect(mouse(renderer.input, type).defaultPrevented).toBe(true);
+    }
+    expect(renderer.childEvents).not.toHaveBeenCalled();
+    expect(onContextMenu).toHaveBeenCalledExactlyOnceWith(91, 72);
+    expect(document.activeElement).toBe(renderer.input);
+    await renderPane(root, pane, drafts, { onContextMenu: vi.fn(), rightClickPassthrough: true });
+    expect(terminalRenderers).toEqual([renderer]);
+    expect(FakeWebSocket.instances).toEqual([socket]);
+    expect(socket.sent.filter((frame) => JSON.parse(frame).type === "input")).toEqual([]);
+  });
+
+  it("passes ordinary right press and release but suppresses the browser menu in passthrough mode", async () => {
+    const { renderer, onContextMenu } = await mountMenu(true);
+    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup"]) {
+      expect(mouse(renderer.input, type).defaultPrevented).toBe(false);
+    }
+    expect(renderer.childEvents).toHaveBeenCalledTimes(4);
+    expect(mouse(renderer.input, "contextmenu").defaultPrevented).toBe(true);
+    expect(onContextMenu).not.toHaveBeenCalled();
+  });
+
+  it("opens Shift right-click even without a browser contextmenu event and does not open twice", async () => {
+    const { renderer, onContextMenu } = await mountMenu(true);
+    for (const type of ["pointerdown", "mousedown", "contextmenu", "pointerup", "mouseup"]) {
+      expect(mouse(renderer.input, type, { shiftKey: true }).defaultPrevented).toBe(true);
+    }
+    expect(renderer.childEvents).not.toHaveBeenCalled();
+    expect(onContextMenu).toHaveBeenCalledExactlyOnceWith(91, 72);
+  });
+
+  it.each([{ key: "ContextMenu" }, { key: "F10", shiftKey: true }])("captures keyboard menu shortcut $key in passthrough mode", async (shortcut) => {
+    const { renderer, onContextMenu } = await mountMenu(true);
+    for (const type of ["keydown", "keyup"]) {
+      const event = new KeyboardEvent(type, { bubbles: true, cancelable: true, ...shortcut });
+      renderer.input.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+    }
+    expect(renderer.childEvents).not.toHaveBeenCalled();
+    expect(onContextMenu).toHaveBeenCalledTimes(1);
+  });
+
+  it("consumes F10 release even when Shift was released first", async () => {
+    const { renderer, onContextMenu } = await mountMenu(true);
+    renderer.input.dispatchEvent(new KeyboardEvent("keydown", { key: "F10", shiftKey: true, bubbles: true }));
+    const release = new KeyboardEvent("keyup", { key: "F10", bubbles: true, cancelable: true });
+    renderer.input.dispatchEvent(release);
+    expect(release.defaultPrevented).toBe(true);
+    expect(renderer.childEvents).not.toHaveBeenCalled();
+    expect(onContextMenu).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves left clicks, normal keys and editable controls outside the terminal host", async () => {
+    const { renderer, onContextMenu } = await mountMenu();
+    expect(mouse(renderer.input, "mousedown", { button: 0 }).defaultPrevented).toBe(false);
+    renderer.input.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true }));
+    expect(renderer.childEvents).toHaveBeenCalledTimes(2);
+    const fileInput = document.querySelector<HTMLInputElement>(".terminal-file-input")!;
+    expect(mouse(fileInput, "contextmenu").defaultPrevented).toBe(false);
+    expect(onContextMenu).not.toHaveBeenCalled();
+  });
+
+  it("leaves touch context menus to the existing mobile selection behavior", async () => {
+    const { renderer, onContextMenu } = await mountMenu();
+    const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 });
+    Object.defineProperty(event, "pointerType", { value: "touch" });
+    renderer.input.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(renderer.childEvents).toHaveBeenCalledTimes(1);
+    expect(onContextMenu).not.toHaveBeenCalled();
+  });
+});

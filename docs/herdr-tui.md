@@ -62,9 +62,19 @@ The website scales a fixed illustration with its width. This app uses readable t
 - `web/src/appearance.ts`, `AppearanceSetting.tsx`: persistent preference and accessible selector.
 - `web/src/App.tsx`: TUI default layout, workspaces in All scope and split captions.
 - `web/src/terminalRenderer.ts`, `TerminalView.tsx`: font selection and remeasurement without reconnecting.
-- The upstream Rust bridge, protocol and command allow-list are unchanged.
+- `web/src/paneContextMenu.ts`, `TerminalView.tsx`, `App.tsx`: terminal context menus in both appearances, capability filtering, captured pane identity and local right-click passthrough. Shift+right-click, Shift+F10 and the ContextMenu key recover the menu. Passthrough resets on reload and does not alter native Herdr preferences.
+- `bridge/src/web_bridge.rs`: the allow-list now exposes `pane.zoom` with an explicit pane ID and `pane.swap` with two distinct explicit IDs; implicit/directional swap requests are rejected. The protocol and compatibility crate are unchanged. Upgrade the bridge together with the frontend to enable these two menu actions.
 
-## Verification (Windows, 2026-09-30)
+## Terminal menu verification (Windows, 2026-10-01)
+
+Clipboard follow-up: mouse selection copy was verified against the real Ghostty canvas and browser clipboard. Middle-button paste uses `Terminal.paste` (including bracketed paste), selects/focuses the clicked pane, and checks renderer/socket identity after asynchronous clipboard permission. Preview input was refused as intended, with no live terminal writes. Reading clipboard requires a browser-supported secure context (HTTPS or localhost) and permission. Unit tests cover one paste per pointer/mouse gesture, stale targets, rejected clipboard access, and focus/activation.
+
+- Frontend lint, all **454 tests** and the production build passed. Rust format, bridge build and the Git Bash vendor check passed. New zoom/swap validation tests pass.
+- Independent specification and code reviews found no blockers. Dialog submissions also revalidate connection, terminal identity and command capability.
+- Isolated preview: right-click on an inactive split pane, correct rename target, close confirmation/cancel, passthrough and Shift recovery, Shift+F10, Escape/focus return, and both appearances verified. Zoom reaches the preview's intentional mutation refusal. No real terminal actions were executed. Browser warning/error logs were empty. Screenshot: [terminal menu](images/terminal-context-menu.png).
+- Full bridge run: **137 passed / 17 failed**; the existing Windows notes/pins replacement failures and HOME-dependent workspace test remain. The root `npm run check` still stops at the Windows shell's direct `.sh` invocation; the vendor check passes through Git Bash. Temporary preview was stopped; ports 5173, 5174 and 8787 have no listeners.
+
+## Original theme verification (Windows, 2026-09-30)
 
 - Frontend ESLint: passed. Vitest: **440 tests passed**, including preference persistence, preview isolation, terminal connection retention and drag-scroll regression checks.
 - TypeScript and Vite production build: passed. The existing Ghostty bundle size warning remains. Confirmed `theme-preview.html` is absent from production output.

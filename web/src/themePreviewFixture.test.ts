@@ -35,7 +35,13 @@ describe("theme preview isolation", () => {
       method: "POST", body: JSON.stringify({ method: "workspace.close", params: {} }),
     })).status).toBe(403);
     const capabilities = await (await fixture.fetch("/api/capabilities")).json();
-    expect(capabilities.commands).toEqual(["workspace.focus", "tab.focus"]);
+    expect(capabilities.commands).toEqual(["workspace.focus", "tab.focus", "pane.rename", "pane.split", "pane.zoom", "pane.swap", "pane.close"]);
+    for (const method of capabilities.commands.filter((command: string) => command.startsWith("pane."))) {
+      expect((await fixture.fetch("/api/command", {
+        method: "POST", body: JSON.stringify({ method, params: { pane_id: "preview-claude" } }),
+      })).status).toBe(403);
+    }
+    expect(await (await fixture.fetch("/api/snapshot")).json()).toEqual(next);
     for (const [method, params, selectedPane] of [
       ["workspace.focus", { workspace_id: "preview-pipeline" }, "preview-codex"],
       ["tab.focus", { tab_id: "preview-tab-herdr" }, "preview-claude"],
