@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 
 export type Appearance = "tui" | "web";
 export const APPEARANCE_STORAGE_KEY = "herdr.web.appearance.v1";
@@ -55,4 +55,41 @@ function subscribe(listener: () => void) {
 
 export function useAppearance(): Appearance {
   return useSyncExternalStore(subscribe, readAppearance);
+}
+
+export function defaultDisplayScope(fallback: "space" | "all"): "space" | "all" {
+  return readAppearance() === "tui" ? "all" : fallback;
+}
+
+export function defaultSidebarWidth(fallback: number): number {
+  return readAppearance() === "tui" ? 240 : fallback;
+}
+
+// WHY: a theme change remeasures the live renderer without
+// detaching the session; under tui it also waits for the mono
+// webfont before the second measure.
+export function useAppearanceRefit(options: {
+  rendererReady: unknown;
+  resizeTerminal: (mode?: "fit" | "refresh") => void;
+}) {
+  const appearance = useAppearance();
+  const previousAppearanceRef = useRef(appearance);
+  useEffect(() => {
+    if (previousAppearanceRef.current === appearance) return;
+    previousAppearanceRef.current = appearance;
+    if (!options.rendererReady) return;
+    let cancelled = false;
+    options.resizeTerminal("refresh");
+    if (appearance === "tui") {
+      void document.fonts
+        ?.load('13px "Herdr Mono"')
+        .then(() => {
+          if (!cancelled) options.resizeTerminal("refresh");
+        })
+        .catch(() => undefined);
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [appearance, options.rendererReady, options.resizeTerminal]);
 }

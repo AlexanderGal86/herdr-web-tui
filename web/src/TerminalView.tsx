@@ -1,5 +1,5 @@
 import { useTerminalFocusRequest } from "./useTerminalFocusRequest";
-import { useAppearance } from "./appearance";
+import { useAppearanceRefit } from "./appearance";
 import { useCommandDraft } from "./commandDrafts";
 import {
   Copy,
@@ -201,8 +201,6 @@ export function TerminalView({
   selected = false,
   createTerminalRenderer = createGhosttyTerminalRenderer,
 }: Props) {
-  const appearance = useAppearance();
-  const previousAppearanceRef = useRef(appearance);
   const hostRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -1212,20 +1210,7 @@ export function TerminalView({
     resizeTerminal("refresh");
   }, [refitToken, resizeTerminal]);
 
-  useEffect(() => {
-    // A theme change remeasures the current renderer without detaching the session.
-    if (previousAppearanceRef.current === appearance) return;
-    previousAppearanceRef.current = appearance;
-    if (!rendererReady) return;
-    let cancelled = false;
-    resizeTerminal("refresh");
-    if (appearance === "tui") {
-      void document.fonts?.load('13px "Herdr Mono"').then(() => {
-        if (!cancelled) resizeTerminal("refresh");
-      }).catch(() => undefined);
-    }
-    return () => { cancelled = true; };
-  }, [appearance, rendererReady, resizeTerminal]);
+  useAppearanceRefit({ rendererReady, resizeTerminal });
 
   useEffect(() => {
     const terminalId = pane?.terminal_id ?? null;
