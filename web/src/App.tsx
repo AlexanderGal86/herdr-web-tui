@@ -214,6 +214,7 @@ import {
   workspaceReorderRoots,
 } from "./workspaceReorder";
 import type { WorkspaceReorderDirection } from "./workspaceReorder";
+import { TERMINAL_CONNECTION_LOST_EVENT } from "./terminalConnectionStatus";
 
 const NoteMarkdownPreview = lazy(() => import("./NoteMarkdownPreview"));
 
@@ -4596,6 +4597,8 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
 }
 
 const SNAPSHOT_REFRESH_INTERVAL_MS = 10000;
+
+const TERMINAL_CONNECTION_LOST_REFRESH_MIN_INTERVAL_MS = 500;
 const SHARED_SELECTION_SETTLE_TIMEOUT_MS = 2000;
 const NOTES_REFRESH_INTERVAL_MS = 15000;
 const MAX_PENDING_CREATED_PANE_NOTES = 32;
@@ -4747,6 +4750,20 @@ export function BridgeConnectionController({
       },
     });
     const refresh = () => refreshController.request();
+
+    // Terminal sockets close without a reason when the herdr server restarts
+    // (rotated terminal_ids). Resnapshot immediately instead of waiting for
+    // the periodic poll, throttled because several panes signal at once.
+    let lastTerminalLostRefreshAt = 0;
+    const handleTerminalConnectionLost = () => {
+      const now = Date.now();
+      if (now - lastTerminalLostRefreshAt < TERMINAL_CONNECTION_LOST_REFRESH_MIN_INTERVAL_MS) {
+        return;
+      }
+      lastTerminalLostRefreshAt = now;
+      refresh();
+    };
+    window.addEventListener(TERMINAL_CONNECTION_LOST_EVENT, handleTerminalConnectionLost);
     const requestActivityResync = () => {
       const currentRef = connectionRefs.current[runtime.id];
       if (!currentRef) {
@@ -4869,6 +4886,7 @@ export function BridgeConnectionController({
 
     return () => {
       disposed = true;
+      window.removeEventListener(TERMINAL_CONNECTION_LOST_EVENT, handleTerminalConnectionLost);
       events?.close();
       activity?.close();
       uiEvents?.close();

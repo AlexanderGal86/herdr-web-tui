@@ -4,6 +4,13 @@
 
 ### Breaking Changes
 
+### Fixed
+
+- Recover open panes within ~a second after a herdr server restart: terminal sockets
+  that close without a close reason now trigger an immediate snapshot refresh, so
+  panes remount on the rotated terminal ids instead of retrying the dead ones until
+  the 10-second periodic poll notices.
+
 ### Added
 
 - Add middle-button clipboard paste into the clicked terminal, activating its pane

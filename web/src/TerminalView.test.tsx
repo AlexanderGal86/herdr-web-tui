@@ -353,6 +353,14 @@ describe("TerminalView connection-lost signaling", () => {
   it("signals herdr-web:terminal-connection-lost when the socket closes unexpectedly", async () => {
     const drafts = createCommandDraftStore();
     await renderTerminalView(testPane("terminal-lost"), drafts);
+    const renderer = terminalRenderers[0];
+    if (!renderer) {
+      throw new Error("Expected the terminal renderer");
+    }
+    await act(async () => {
+      renderer.completeMount();
+      await Promise.resolve();
+    });
     const socket = FakeWebSocket.instances.at(-1);
     if (!socket) {
       throw new Error("Expected a terminal WebSocket");

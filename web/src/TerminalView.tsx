@@ -34,6 +34,7 @@ import {
   isTerminalAttachConflictClose,
   MAX_TERMINAL_ATTACH_CONFLICT_RETRIES,
   parseTerminalCloseReason,
+  TERMINAL_CONNECTION_LOST_EVENT,
   terminalConnectionCopy,
   terminalConnectionOverlayDelayMs,
 } from "./terminalConnectionStatus";
@@ -345,6 +346,7 @@ export function TerminalView({
         if (url) {
           // SAFETY: url is scheme-validated (http/https only) by
           // openableHttpUrl() in terminalSelection.ts before use.
+          // pi-lens-ignore: no-open-redirect -- validated above
           window.open(url, "_blank", "noopener,noreferrer");
         }
         return;
@@ -915,6 +917,12 @@ export function TerminalView({
           setConnectionState("closed");
           return;
         }
+        // A close without a reason means the bridge dropped the socket
+        // without a terminal close handshake — the herdr server went away
+        // (restart). Ask the app to resnapshot immediately so this pane
+        // remounts on the rotated terminal_id instead of retrying the dead
+        // one until the periodic poll notices.
+        window.dispatchEvent(new CustomEvent(TERMINAL_CONNECTION_LOST_EVENT));
         scheduleSocketReconnect("close", currentSocketGeneration);
       });
       nextSocket.addEventListener("error", () => {
@@ -1257,6 +1265,7 @@ export function TerminalView({
     if (url) {
       // SAFETY: url is scheme-validated (http/https only) by
       // openableHttpUrl() in terminalSelection.ts before use.
+      // pi-lens-ignore: no-open-redirect -- validated above
       window.open(url, "_blank", "noopener,noreferrer");
     } else {
       void copyText(mobileSelectionAction.text, "Copied selection");
