@@ -135,6 +135,7 @@ type Props = {
   /** Whether this is the currently selected terminal in a split. */
   selected?: boolean;
   onContextMenu?: (x: number, y: number) => void;
+  onActivate?: () => void;
   rightClickPassthrough?: boolean;
   /** Creates a terminal renderer for each mounted terminal pane. */
   createTerminalRenderer?: TerminalRendererFactory;
@@ -203,12 +204,14 @@ export function TerminalView({
   accessibilityLabel = "Terminal",
   selected = false,
   onContextMenu,
+  onActivate,
   rightClickPassthrough = false,
   createTerminalRenderer = createGhosttyTerminalRenderer,
 }: Props) {
   const appearance = useAppearance();
   const previousAppearanceRef = useRef(appearance);
   const contextKeyRef = useRef<string | null>(null);
+  const middlePointerDownRef = useRef(false);
   const contextGestureRef = useRef({ pointerDown: false, blocked: false, opened: false });
   const hostRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLElement | null>(null);
@@ -1419,7 +1422,44 @@ export function TerminalView({
     onContextMenu?.(x, y);
   };
 
+  const pasteClipboard = async () => {
+    onActivate?.();
+    const input = hostRef.current?.querySelector<HTMLElement>("textarea, input");
+    if (input) focusOverlayTrigger(input);
+    const renderer = rendererRef.current;
+    const socket = socketRef.current;
+    if (!renderer || !socket || socket.readyState !== WebSocket.OPEN || terminalInputBlockedRef.current) {
+      showUploadStatus("Terminal detached", 2500);
+      return;
+    }
+    try {
+      if (!navigator.clipboard?.readText) throw new Error("Clipboard API unavailable");
+      const text = await navigator.clipboard.readText();
+      // Permission prompts may outlive the pane or its connection.
+      if (rendererRef.current !== renderer || socketRef.current !== socket ||
+          socket.readyState !== WebSocket.OPEN || terminalInputBlockedRef.current) return;
+      if (text) renderer.paste(text);
+    } catch {
+      if (rendererRef.current === renderer && socketRef.current === socket) {
+        showUploadStatus("Clipboard unavailable. Allow clipboard access or use Ctrl+Shift+V.", 4500);
+      }
+    }
+  };
+
   const captureTerminalMouse = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (event.button === 1) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.type === "pointerdown") {
+        middlePointerDownRef.current = true;
+        void pasteClipboard();
+      } else if (event.type === "mousedown" && !middlePointerDownRef.current) {
+        void pasteClipboard();
+      } else if (event.type === "pointerup" || event.type === "mouseup") {
+        middlePointerDownRef.current = false;
+      }
+      return;
+    }
     if (!onContextMenu || event.button !== 2) return;
     if ("pointerType" in event.nativeEvent && event.nativeEvent.pointerType === "touch") return;
     const gesture = contextGestureRef.current;
@@ -1486,6 +1526,7 @@ export function TerminalView({
         onPointerUpCapture={captureTerminalMouse}
         onMouseDownCapture={captureTerminalMouse}
         onMouseUpCapture={captureTerminalMouse}
+        onAuxClickCapture={captureTerminalMouse}
         onContextMenuCapture={captureTerminalContextMenu}
         onKeyDownCapture={captureTerminalContextKey}
         onKeyUpCapture={captureTerminalContextKey}

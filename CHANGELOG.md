@@ -6,6 +6,10 @@
 
 ### Added
 
+- Add middle-button clipboard paste into the clicked terminal, activating its pane
+  and preserving native bracketed paste. Retain Ghostty's automatic copy on selection.
+  Reject delayed clipboard results when the target terminal or connection changes.
+
 - Add terminal right-click menus in both appearances, matching Herdr's rename/reset,
   split, zoom, swap and close actions. Support keyboard invocation and per-terminal
   right-click passthrough with Shift+right-click recovery. Expose only explicitly

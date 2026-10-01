@@ -67,6 +67,8 @@ The website scales a fixed illustration with its width. This app uses readable t
 
 ## Terminal menu verification (Windows, 2026-10-01)
 
+Clipboard follow-up: mouse selection copy was verified against the real Ghostty canvas and browser clipboard. Middle-button paste uses `Terminal.paste` (including bracketed paste), selects/focuses the clicked pane, and checks renderer/socket identity after asynchronous clipboard permission. Preview input was refused as intended, with no live terminal writes. Reading clipboard requires a browser-supported secure context (HTTPS or localhost) and permission. Unit tests cover one paste per pointer/mouse gesture, stale targets, rejected clipboard access, and focus/activation.
+
 - Frontend lint, all **454 tests** and the production build passed. Rust format, bridge build and the Git Bash vendor check passed. New zoom/swap validation tests pass.
 - Independent specification and code reviews found no blockers. Dialog submissions also revalidate connection, terminal identity and command capability.
 - Isolated preview: right-click on an inactive split pane, correct rename target, close confirmation/cancel, passthrough and Shift recovery, Shift+F10, Escape/focus return, and both appearances verified. Zoom reaches the preview's intentional mutation refusal. No real terminal actions were executed. Browser warning/error logs were empty. Screenshot: [terminal menu](images/terminal-context-menu.png).

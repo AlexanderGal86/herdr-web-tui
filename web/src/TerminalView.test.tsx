@@ -75,6 +75,8 @@ class FakeTerminalRenderer implements TerminalRenderer {
 
   clearSelection() {}
 
+  paste = vi.fn();
+
   setScrollSensitivity() {}
 
   dispose() {}
@@ -349,14 +351,15 @@ function testPane(terminalId: string): PaneInfo {
 describe("TerminalView context menu capture", () => {
   async function mountMenu(rightClickPassthrough = false) {
     const onContextMenu = vi.fn();
+    const onActivate = vi.fn();
     const drafts = createCommandDraftStore();
     const pane = testPane("terminal-menu");
-    const root = await renderTerminalView(pane, drafts, { onContextMenu, rightClickPassthrough });
+    const root = await renderTerminalView(pane, drafts, { onContextMenu, onActivate, rightClickPassthrough });
     const renderer = terminalRenderers[0]!;
     await act(async () => renderer.completeMount());
     const socket = FakeWebSocket.instances.at(-1)!;
     await act(async () => socket.open());
-    return { onContextMenu, renderer, socket, root, drafts, pane };
+    return { onContextMenu, onActivate, renderer, socket, root, drafts, pane };
   }
 
   function mouse(input: HTMLElement, type: string, init: MouseEventInit = {}) {
@@ -364,6 +367,42 @@ describe("TerminalView context menu capture", () => {
     input.dispatchEvent(event);
     return event;
   }
+
+  it("pastes middle-click clipboard text once and intercepts native mouse input", async () => {
+    const readText = vi.fn().mockResolvedValue("one\ntwo");
+    vi.stubGlobal("navigator", { clipboard: { readText } });
+    const { renderer, onContextMenu, onActivate } = await mountMenu();
+    await act(async () => {
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "auxclick"]) {
+        expect(mouse(renderer.input, type, { button: 1 }).defaultPrevented).toBe(true);
+      }
+    });
+    expect(readText).toHaveBeenCalledOnce();
+    expect(renderer.paste).toHaveBeenCalledExactlyOnceWith("one\ntwo");
+    expect(onActivate).toHaveBeenCalledOnce();
+    expect(document.activeElement).toBe(renderer.input);
+    expect(renderer.childEvents).not.toHaveBeenCalled();
+    expect(onContextMenu).not.toHaveBeenCalled();
+  });
+
+  it("does not paste after the target terminal is replaced while clipboard access is pending", async () => {
+    let resolveRead!: (text: string) => void;
+    vi.stubGlobal("navigator", { clipboard: { readText: () => new Promise<string>(resolve => { resolveRead = resolve; }) } });
+    const { renderer, root, drafts } = await mountMenu();
+    await act(async () => { mouse(renderer.input, "mousedown", { button: 1 }); });
+    await renderPane(root, testPane("replacement"), drafts);
+    await act(async () => resolveRead("do not send"));
+    expect(renderer.paste).not.toHaveBeenCalled();
+    expect(terminalRenderers.at(-1)!.paste).not.toHaveBeenCalled();
+  });
+
+  it("reports denied clipboard access without sending input", async () => {
+    vi.stubGlobal("navigator", { clipboard: { readText: vi.fn().mockRejectedValue(new Error("denied")) } });
+    const { renderer } = await mountMenu();
+    await act(async () => { mouse(renderer.input, "mousedown", { button: 1 }); });
+    expect(renderer.paste).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("Clipboard unavailable");
+  });
 
   it("blocks right mouse and pointer input before native child capture, preserves focus target and connection", async () => {
     const { onContextMenu, renderer, socket, root, drafts, pane } = await mountMenu();

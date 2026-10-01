@@ -6090,6 +6090,7 @@ function SplitGrid({
               bridgeId={bridgeId}
               pane={pane}
               onContextMenu={(x, y) => onPaneContextMenu(pane, x, y)}
+              onActivate={() => onSelectPane(pane)}
               rightClickPassthrough={isRightClickPassthrough(pane)}
               connectionKey={connectionKey}
               resumeToken={resumeToken}
