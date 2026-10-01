@@ -46,14 +46,10 @@ import {
 } from "./terminalImeInput";
 import type { TerminalImeState } from "./terminalImeInput";
 import { installTerminalImeFocusRedirect } from "./terminalImeFocus";
+import { terminalFontFamily } from "./terminalFont";
 
 const TERMINAL_FONT_FAMILY =
   'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "DejaVu Sans Mono", "JetBrainsMono Nerd Font Mono", monospace';
-
-function terminalFontFamily() {
-  return getComputedStyle(document.documentElement).getPropertyValue("--mono").trim() ||
-    TERMINAL_FONT_FAMILY;
-}
 const TERMINAL_TEXT_INPUT_TAP_GRACE_MS = 4000;
 const TOUCH_SELECTION_LONG_PRESS_MS = 600;
 const TOUCH_SELECTION_TOLERANCE_PX = 10;
@@ -204,7 +200,7 @@ export class GhosttyRenderer implements TerminalRenderer {
     const terminal = new Terminal({
       convertEol: false,
       cursorBlink: this.#cursorBlink,
-      fontFamily: terminalFontFamily(),
+      fontFamily: terminalFontFamily(TERMINAL_FONT_FAMILY),
       fontSize: this.#fontSizePx,
       scrollback: 8000,
       smoothScrollDuration: 0,
@@ -321,7 +317,7 @@ export class GhosttyRenderer implements TerminalRenderer {
     const terminal = this.#requireTerminal();
     return refreshTerminalFontRendering(
       terminal,
-      terminalFontFamily(),
+      terminalFontFamily(TERMINAL_FONT_FAMILY),
       this.#fontSizePx,
       () => this.fit(),
     );
@@ -1610,7 +1606,7 @@ function positionGhosttyTextareaForInput(
   textarea.style.background = "transparent";
   textarea.style.caretColor = "transparent";
   textarea.style.overflow = "hidden";
-  textarea.style.fontFamily = terminalFontFamily();
+  textarea.style.fontFamily = terminalFontFamily(TERMINAL_FONT_FAMILY);
   textarea.style.fontSize = `${anchor.fontSizePx}px`;
   textarea.style.lineHeight = `${anchor.height}px`;
   textarea.style.zIndex = "5";
@@ -1647,7 +1643,7 @@ function updateImePreeditOverlay(
   overlay.style.left = `${anchorLeft}px`;
   overlay.style.top = `${anchorTop}px`;
   overlay.style.maxWidth = `${maxWidth}px`;
-  overlay.style.fontFamily = terminalFontFamily();
+  overlay.style.fontFamily = terminalFontFamily(TERMINAL_FONT_FAMILY);
   overlay.style.fontSize = `${fontSize}px`;
   overlay.style.lineHeight = lineHeight;
   overlay.style.minHeight = lineHeight;
