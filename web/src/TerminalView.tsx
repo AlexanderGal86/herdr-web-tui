@@ -1,3 +1,4 @@
+import { focusOverlayTrigger } from "./overlayFocus";
 import { useTerminalFocusRequest } from "./useTerminalFocusRequest";
 import { useAppearance } from "./appearance";
 import { useCommandDraft } from "./commandDrafts";
@@ -14,7 +15,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
-import type { ChangeEvent, ClipboardEvent, DragEvent, KeyboardEvent, PointerEvent as ReactPointerEvent, RefObject } from "react";
+import type { ChangeEvent, ClipboardEvent, DragEvent, KeyboardEvent, PointerEvent as ReactPointerEvent, MouseEvent as ReactMouseEvent, RefObject } from "react";
 import { autosizeMobileCommandTextarea } from "./mobileCommandTextarea";
 import {
   encodeMobileTerminalChord,
@@ -133,6 +134,8 @@ type Props = {
   accessibilityLabel?: string;
   /** Whether this is the currently selected terminal in a split. */
   selected?: boolean;
+  onContextMenu?: (x: number, y: number) => void;
+  rightClickPassthrough?: boolean;
   /** Creates a terminal renderer for each mounted terminal pane. */
   createTerminalRenderer?: TerminalRendererFactory;
 };
@@ -199,10 +202,14 @@ export function TerminalView({
   autoRenameUploadConflicts = true,
   accessibilityLabel = "Terminal",
   selected = false,
+  onContextMenu,
+  rightClickPassthrough = false,
   createTerminalRenderer = createGhosttyTerminalRenderer,
 }: Props) {
   const appearance = useAppearance();
   const previousAppearanceRef = useRef(appearance);
+  const contextKeyRef = useRef<string | null>(null);
+  const contextGestureRef = useRef({ pointerDown: false, blocked: false, opened: false });
   const hostRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -1404,6 +1411,58 @@ export function TerminalView({
     return true;
   };
 
+  const openTerminalContextMenu = (x: number, y: number) => {
+    // Capture the invoking pane for useFocusReturn without renderer focusTextInput's
+    // deferred refocus, which would otherwise steal focus back from the menu.
+    const input = hostRef.current?.querySelector<HTMLElement>("textarea, input");
+    if (input) focusOverlayTrigger(input);
+    onContextMenu?.(x, y);
+  };
+
+  const captureTerminalMouse = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (!onContextMenu || event.button !== 2) return;
+    if ("pointerType" in event.nativeEvent && event.nativeEvent.pointerType === "touch") return;
+    const gesture = contextGestureRef.current;
+    const down = event.type === "pointerdown" || event.type === "mousedown";
+    if (down) {
+      if (event.type === "pointerdown" || !gesture.pointerDown) {
+        gesture.blocked = !rightClickPassthrough || event.shiftKey;
+        gesture.opened = false;
+      }
+      gesture.pointerDown = event.type === "pointerdown";
+    }
+    if (!gesture.blocked && rightClickPassthrough && !event.shiftKey) return;
+    event.preventDefault();
+    event.stopPropagation();
+    // Firefox does not emit contextmenu for Shift+right-click.
+    if (down && event.shiftKey && !gesture.opened) {
+      gesture.opened = true;
+      openTerminalContextMenu(event.clientX, event.clientY);
+    }
+    if (!down) gesture.pointerDown = false;
+  };
+
+  const captureTerminalContextMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (!onContextMenu) return;
+    if ("pointerType" in event.nativeEvent && event.nativeEvent.pointerType === "touch") return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (contextGestureRef.current.opened || (rightClickPassthrough && !event.shiftKey)) return;
+    openTerminalContextMenu(event.clientX, event.clientY);
+  };
+
+  const captureTerminalContextKey = (event: KeyboardEvent<HTMLDivElement>) => {
+    const capturedRelease = event.type === "keyup" && contextKeyRef.current === event.key;
+    if (!onContextMenu || !(capturedRelease || event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey))) return;
+    contextKeyRef.current = event.type === "keydown" ? event.key : null;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.type === "keydown" && !event.repeat) {
+      const bounds = event.currentTarget.getBoundingClientRect();
+      openTerminalContextMenu(bounds.left + 12, bounds.top + 12);
+    }
+  };
+
   const showCommandControls = mobileControls || desktopCommandComposer;
 
   return (
@@ -1420,7 +1479,17 @@ export function TerminalView({
       onDropCapture={handleDrop}
       onPasteCapture={handlePaste}
     >
-      <div ref={hostRef} className="terminal-host" />
+      <div
+        ref={hostRef}
+        className="terminal-host"
+        onPointerDownCapture={captureTerminalMouse}
+        onPointerUpCapture={captureTerminalMouse}
+        onMouseDownCapture={captureTerminalMouse}
+        onMouseUpCapture={captureTerminalMouse}
+        onContextMenuCapture={captureTerminalContextMenu}
+        onKeyDownCapture={captureTerminalContextKey}
+        onKeyUpCapture={captureTerminalContextKey}
+      />
       {pane && terminalScreenReaderText ? (
         <div
           className="terminal-accessible-screen sr-only"

@@ -1,5 +1,7 @@
 import { CommandDraftContext, createCommandDraftStore } from "./commandDrafts";
 import { linkedWorkspaceLabels } from "./workspaceClose";
+import { terminalMenuTarget, terminalPaneMenuItems, terminalPreferenceKey } from "./paneContextMenu";
+import type { TerminalMenuTarget } from "./paneContextMenu";
 import {
   Activity,
   Archive,
@@ -397,6 +399,7 @@ type MenuState = {
   y: number;
   clearable?: boolean;
   pinLabel?: "agent" | "pane";
+  terminalContext?: TerminalMenuTarget & { sourcePaneId?: string; sourceTerminalId?: string };
 };
 type DialogState = {
   mode: "rename" | "close";
@@ -406,6 +409,7 @@ type DialogState = {
   label: string;
   clearable?: boolean;
   linkedWorkspaceLabels?: string[];
+  terminalContext?: TerminalMenuTarget;
 };
 type DisplayPrefs = {
   hostScope: HostScope;
@@ -1080,6 +1084,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
   const [sidebarOpen, setSidebarOpen] = useState(initialPrefs.sidebarOpen);
   const [showDetail, setShowDetail] = useState(false);
   const [menu, setMenu] = useState<MenuState | null>(null);
+  const [rightClickTerminals, setRightClickTerminals] = useState<ReadonlySet<string>>(() => new Set());
   const [spaceReorderMode, setSpaceReorderMode] = useState<SpaceReorderMode | null>(null);
   const [spaceReorderAnnouncement, setSpaceReorderAnnouncement] = useState("");
   const spaceReorderAnnouncementFrameRef = useRef<number | null>(null);
@@ -1562,7 +1567,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
   const menuPanePinned = menu
     ? isAgentPinned(pinnedAgentKeys, menu.bridgeId, menu.id)
     : false;
-  const activeMenuItems = menu
+  const baseMenuItems = menu
     ? menuItems(
         menu.kind,
         menuPaneMoveSupported,
@@ -1574,6 +1579,24 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
         menuWorkspaceReorderSupported,
       )
     : [];
+  const terminalMenuPane = menu?.terminalContext
+    ? terminalMenuTarget(menu.terminalContext, menuRuntime?.connectionKey ?? "", menuConnectionState?.snapshot?.panes ?? [])
+    : undefined;
+  const terminalMenuSource = menu?.terminalContext?.sourcePaneId
+    ? menuConnectionState?.snapshot?.panes.find(pane =>
+        pane.pane_id === menu.terminalContext?.sourcePaneId && pane.terminal_id === menu.terminalContext?.sourceTerminalId)
+    : undefined;
+  const activeMenuItems = menu?.terminalContext
+    ? terminalPaneMenuItems({
+        pane: terminalMenuPane,
+        source: terminalMenuSource,
+        commands: menuSupportedCommands,
+        zoomed: Boolean(menuConnectionState?.snapshot?.layouts.find(layout =>
+          layout.workspace_id === terminalMenuPane?.workspace_id && layout.tab_id === terminalMenuPane?.tab_id)?.zoomed),
+        passthrough: rightClickTerminals.has(terminalPreferenceKey(menu.bridgeId, menu.terminalContext.connectionKey, menu.terminalContext.terminalId)),
+        extras: baseMenuItems,
+      })
+    : baseMenuItems;
 
   useEffect(() => {
     if (menu && activeMenuItems.length === 0) {
@@ -2236,6 +2259,19 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
     }
   };
   const selectedPaneMenuPress = useLongPress(openSelectedPaneMenu, openSelectedPaneMenu);
+  const openTerminalPaneMenu = (pane: PaneInfo, x: number, y: number) => {
+    if (!selectedRuntime) return;
+    setMenu({
+      kind: "pane", bridgeId: selectedRuntime.id, id: pane.pane_id, label: paneTitle(pane), x, y,
+      pinLabel: isAgentPane(pane) ? "agent" : "pane",
+      terminalContext: {
+        id: pane.pane_id, terminalId: pane.terminal_id, connectionKey: selectedRuntime.connectionKey,
+        sourcePaneId: selectedPane?.pane_id, sourceTerminalId: selectedPane?.terminal_id,
+      },
+    });
+  };
+  const isTerminalRightClickPassthrough = (pane: PaneInfo) => Boolean(selectedRuntime &&
+    rightClickTerminals.has(terminalPreferenceKey(selectedRuntime.id, selectedRuntime.connectionKey, pane.terminal_id)));
 
   useEffect(() => {
     if (isCompactLayout) {
@@ -3643,13 +3679,56 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
     const runtime = bridge.getRuntime(bridgeId);
     const commands = runtime ? createCommands(runtime.httpUrl) : null;
     setMenu(null);
+    if (menu.terminalContext) {
+      const currentConnection = connectionRefs.current[bridgeId];
+      const target = terminalMenuTarget(menu.terminalContext, currentConnection?.connectionKey ?? "", currentConnection?.snapshot?.panes ?? []);
+      if (!target || runtime?.connectionKey !== menu.terminalContext.connectionKey || !activeMenuItems.some(item => item.key === key)) {
+        setError("This terminal is no longer available. Reopen the pane menu.");
+        return;
+      }
+      if (key === "toggle_right_click") {
+        const preferenceKey = terminalPreferenceKey(bridgeId, menu.terminalContext.connectionKey, target.terminal_id);
+        setRightClickTerminals(current => {
+          const next = new Set(current);
+          if (next.has(preferenceKey)) next.delete(preferenceKey); else next.add(preferenceKey);
+          return next;
+        });
+        return;
+      }
+      if (!commands || !menuCommandsReady) {
+        setError("Bridge is not ready");
+        return;
+      }
+      if (key === "clear_name") {
+        void exec(runtime, () => commands.renamePane(id, null));
+        return;
+      }
+      if (key === "split_right" || key === "split_down") {
+        void exec(runtime, () => commands.splitPane(id, key === "split_right" ? "right" : "down"), true);
+        return;
+      }
+      if (key === "zoom") {
+        void exec(runtime, () => commands.zoomPane(id), true);
+        return;
+      }
+      if (key === "swap") {
+        const source = currentConnection?.snapshot?.panes.find(pane =>
+          pane.pane_id === menu.terminalContext?.sourcePaneId && pane.terminal_id === menu.terminalContext?.sourceTerminalId);
+        if (!source || source.pane_id === id || source.tab_id !== target.tab_id || source.workspace_id !== target.workspace_id) {
+          setError("The source pane is no longer available in this tab.");
+          return;
+        }
+        void exec(runtime, () => commands.swapPanes(source.pane_id, id));
+        return;
+      }
+    }
     if (key === "rename") {
-      setDialog({ mode: "rename", kind, bridgeId, id, label, clearable });
+      setDialog({ mode: "rename", kind, bridgeId, id, label: menu.terminalContext ? terminalMenuPane?.label ?? "" : label, clearable, terminalContext: menu.terminalContext });
     } else if (key === "close") {
       const linkedLabels = kind === "space"
         ? linkedWorkspaceLabels(connectionRefs.current[bridgeId]?.snapshot?.workspaces ?? [], id)
         : [];
-      setDialog({ mode: "close", kind, bridgeId, id, label, linkedWorkspaceLabels: linkedLabels });
+      setDialog({ mode: "close", kind, bridgeId, id, label, linkedWorkspaceLabels: linkedLabels, terminalContext: menu.terminalContext });
     } else if (key === "newtab") {
       setSelectedBridgeId(bridgeId);
       setActiveWorkspaceRefState({ bridgeId, workspaceId: id });
@@ -3689,6 +3768,14 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
     }
     const { kind, bridgeId, id } = dialog;
     const runtime = bridge.getRuntime(bridgeId);
+    const connection = connectionRefs.current[bridgeId];
+    if (dialog.terminalContext && (runtime?.connectionKey !== connection?.connectionKey ||
+        !runtime?.capabilities?.commands.includes("pane.rename") ||
+        !terminalMenuTarget(dialog.terminalContext, connection?.connectionKey ?? "", connection?.snapshot?.panes ?? []))) {
+      setError("This terminal is no longer available. Reopen the pane menu.");
+      setDialog(null);
+      return;
+    }
     const commands = runtime ? createCommands(runtime.httpUrl) : null;
     if (!commands) {
       setError("Bridge is not ready");
@@ -3727,6 +3814,14 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
     }
     const { kind, bridgeId, id } = dialog;
     const runtime = bridge.getRuntime(bridgeId);
+    const connection = connectionRefs.current[bridgeId];
+    if (dialog.terminalContext && (runtime?.connectionKey !== connection?.connectionKey ||
+        !runtime?.capabilities?.commands.includes("pane.close") ||
+        !terminalMenuTarget(dialog.terminalContext, connection?.connectionKey ?? "", connection?.snapshot?.panes ?? []))) {
+      setError("This terminal is no longer available. Reopen the pane menu.");
+      setDialog(null);
+      return;
+    }
     const commands = runtime ? createCommands(runtime.httpUrl) : null;
     if (!commands) {
       setError("Bridge is not ready");
@@ -4151,6 +4246,8 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
         {showSplit && splitCells ? (
           <SplitGrid
             bridgeId={selectedRuntime?.id ?? ""}
+            onPaneContextMenu={openTerminalPaneMenu}
+            isRightClickPassthrough={isTerminalRightClickPassthrough}
             cells={splitCells}
             selectedPaneId={selectedPane?.pane_id ?? null}
             onSelectPane={(pane) => {
@@ -4189,6 +4286,8 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
           <TerminalView
             bridgeId={selectedRuntime?.id ?? ""}
             pane={selectedPane}
+            onContextMenu={selectedPane ? (x, y) => openTerminalPaneMenu(selectedPane, x, y) : undefined}
+            rightClickPassthrough={selectedPane ? isTerminalRightClickPassthrough(selectedPane) : false}
             connectionKey={selectedRuntime?.connectionKey ?? "disconnected"}
             resumeToken={selectedRuntime?.resumeToken ?? 0}
             httpUrl={selectedHttpUrl}
@@ -5914,6 +6013,8 @@ function hasOpenModal() {
 
 function SplitGrid({
   bridgeId,
+  onPaneContextMenu,
+  isRightClickPassthrough,
   cells,
   selectedPaneId,
   onSelectPane,
@@ -5942,6 +6043,8 @@ function SplitGrid({
   wsUrl,
 }: {
   bridgeId: string;
+  onPaneContextMenu: (pane: PaneInfo, x: number, y: number) => void;
+  isRightClickPassthrough: (pane: PaneInfo) => boolean;
   cells: { pane: PaneInfo; style: CSSProperties }[];
   selectedPaneId: string | null;
   onSelectPane: (pane: PaneInfo) => void;
@@ -5986,6 +6089,8 @@ function SplitGrid({
             <TerminalView
               bridgeId={bridgeId}
               pane={pane}
+              onContextMenu={(x, y) => onPaneContextMenu(pane, x, y)}
+              rightClickPassthrough={isRightClickPassthrough(pane)}
               connectionKey={connectionKey}
               resumeToken={resumeToken}
               httpUrl={httpUrl}

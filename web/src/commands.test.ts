@@ -6,11 +6,28 @@ import {
 } from "./commands";
 
 describe("command helpers", () => {
+  it("targets pane layout operations explicitly on the selected bridge", async () => {
+    const requests: unknown[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      requests.push({ input, body: JSON.parse(String(init?.body)) });
+      return new Response(JSON.stringify({ type: "ok" }), { status: 200 });
+    });
+    const api = createCommands(path => `http://chosen-bridge:8787${path}`);
+    await api.zoomPane("clicked", "toggle");
+    await api.swapPanes("focused", "clicked");
+    await api.renamePane("clicked", null);
+    expect(requests).toEqual([
+      { input: "http://chosen-bridge:8787/api/command", body: { method: "pane.zoom", params: { pane_id: "clicked", mode: "toggle" } } },
+      { input: "http://chosen-bridge:8787/api/command", body: { method: "pane.swap", params: { source_pane_id: "focused", target_pane_id: "clicked" } } },
+      { input: "http://chosen-bridge:8787/api/command", body: { method: "pane.rename", params: { pane_id: "clicked", label: null } } },
+    ]);
+  });
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
   it("finds created pane ids from supported response shapes", () => {
+    expect(createdPaneId({ zoom: { pane_id: "zoomed" } })).toBe("zoomed");
     expect(createdPaneId({ pane_id: "top" })).toBe("top");
     expect(createdPaneId({ root_pane: { pane_id: "root" } })).toBe("root");
     expect(createdPaneId({ pane: { pane_id: "pane" } })).toBe("pane");

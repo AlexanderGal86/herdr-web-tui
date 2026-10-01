@@ -118,7 +118,8 @@ export function createThemePreviewFixture(origin: string, onNotice: (message: st
     const method = (init?.method ?? request?.method ?? "GET").toUpperCase();
     if (url.origin !== baseUrl.origin || url.username || url.password) return denied();
     if (method === "GET" && url.pathname === "/api/capabilities") {
-      return reply({ commands: ["workspace.focus", "tab.focus"], web_compat: 1, bridge_version: "theme-preview" });
+      // Show the real pane menu; mutation requests below remain refused.
+      return reply({ commands: ["workspace.focus", "tab.focus", "pane.rename", "pane.split", "pane.zoom", "pane.swap", "pane.close"], web_compat: 1, bridge_version: "theme-preview" });
     }
     if (method === "GET" && url.pathname === "/api/snapshot") return reply(snapshot);
     if (method === "POST" && ["/api/selection", "/api/command"].includes(url.pathname)) {

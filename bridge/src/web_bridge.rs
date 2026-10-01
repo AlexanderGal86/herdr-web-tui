@@ -1460,6 +1460,9 @@ const ALLOWED_COMMANDS: &[&str] = &[
     "pane.close",
     // Layout-mutating: the web client builds splits directly.
     "pane.split",
+    // Context-menu layout actions require explicit pane targets.
+    "pane.zoom",
+    "pane.swap",
     // Directional pane focus: explicit pane_id only, matching the web selection.
     "pane.focus_direction",
     // Narrow live pane moves: new tab or new workspace destinations only.
@@ -1771,6 +1774,36 @@ fn validate_web_command(method: &Method) -> Result<(), BridgeError> {
             {
                 return Err(BridgeError::BadRequest(
                     "pane.split supports only target pane, direction, and focus through herdr-web"
+                        .to_string(),
+                ));
+            }
+        }
+        Method::PaneZoom(params) => {
+            if params
+                .pane_id
+                .as_deref()
+                .is_none_or(|pane_id| pane_id.trim().is_empty())
+            {
+                return Err(BridgeError::BadRequest(
+                    "pane.zoom requires pane_id".to_string(),
+                ));
+            }
+        }
+        Method::PaneSwap(params) => {
+            if params
+                .source_pane_id
+                .as_deref()
+                .is_none_or(|pane_id| pane_id.trim().is_empty())
+                || params
+                    .target_pane_id
+                    .as_deref()
+                    .is_none_or(|pane_id| pane_id.trim().is_empty())
+                || params.source_pane_id == params.target_pane_id
+                || params.pane_id.is_some()
+                || params.direction.is_some()
+            {
+                return Err(BridgeError::BadRequest(
+                    "pane.swap requires distinct source_pane_id and target_pane_id without pane_id or direction through herdr-web"
                         .to_string(),
                 ));
             }
@@ -6503,6 +6536,69 @@ mod tests {
         }))
         .unwrap();
         assert!(validate_web_command(&request.method).is_err());
+    }
+
+    #[test]
+    fn validates_narrow_pane_zoom_commands() {
+        assert!(ALLOWED_COMMANDS.contains(&"pane.zoom"));
+        for params in [
+            serde_json::json!({"pane_id": "w1:p1"}),
+            serde_json::json!({"pane_id": "w1:p1", "mode": "toggle"}),
+            serde_json::json!({"pane_id": "w1:p1", "mode": "on"}),
+            serde_json::json!({"pane_id": "w1:p1", "mode": "off"}),
+        ] {
+            let request: Request = serde_json::from_value(serde_json::json!({
+                "id": "test", "method": "pane.zoom", "params": params
+            }))
+            .unwrap();
+            assert!(validate_web_command(&request.method).is_ok());
+        }
+        for params in [
+            serde_json::json!({}),
+            serde_json::json!({"pane_id": null}),
+            serde_json::json!({"pane_id": ""}),
+            serde_json::json!({"pane_id": " \t"}),
+        ] {
+            let request: Request = serde_json::from_value(serde_json::json!({
+                "id": "test", "method": "pane.zoom", "params": params
+            }))
+            .unwrap();
+            assert!(validate_web_command(&request.method).is_err());
+        }
+        assert!(serde_json::from_value::<Request>(serde_json::json!({
+            "id": "test", "method": "pane.zoom",
+            "params": {"pane_id": "w1:p1", "mode": "invalid"}
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn validates_narrow_pane_swap_commands() {
+        assert!(ALLOWED_COMMANDS.contains(&"pane.swap"));
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": "test", "method": "pane.swap",
+            "params": {"source_pane_id": "w1:p1", "target_pane_id": "w1:p2"}
+        }))
+        .unwrap();
+        assert!(validate_web_command(&request.method).is_ok());
+        for params in [
+            serde_json::json!({}),
+            serde_json::json!({"source_pane_id": "w1:p1"}),
+            serde_json::json!({"target_pane_id": "w1:p2"}),
+            serde_json::json!({"source_pane_id": null, "target_pane_id": "w1:p2"}),
+            serde_json::json!({"source_pane_id": "", "target_pane_id": "w1:p2"}),
+            serde_json::json!({"source_pane_id": "w1:p1", "target_pane_id": " \t"}),
+            serde_json::json!({"source_pane_id": "w1:p1", "target_pane_id": "w1:p1"}),
+            serde_json::json!({"pane_id": "w1:p1", "direction": "right"}),
+            serde_json::json!({"source_pane_id": "w1:p1", "target_pane_id": "w1:p2", "pane_id": "w1:p1"}),
+            serde_json::json!({"source_pane_id": "w1:p1", "target_pane_id": "w1:p2", "direction": "right"}),
+        ] {
+            let request: Request = serde_json::from_value(serde_json::json!({
+                "id": "test", "method": "pane.swap", "params": params
+            }))
+            .unwrap();
+            assert!(validate_web_command(&request.method).is_err());
+        }
     }
 
     #[test]
