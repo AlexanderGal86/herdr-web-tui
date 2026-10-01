@@ -333,6 +333,8 @@ export function TerminalView({
       if (event.type === "url") {
         const url = openableHttpUrl(event.url);
         if (url) {
+          // SAFETY: url is scheme-validated (http/https only) by
+          // openableHttpUrl() in terminalSelection.ts before use.
           window.open(url, "_blank", "noopener,noreferrer");
         }
         return;
@@ -1243,6 +1245,8 @@ export function TerminalView({
     }
     const url = openableHttpUrl(mobileSelectionAction.url);
     if (url) {
+      // SAFETY: url is scheme-validated (http/https only) by
+      // openableHttpUrl() in terminalSelection.ts before use.
       window.open(url, "_blank", "noopener,noreferrer");
     } else {
       void copyText(mobileSelectionAction.text, "Copied selection");

@@ -1,6 +1,7 @@
 import type { FitAddon, Terminal } from "ghostty-web";
 import {
   findFirstUrlInSelection,
+  openableHttpUrl,
   terminalSelectionRange,
   terminalUrlTapTarget,
   trimUrlPunctuation,
@@ -1186,7 +1187,13 @@ export class GhosttyRenderer implements TerminalRenderer {
         event.stopImmediatePropagation();
       }
       terminal.textarea?.blur();
-      window.open(linkText, "_blank", "noopener,noreferrer");
+      const url = openableHttpUrl(linkText);
+      if (url) {
+        // SAFETY: url is scheme-validated (http/https only) by
+        // openableHttpUrl() immediately above.
+        // pi-lens-ignore: no-open-redirect -- validated above
+        window.open(url, "_blank", "noopener,noreferrer");
+      }
     };
 
     container.addEventListener("touchstart", onTouchStart, {
@@ -1512,6 +1519,8 @@ export function suspendGhosttyIdleRenderLoop(
   // ghostty-web 0.4.0 starts a permanent requestAnimationFrame loop even when
   // cursor blinking is disabled. A large high-DPI canvas is particularly costly
   // on Windows, so event-driven mode cancels the pending continuation after open().
+  // SAFETY: ghostty Terminal exposes the private animationFrameId field at
+  // runtime (absent from typings); the undefined check below guards access.
   const access = terminal as unknown as GhosttyIdleRenderLoopAccess;
   if (access.animationFrameId === undefined) {
     return false;
@@ -1529,6 +1538,8 @@ export function shouldUseEventDrivenTerminalRendering(
 }
 
 export function renderGhosttyTerminalFrame(terminal: Terminal) {
+  // SAFETY: ghostty Terminal carries private renderer/wasmTerm internals
+  // (not in typings); both are null-checked immediately below before use.
   const access = terminal as unknown as GhosttyRenderAccess;
   if (!access.renderer || !access.wasmTerm) {
     return false;
@@ -1801,6 +1812,8 @@ function selectTerminalViewportRange(
 }
 
 function terminalSelectionManager(terminal: Terminal) {
+  // SAFETY: ghostty Terminal exposes an internal selectionManager (not in
+  // typings); isGhosttySelectionManager() below validates its shape.
   const selectionManager = (terminal as unknown as { selectionManager?: unknown }).selectionManager;
   if (!isGhosttySelectionManager(selectionManager)) {
     return null;
