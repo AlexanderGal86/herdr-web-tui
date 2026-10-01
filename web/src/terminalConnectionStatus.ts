@@ -2,6 +2,14 @@ export type TerminalConnectionState = "idle" | "connecting" | "attached" | "clos
 
 export const TERMINAL_CONNECTION_OVERLAY_DELAY_MS = 500;
 
+/**
+ * Dispatched on `window` when a terminal websocket closes without a close
+ * reason (the bridge does this when the herdr server goes away, e.g. a
+ * restart). The app listens and resnapshots immediately so panes remount on
+ * the rotated terminal_id instead of waiting for the periodic poll.
+ */
+export const TERMINAL_CONNECTION_LOST_EVENT = "herdr-web:terminal-connection-lost";
+
 export function parseTerminalCloseReason(message: string) {
   try {
     const parsed = JSON.parse(message) as { type?: unknown; reason?: unknown };

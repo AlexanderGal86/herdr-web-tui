@@ -10,6 +10,7 @@ import type { TerminalRenderer, TerminalSize } from "./terminalRenderer";
 import { TerminalView } from "./TerminalView";
 import type { PaneInfo } from "./types";
 import { setAppearance } from "./appearance";
+import { TERMINAL_CONNECTION_LOST_EVENT } from "./terminalConnectionStatus";
 
 const MOUNTED_TERMINAL_SIZE: TerminalSize = { cols: 80, rows: 24 };
 const REFRESHED_TERMINAL_SIZE: TerminalSize = { cols: 120, rows: 48 };
@@ -347,6 +348,30 @@ function testPane(terminalId: string): PaneInfo {
   };
 }
 
+
+describe("TerminalView connection-lost signaling", () => {
+  it("signals herdr-web:terminal-connection-lost when the socket closes unexpectedly", async () => {
+    const drafts = createCommandDraftStore();
+    await renderTerminalView(testPane("terminal-lost"), drafts);
+    const socket = FakeWebSocket.instances.at(-1);
+    if (!socket) {
+      throw new Error("Expected a terminal WebSocket");
+    }
+    await act(async () => {
+      socket.open();
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    const lostEvents: Event[] = [];
+    const listener = (event: Event) => lostEvents.push(event);
+    window.addEventListener(TERMINAL_CONNECTION_LOST_EVENT, listener);
+    await act(async () => {
+      socket.close();
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    window.removeEventListener(TERMINAL_CONNECTION_LOST_EVENT, listener);
+    expect(lostEvents).toHaveLength(1);
+  });
+});
 
 describe("TerminalView context menu capture", () => {
   async function mountMenu(rightClickPassthrough = false) {
