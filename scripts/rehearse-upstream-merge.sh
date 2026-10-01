@@ -7,9 +7,10 @@
 # a throwaway worktree, counting conflicts in the 4 shared files.
 #
 # Usage:
-#   bash scripts/rehearse-upstream-merge.sh [--strict]
-#     BASE_REF=<ref>  upstream base (default: merge-base with
-#                     origin/main, else HEAD~1)
+#   BASE_REF=<ref> bash scripts/rehearse-upstream-merge.sh [--strict]
+#     BASE_REF is REQUIRED: the upstream commit the fork diverged
+#     from (f1312e2 for kcosr/herdr-web). Rehearsing against any
+#     other base (e.g. the fork's own origin/main) proves nothing.
 #
 # Exit codes: 0 no conflicts (or non-strict), 1 conflicts under
 # --strict, 2 churn anchor missing (churn spec stale), 3 no churn
@@ -29,13 +30,9 @@ cd "$ROOT"
 
 if [ -n "${BASE_REF:-}" ]; then
   BASE="$BASE_REF"
-elif [ "$(git merge-base HEAD origin/main 2>/dev/null || echo "")" != "" ] &&
-  [ "$(git merge-base HEAD origin/main)" != "$(git rev-parse HEAD)" ]; then
-  BASE="$(git merge-base HEAD origin/main)"
-elif git rev-parse --verify -q HEAD~1 >/dev/null; then
-  BASE="$(git rev-parse HEAD~1)"
 else
-  BASE="$(git rev-list --max-parents=0 HEAD)"
+  echo "BASE_REF is required (upstream base commit, e.g. f1312e2)" >&2
+  exit 64
 fi
 
 FILES=(
