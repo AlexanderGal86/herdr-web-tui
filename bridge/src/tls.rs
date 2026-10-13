@@ -233,8 +233,8 @@ pub(crate) struct SelfSignedCertificate {
     pub cert_der: Vec<u8>,
 }
 
-const CERT_FILE: &str = "self-signed.crt.pem";
-const KEY_FILE: &str = "self-signed.key.pem";
+pub(crate) const CERT_FILE: &str = "self-signed.crt.pem";
+pub(crate) const KEY_FILE: &str = "self-signed.key.pem";
 
 pub(crate) fn load_or_generate_self_signed(
     dir: &Path,
@@ -394,6 +394,19 @@ pub(crate) fn cert_sha256_fingerprint(cert_der: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(cert_der);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+pub(crate) fn san_drift_warnings(current_sans: &[String], cert_der: &[u8]) -> Vec<String> {
+    let cert_sans = certificate_san_entries(cert_der);
+    let missing = missing_san_entries(current_sans, &cert_sans);
+    if missing.is_empty() {
+        Vec::new()
+    } else {
+        vec![format!(
+            "served certificate is missing SANs: {} (keeping the persisted certificate; regenerate manually if needed)",
+            missing.join(", ")
+        )]
+    }
 }
 
 pub(crate) fn server_config(

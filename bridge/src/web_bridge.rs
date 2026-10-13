@@ -1040,12 +1040,53 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
     let app = build_app(state, request_policy, options.static_dir);
     let bind = format!("{}:{}", options.host, options.port);
     let listener = tokio::net::TcpListener::bind(&bind).await?;
-    info!(url = %format!("http://{bind}"), "herdr-web-bridge listening");
-    axum::serve(listener, app).await
+    if options.tls_self_signed {
+        serve_tls(listener, app, &bind).await
+    } else {
+        info!(url = %format!("http://{bind}"), "herdr-web-bridge listening");
+        axum::serve(listener, app).await
+    }
 }
 
-fn build_app(state: BridgeState, request_policy: RequestPolicy, static_dir: PathBuf) -> Router {
-    let agent_activity_routes = Router::new().route(
+fn listener_scheme(tls_self_signed: bool) -> &'static str {
+    if tls_self_signed {
+        "https"
+    } else {
+        "http"
+    }
+}
+
+async fn serve_tls(listener: tokio::net::TcpListener, app: Router, bind: &str) -> io::Result<()> {
+    let state_dir = crate::tls::default_tls_state_dir();
+    let pair =
+        crate::tls::load_or_generate_self_signed(&state_dir, time::OffsetDateTime::now_utc())?;
+    let cert_path = state_dir.join(crate::tls::CERT_FILE);
+    let fingerprint = crate::tls::cert_sha256_fingerprint(&pair.cert_der);
+    info!(
+        cert = %cert_path.display(),
+        sans = crate::tls::certificate_san_entries(&pair.cert_der).len(),
+        fingerprint = %fingerprint,
+        "self-signed TLS certificate in use; verify this fingerprint out-of-band (TOFU)"
+    );
+    for warning in crate::tls::san_drift_warnings(
+        &crate::tls::host_san_entries(),
+        &pair.cert_der,
+    ) {
+        warn!(warning = %warning, "TLS certificate SAN drift");
+    }
+    let rustls_config =
+        axum_server::tls_rustls::RustlsConfig::from_config(crate::tls::server_config(&pair)?);
+    info!(
+        url = %format!("{}://{bind}", listener_scheme(true)),
+        "herdr-web-bridge listening"
+    );
+    let std_listener = listener.into_std()?;
+    axum_server::tls_rustls::from_tcp_rustls(std_listener, rustls_config)
+        .serve(app.into_make_service())
+        .await
+}
+
+fn build_app(state: BridgeState, request_policy: RequestPolicy, static_dir: PathBuf) -> Router {    let agent_activity_routes = Router::new().route(
         "/api/agent-activity",
         get(agent_activity_list_handler).options(preflight_handler),
     );
