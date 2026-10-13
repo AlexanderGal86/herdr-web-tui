@@ -607,6 +607,36 @@ mod tests {
     }
 
     #[test]
+    fn tls_state_dir_nested_path_created_recursively() {
+        let base = temp_tls_dir("nested");
+        let nested = base.join("herdr-web/tls");
+        let loaded = load_or_generate_self_signed(&nested, fixed_now()).unwrap();
+        assert!(!loaded.cert_pem.is_empty());
+        assert!(nested.join(CERT_FILE).is_file());
+        assert!(nested.join(KEY_FILE).is_file());
+    }
+
+    #[test]
+    fn mismatched_cert_key_pair_regenerates() {
+        let dir = temp_tls_dir("mismatched");
+        let now = fixed_now();
+        let sans: Vec<String> = TEST_SANS.iter().map(|s| s.to_string()).collect();
+        let one =
+            generate_with_validity(&sans, now - time::Duration::hours(24), now + time::Duration::days(30))
+                .unwrap();
+        let two =
+            generate_with_validity(&sans, now - time::Duration::hours(24), now + time::Duration::days(30))
+                .unwrap();
+        // cert from pair one, key from pair two: each file parses alone
+        std::fs::write(dir.join(CERT_FILE), &one.cert_pem).unwrap();
+        std::fs::write(dir.join(KEY_FILE), &two.key_pem).unwrap();
+        let regenerated = load_or_generate_self_signed(&dir, now).unwrap();
+        assert_ne!(regenerated.cert_pem, one.cert_pem);
+        let reread = load_or_generate_self_signed(&dir, now).unwrap();
+        assert_eq!(regenerated.cert_pem, reread.cert_pem);
+    }
+
+    #[test]
     fn san_drift_warning_lists_missing_entries() {
         let sans: Vec<String> = TEST_SANS.iter().map(|s| s.to_string()).collect();
         let pair =
