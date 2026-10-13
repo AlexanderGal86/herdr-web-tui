@@ -233,6 +233,7 @@ fn interface_ips() -> Vec<IpAddr> {
 
 /// Decode a windows sin_addr.S_addr (network-order bytes in native u32)
 /// into an Ipv4Addr without host-order reinterpretation.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn ipv4_from_saddr(saddr: u32) -> std::net::Ipv4Addr {
     std::net::Ipv4Addr::from(saddr.to_ne_bytes())
 }
