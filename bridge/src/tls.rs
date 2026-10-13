@@ -35,7 +35,10 @@ fn san_entry_set(hostname: &str, fqdn: Option<&str>, ips: &[IpAddr]) -> Vec<Stri
         "::1".to_string(),
     ];
     let push_unique = |entries: &mut Vec<String>, value: String| {
-        if !entries.iter().any(|entry| entry.eq_ignore_ascii_case(&value)) {
+        if !entries
+            .iter()
+            .any(|entry| entry.eq_ignore_ascii_case(&value))
+        {
             entries.push(value);
         }
     };
@@ -73,13 +76,15 @@ fn is_suitable_san_ip(ip: IpAddr) -> bool {
 fn os_hostname() -> Option<String> {
     use std::os::unix::ffi::OsStringExt;
     let mut buffer = [0u8; 256];
-    let status = unsafe {
-        libc::gethostname(buffer.as_mut_ptr() as *mut libc::c_char, buffer.len())
-    };
+    let status =
+        unsafe { libc::gethostname(buffer.as_mut_ptr() as *mut libc::c_char, buffer.len()) };
     if status != 0 {
         return None;
     }
-    let end = buffer.iter().position(|byte| *byte == 0).unwrap_or(buffer.len());
+    let end = buffer
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(buffer.len());
     std::ffi::OsString::from_vec(buffer[..end].to_vec())
         .into_string()
         .ok()
@@ -93,9 +98,8 @@ fn fqdn_for_hostname(hostname: Option<&str>) -> Option<String> {
     hints.ai_flags = libc::AI_CANONNAME;
     let c_hostname = std::ffi::CString::new(hostname).ok()?;
     let mut result: *mut libc::addrinfo = ptr::null_mut();
-    let status = unsafe {
-        libc::getaddrinfo(c_hostname.as_ptr(), ptr::null(), &hints, &mut result)
-    };
+    let status =
+        unsafe { libc::getaddrinfo(c_hostname.as_ptr(), ptr::null(), &hints, &mut result) };
     if status != 0 {
         return None;
     }
@@ -370,7 +374,7 @@ pub(crate) fn certificate_san_entries(cert_der: &[u8]) -> Vec<String> {
                     let mut bytes = [0u8; 16];
                     bytes.copy_from_slice(&octets[..16]);
                     Some(IpAddr::V6(std::net::Ipv6Addr::from(bytes)).to_string())
-                },
+                }
                 _ => None,
             },
             _ => None,
@@ -476,9 +480,9 @@ mod tests {
         let ips = vec![
             IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 5)),
             IpAddr::V4(std::net::Ipv4Addr::new(169, 254, 1, 1)), // link-local: skipped
-            IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2)), // extra loopback: skipped
-            IpAddr::V6("fe80::1".parse().unwrap()),             // v6 link-local: skipped
-            IpAddr::V6("fd00::10".parse().unwrap()),            // private v6: kept
+            IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2)),   // extra loopback: skipped
+            IpAddr::V6("fe80::1".parse().unwrap()),              // v6 link-local: skipped
+            IpAddr::V6("fd00::10".parse().unwrap()),             // private v6: kept
         ];
         let entries = san_entry_set("workstation", Some("workstation.lan"), &ips);
         assert_eq!(
@@ -515,10 +519,8 @@ mod tests {
     }
 
     fn temp_tls_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "herdr-tls-test-{}-{name}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("herdr-tls-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -636,12 +638,10 @@ mod tests {
     #[test]
     fn fingerprint_is_stable_hex_and_differs_per_cert() {
         let sans: Vec<String> = TEST_SANS.iter().map(|s| s.to_string()).collect();
-        let one =
-            generate_with_validity(&sans, fixed_now(), fixed_now() + time::Duration::days(1))
-                .unwrap();
-        let two =
-            generate_with_validity(&sans, fixed_now(), fixed_now() + time::Duration::days(1))
-                .unwrap();
+        let one = generate_with_validity(&sans, fixed_now(), fixed_now() + time::Duration::days(1))
+            .unwrap();
+        let two = generate_with_validity(&sans, fixed_now(), fixed_now() + time::Duration::days(1))
+            .unwrap();
         let fp_one = cert_sha256_fingerprint(&one.cert_der);
         assert_eq!(fp_one, cert_sha256_fingerprint(&one.cert_der));
         assert_eq!(fp_one.len(), 64);

@@ -1068,10 +1068,7 @@ async fn serve_tls(listener: tokio::net::TcpListener, app: Router, bind: &str) -
         fingerprint = %fingerprint,
         "self-signed TLS certificate in use; verify this fingerprint out-of-band (TOFU)"
     );
-    for warning in crate::tls::san_drift_warnings(
-        &crate::tls::host_san_entries(),
-        &pair.cert_der,
-    ) {
+    for warning in crate::tls::san_drift_warnings(&crate::tls::host_san_entries(), &pair.cert_der) {
         warn!(warning = %warning, "TLS certificate SAN drift");
     }
     let rustls_config =
@@ -1086,7 +1083,8 @@ async fn serve_tls(listener: tokio::net::TcpListener, app: Router, bind: &str) -
         .await
 }
 
-fn build_app(state: BridgeState, request_policy: RequestPolicy, static_dir: PathBuf) -> Router {    let agent_activity_routes = Router::new().route(
+fn build_app(state: BridgeState, request_policy: RequestPolicy, static_dir: PathBuf) -> Router {
+    let agent_activity_routes = Router::new().route(
         "/api/agent-activity",
         get(agent_activity_list_handler).options(preflight_handler),
     );
@@ -1552,11 +1550,7 @@ fn host_authority_allowed(authority: &str, policy: &RequestPolicy) -> bool {
         return true;
     }
 
-    if !authority_port_matches(
-        authority,
-        policy.bind_port,
-        policy.default_scheme_port,
-    ) {
+    if !authority_port_matches(authority, policy.bind_port, policy.default_scheme_port) {
         return false;
     }
 
@@ -4980,9 +4974,7 @@ mod tests {
             selected_pane_id: Arc::new(Mutex::new(None)),
             agent_activity: Arc::new(AgentActivityManager::new()),
             agent_pins: Arc::new(AgentPinsManager::new()?),
-            launcher_presets: Arc::new(
-                LauncherPresetStore::load(None).map_err(io::Error::other)?,
-            ),
+            launcher_presets: Arc::new(LauncherPresetStore::load(None).map_err(io::Error::other)?),
             notes: Arc::new(NotesManager::new()?),
             ui_event_tx: tokio::sync::broadcast::channel(256).0,
             activity_tx: tokio::sync::broadcast::channel(512).0,
@@ -5017,10 +5009,7 @@ mod tests {
         let connector = tokio_rustls::TlsConnector::from(Arc::new(https_client));
         let tcp = tokio::net::TcpStream::connect(address).await?;
         let mut tls_stream = connector
-            .connect(
-                rustls::pki_types::ServerName::try_from("localhost")?,
-                tcp,
-            )
+            .connect(rustls::pki_types::ServerName::try_from("localhost")?, tcp)
             .await?;
         let request = format!(
             "GET /index.html HTTP/1.1\r\nHost: localhost:{}\r\nConnection: close\r\n\r\n",
@@ -5030,7 +5019,10 @@ mod tests {
         let mut response_bytes = Vec::new();
         tls_stream.read_to_end(&mut response_bytes).await?;
         let response = String::from_utf8_lossy(&response_bytes);
-        assert!(response.starts_with("HTTP/1.1 200"), "GET failed: {response}");
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "GET failed: {response}"
+        );
         assert!(response.contains("tls-ok"), "body missing: {response}");
 
         // (b) wss handshake + one deterministic activity frame
@@ -6263,7 +6255,7 @@ mod tests {
             allowed_hosts: Vec::new(),
             allowed_origins: vec!["http://localhost".to_string()],
             allowed_connect_sources: Vec::new(),
-        default_scheme_port: 80,
+            default_scheme_port: 80,
         };
         assert!(request_allowed(
             &origin_headers("192.168.1.10:4000", Some("http://localhost")),
@@ -6330,7 +6322,7 @@ mod tests {
             allowed_hosts: vec!["herdr-host.local".to_string()],
             allowed_origins: Vec::new(),
             allowed_connect_sources: Vec::new(),
-        default_scheme_port: 80,
+            default_scheme_port: 80,
         };
         assert!(host_authority_allowed("herdr-host.local:4000", &policy));
         assert!(host_authority_allowed("HERDR-HOST.LOCAL:4000", &policy));
@@ -6346,7 +6338,7 @@ mod tests {
             allowed_hosts: Vec::new(),
             allowed_origins: vec!["http://localhost".to_string()],
             allowed_connect_sources: Vec::new(),
-        default_scheme_port: 80,
+            default_scheme_port: 80,
         };
         assert_eq!(
             cors_origin_header(
