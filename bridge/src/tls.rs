@@ -399,7 +399,20 @@ pub(crate) fn cert_sha256_fingerprint(cert_der: &[u8]) -> String {
 pub(crate) fn server_config(
     pair: &SelfSignedCertificate,
 ) -> std::io::Result<Arc<rustls::ServerConfig>> {
-    todo!("t4: rustls ServerConfig with explicit ring provider")
+    let certificates = vec![rustls::pki_types::CertificateDer::from(
+        pair.cert_der.clone(),
+    )];
+    let mut key_reader = pair.key_pem.as_bytes();
+    let private_key = rustls_pemfile::private_key(&mut key_reader)?
+        .ok_or_else(|| std::io::Error::other("TLS private key missing from key PEM"))?;
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+        .map_err(|err| std::io::Error::other(format!("TLS protocol versions: {err}")))?
+        .with_no_client_auth()
+        .with_single_cert(certificates, private_key)
+        .map_err(|err| std::io::Error::other(format!("TLS certificate pair: {err}")))?;
+    Ok(Arc::new(config))
 }
 
 #[cfg(test)]
