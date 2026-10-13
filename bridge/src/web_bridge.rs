@@ -823,6 +823,12 @@ impl From<io::Error> for UploadError {
 }
 
 pub(crate) fn run_command(args: &[String]) -> io::Result<i32> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .try_init();
     let options = match parse_options(args) {
         Ok(Some(options)) => options,
         Ok(None) => return Ok(0),
