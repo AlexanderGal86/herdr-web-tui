@@ -1037,6 +1037,14 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         upload_dir: options.upload_dir.clone(),
     };
     spawn_agent_activity_watcher(state.clone());
+    let app = build_app(state, request_policy, options.static_dir);
+    let bind = format!("{}:{}", options.host, options.port);
+    let listener = tokio::net::TcpListener::bind(&bind).await?;
+    info!(url = %format!("http://{bind}"), "herdr-web-bridge listening");
+    axum::serve(listener, app).await
+}
+
+fn build_app(state: BridgeState, request_policy: RequestPolicy, static_dir: PathBuf) -> Router {
     let agent_activity_routes = Router::new().route(
         "/api/agent-activity",
         get(agent_activity_list_handler).options(preflight_handler),
@@ -1095,7 +1103,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
             "/api/launcher-presets/launch",
             post(launcher_preset_launch_handler).options(preflight_handler),
         );
-    let app = Router::new()
+    Router::new()
         .merge(agent_activity_routes)
         .merge(agent_pins_routes)
         .merge(notes_routes)
@@ -1128,18 +1136,14 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
             ServiceBuilder::new()
                 .layer(middleware::from_fn(add_static_cache_headers))
                 .layer(CompressionLayer::new())
-                .service(ServeDir::new(options.static_dir)),
+                .service(ServeDir::new(static_dir)),
         )
         .layer(middleware::from_fn_with_state(
             request_policy.clone(),
             add_security_headers,
         ))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
-        .with_state(state);
-    let bind = format!("{}:{}", options.host, options.port);
-    let listener = tokio::net::TcpListener::bind(&bind).await?;
-    info!(url = %format!("http://{bind}"), "herdr-web-bridge listening");
-    axum::serve(listener, app).await
+        .with_state(state)
 }
 
 async fn add_security_headers(
