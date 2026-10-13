@@ -103,6 +103,7 @@ struct BridgeOptions {
     allowed_hosts: Vec<String>,
     allowed_origins: Vec<String>,
     allowed_connect_sources: Vec<String>,
+    tls_self_signed: bool,
 }
 
 #[derive(Clone)]
@@ -858,6 +859,7 @@ fn parse_options(args: &[String]) -> Result<Option<BridgeOptions>, String> {
     let mut allowed_origins = Vec::new();
     let mut allowed_connect_sources = Vec::new();
     let mut explicit_session = None;
+    let mut tls_self_signed = false;
     let mut index = 0;
 
     while index < args.len() {
@@ -911,6 +913,10 @@ fn parse_options(args: &[String]) -> Result<Option<BridgeOptions>, String> {
                 launcher_presets_path = Some(expand_home(value));
                 index += 2;
             }
+            "--tls-self-signed" => {
+                tls_self_signed = true;
+                index += 1;
+            }
             "--allow-host" => {
                 let Some(value) = args.get(index + 1) else {
                     return Err("missing value for --allow-host".into());
@@ -952,6 +958,7 @@ fn parse_options(args: &[String]) -> Result<Option<BridgeOptions>, String> {
         allowed_hosts,
         allowed_origins,
         allowed_connect_sources,
+        tls_self_signed,
     }))
 }
 
@@ -962,12 +969,13 @@ fn print_help() {
 fn help_text() -> &'static str {
     "herdr-web-bridge\n\
 \n\
-Usage: herdr-web-bridge [--session NAME] [--host HOST] [--port PORT] [--static-dir DIR] [--upload-dir DIR] [--launcher-presets PATH] [--allow-origin ORIGIN] [--allow-host HOSTNAME] [--allow-connect-origin ORIGIN]\n\
+Usage: herdr-web-bridge [--session NAME] [--host HOST] [--port PORT] [--static-dir DIR] [--upload-dir DIR] [--launcher-presets PATH] [--allow-origin ORIGIN] [--allow-host HOSTNAME] [--allow-connect-origin ORIGIN] [--tls-self-signed]\n\
 \n\
 Runs the local HTTP/WebSocket bridge for herdr-web.\n\
 Defaults to the active Herdr daemon sockets and 127.0.0.1:8787.\n\
 Use --session NAME to target a named Herdr session and ignore HERDR_SOCKET_PATH.\n\
 Use --host 0.0.0.0 to listen on non-loopback interfaces.\n\
+Use --tls-self-signed to serve HTTPS/WSS with a persistent self-signed certificate.\n\
 Use --allow-origin http://localhost for bundled Android app access.\n\
 Use --allow-host HOSTNAME to accept that exact DNS hostname in Host headers.\n\
 Use --allow-connect-origin ORIGIN to let the served web app connect to another bridge origin.\n\
