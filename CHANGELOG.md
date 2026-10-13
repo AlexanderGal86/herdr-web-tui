@@ -30,6 +30,16 @@
 
 ### Added
 
+- Add native TLS to the bridge behind a new `--tls-self-signed` flag. The
+  single bridge port serves HTTPS and secure WebSockets (`wss://`) when the
+  flag is enabled and stays plain HTTP otherwise. The self-signed certificate
+  is generated once and kept stable across restarts — it is stored under the
+  XDG state directory (e.g. `~/.local/state/herdr-web/tls`, overridable with
+  `HERDR_WEB_TLS_DIR`), covers `localhost`, `127.0.0.1`, `::1`, the machine
+  hostname, and local network IPs, and is regenerated only when missing or
+  invalid. Bridge compatibility note: no wire-protocol or API change; the
+  Host-header gate now treats 443 as the implicit port when TLS is enabled
+  (80 remains the implicit port for plain HTTP).
 - Copying selected terminal text with a right-click: when a selection is
   active, right-click copies it to the clipboard (with the same wrapped-URL
   normalization as the mobile copy flow) and clears the selection, instead of

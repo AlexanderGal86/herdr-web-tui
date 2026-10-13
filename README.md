@@ -84,6 +84,23 @@ $env:HERDR_SOCKET_PATH = Join-Path $env:APPDATA 'herdr\herdr.sock'
 .\bridge\target\debug\herdr-web-bridge.exe --host 127.0.0.1 --port 8787 --static-dir web/dist
 ```
 
+## HTTPS (TLS)
+
+Добавьте флаг `--tls-self-signed` — тот же порт начнёт отдавать HTTPS и `wss://`
+вместо HTTP и `ws://` (протокол без флага не меняется):
+
+```bash
+./bridge/target/release/herdr-web-bridge --host 0.0.0.0 --port 8787 \
+  --static-dir web/dist --tls-self-signed
+```
+
+Самоподписанный сертификат генерируется при первом запуске и хранится в
+`~/.local/state/herdr-web/tls` (переопределяется переменной `HERDR_WEB_TLS_DIR`),
+покрывает `localhost`, `127.0.0.1`, `::1`, имя машины и локальные IP. Сертификат
+стабилен между перезапусками — браузеру достаточно принять его один раз (при
+смене fingerprint мост печатает SHA-256 в stderr при старте — TOFU). В
+systemd-юнитах с нестандартным `HOME` задайте `HERDR_WEB_TLS_DIR` явно.
+
 ## Выбор темы
 
 **Settings → Display → Appearance:**
