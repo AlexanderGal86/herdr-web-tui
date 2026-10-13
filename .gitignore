@@ -16,3 +16,4 @@
 *.log
 *.swp
 .DS_Store
+.playwright-cli/

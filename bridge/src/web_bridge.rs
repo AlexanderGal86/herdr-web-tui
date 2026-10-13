@@ -34,11 +34,11 @@ use tracing::{debug, info, warn};
 
 use herdr_compat::api::client::{ApiClient, ApiClientError};
 use herdr_compat::api::schema::{
-    AgentInfo, AgentStartParams, AgentStatus, AgentTarget, EmptyParams, EventsSubscribeParams,
-    LayoutApplyParams, LayoutExportParams, Method, PaneInfo, PaneLayoutSnapshot, PaneListParams,
-    PaneMoveDestination, PaneSplitParams, PaneTarget, Request, ResponseResult, SessionSnapshot,
-    SplitDirection, Subscription, SubscriptionEventData, SubscriptionEventEnvelope,
-    SubscriptionEventKind, TabCreateParams, TabInfo, TabListParams, TabTarget, WorkspaceInfo,
+    AgentStartParams, AgentStatus, EmptyParams, EventsSubscribeParams, LayoutApplyParams,
+    LayoutExportParams, Method, PaneInfo, PaneLayoutSnapshot, PaneListParams, PaneMoveDestination,
+    PaneSplitParams, PaneTarget, Request, ResponseResult, SessionSnapshot, SplitDirection,
+    Subscription, SubscriptionEventData, SubscriptionEventEnvelope, SubscriptionEventKind,
+    TabCreateParams, TabInfo, TabListParams, TabTarget, WorkspaceInfo,
 };
 use herdr_compat::protocol::{
     self, AttachScrollDirection, AttachScrollSource, ClientMessage, RenderEncoding, ServerMessage,
@@ -91,8 +91,6 @@ const ACTIVITY_READ_TIMEOUT: Duration = Duration::from_millis(250);
 const MANAGED_AGENT_SHELL_SETTLE_DELAY: Duration = Duration::from_millis(100);
 const MANAGED_AGENT_SHELL_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(300);
 const MANAGED_AGENT_SHELL_READY_TIMEOUT: Duration = Duration::from_secs(3);
-const MANAGED_AGENT_START_TIMEOUT: Duration = Duration::from_secs(30);
-const MANAGED_AGENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 static UPLOAD_TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone)]
@@ -2444,114 +2442,18 @@ fn start_managed_agent(
             Err(error) => return Err(error),
         }
     };
-    let ResponseResult::AgentStarted { agent, .. } = result else {
+    let ResponseResult::AgentStarted { .. } = result else {
         return Err(LauncherPresetError::launch_failed(
             "unexpected response for managed agent launch",
         ));
     };
-    let terminal_id = agent.terminal_id.clone();
-    wait_for_managed_agent(api, &name, pane_id, kind, &terminal_id, agent)
-}
-
-fn wait_for_managed_agent(
-    api: &mut impl LauncherApiRequest,
-    name: &str,
-    pane_id: &str,
-    kind: ManagedAgentKind,
-    terminal_id: &str,
-    mut agent: AgentInfo,
-) -> Result<(), LauncherPresetError> {
-    let deadline = std::time::Instant::now() + MANAGED_AGENT_START_TIMEOUT;
-    loop {
-        match managed_agent_launch_state(&agent, name, kind, terminal_id) {
-            Ok(true) => return Ok(()),
-            Ok(false) => {}
-            Err(error) => return Err(error),
-        }
-        if std::time::Instant::now() >= deadline {
-            let _ = api.request(
-                "herdr-web:launcher:managed-agent-timeout-reconcile",
-                Method::AgentGet(AgentTarget {
-                    target: name.to_string(),
-                }),
-            );
-            return Err(LauncherPresetError::launch_failed(
-                "timed out waiting for managed agent startup",
-            ));
-        }
-
-        agent = match api.request(
-            "herdr-web:launcher:managed-agent-ready",
-            Method::AgentGet(AgentTarget {
-                target: name.to_string(),
-            }),
-        ) {
-            Ok(ResponseResult::AgentInfo { agent }) => agent,
-            Ok(_) => {
-                return Err(LauncherPresetError::launch_failed(
-                    "unexpected response while waiting for managed agent startup",
-                ));
-            }
-            Err(_) => match api.request(
-                "herdr-web:launcher:managed-agent-ready-by-pane",
-                Method::AgentGet(AgentTarget {
-                    target: pane_id.to_string(),
-                }),
-            ) {
-                Ok(ResponseResult::AgentInfo { agent }) => agent,
-                Ok(_) => {
-                    return Err(LauncherPresetError::launch_failed(
-                        "unexpected response while resolving managed agent pane",
-                    ));
-                }
-                Err(_) => {
-                    thread::sleep(MANAGED_AGENT_POLL_INTERVAL);
-                    continue;
-                }
-            },
-        };
-        if !agent.interactive_ready && agent.launch_pending {
-            thread::sleep(MANAGED_AGENT_POLL_INTERVAL);
-        }
-    }
-}
-
-fn managed_agent_launch_state(
-    agent: &AgentInfo,
-    name: &str,
-    kind: ManagedAgentKind,
-    terminal_id: &str,
-) -> Result<bool, LauncherPresetError> {
-    if agent.terminal_id != terminal_id {
-        return Err(LauncherPresetError::launch_failed(format!(
-            "managed agent {name} no longer owns the target terminal"
-        )));
-    }
-    if agent.name.as_deref() != Some(name) {
-        return Err(LauncherPresetError::launch_failed(format!(
-            "managed agent was not found under the expected name {name}"
-        )));
-    }
-    if agent
-        .agent
-        .as_deref()
-        .is_some_and(|actual| actual != kind.as_str())
-    {
-        return Err(LauncherPresetError::launch_failed(format!(
-            "managed agent kind mismatch: expected {}, detected {}",
-            kind.as_str(),
-            agent.agent.as_deref().unwrap_or_default()
-        )));
-    }
-    if agent.interactive_ready {
-        return Ok(true);
-    }
-    if !agent.launch_pending {
-        return Err(LauncherPresetError::launch_failed(
-            "managed agent process exited before becoming interactive",
-        ));
-    }
-    Ok(false)
+    // The launch contract ends at the daemon's start acknowledgement: the
+    // tab exists and the agent process is attached. Waiting for interactive
+    // readiness here kept the HTTP launch response (and the web launch
+    // dialog) blocked for seconds — or the full startup timeout when the
+    // agent CLI is missing, followed by a tab rollback. Agent startup
+    // failures now surface inside the terminal pane instead.
+    Ok(())
 }
 
 fn managed_agent_name(kind: ManagedAgentKind, pane_id: &str) -> String {
@@ -6823,10 +6725,6 @@ mod tests {
         let mut pending = launcher_test_agent("pane-new", "workspace-1", "tab-new");
         pending.name = Some(name.clone());
         pending.agent = None;
-        let mut ready = pending.clone();
-        ready.agent = Some("codex".into());
-        ready.launch_pending = false;
-        ready.interactive_ready = true;
         let mut api = MockLauncherApi::new([
             Ok(ResponseResult::TabCreated {
                 tab,
@@ -6837,7 +6735,6 @@ mod tests {
                 agent: pending,
                 argv: vec!["codex".into()],
             }),
-            Ok(ResponseResult::AgentInfo { agent: ready }),
         ]);
         let preset = launcher_test_managed_preset(ManagedAgentKind::Codex);
 
@@ -6862,11 +6759,16 @@ mod tests {
         assert!(params.args.is_empty());
         assert_eq!(params.timeout_ms, None);
         assert!(valid_managed_agent_name(&params.name));
-        let Method::AgentGet(params) = &api.requests[3] else {
-            panic!("expected readiness poll");
-        };
-        assert_eq!(params.target, name);
-        assert_eq!(api.requests.len(), 4);
+        // The launch completes once the daemon acknowledges the agent start;
+        // interactive readiness is not part of the launch contract.
+        assert_eq!(
+            api.requests
+                .iter()
+                .filter(|request| matches!(request, Method::AgentGet(_)))
+                .count(),
+            0
+        );
+        assert_eq!(api.requests.len(), 3);
         assert_eq!(api.waits, vec![MANAGED_AGENT_SHELL_SETTLE_DELAY]);
     }
 
@@ -6878,10 +6780,6 @@ mod tests {
         let mut pending = launcher_test_agent("pane-new", "workspace-1", "tab-new");
         pending.name = Some(name);
         pending.agent = None;
-        let mut ready = pending.clone();
-        ready.agent = Some("claude".into());
-        ready.launch_pending = false;
-        ready.interactive_ready = true;
         let mut api = MockLauncherApi::new([
             Ok(ResponseResult::TabCreated {
                 tab,
@@ -6904,7 +6802,6 @@ mod tests {
                 agent: pending,
                 argv: vec!["claude".into()],
             }),
-            Ok(ResponseResult::AgentInfo { agent: ready }),
         ]);
         let preset = launcher_test_managed_preset(ManagedAgentKind::Claude);
 
@@ -7015,7 +6912,11 @@ mod tests {
     }
 
     #[test]
-    fn managed_agent_process_exit_rolls_back_after_start_acknowledgement() {
+    fn managed_agent_exit_after_start_ack_is_not_a_launch_failure() {
+        // The daemon acknowledged the start; what the agent does afterwards
+        // (including exiting because its CLI is missing) surfaces in the
+        // terminal pane, not as a launch error. The launch must not poll for
+        // readiness or roll the tab back.
         let pane = launcher_test_pane("pane-new", "workspace-1", "tab-new");
         let tab = launcher_test_tab("tab-new", "workspace-1");
         let name = managed_agent_name(ManagedAgentKind::Claude, "pane-new");
@@ -7034,12 +6935,11 @@ mod tests {
                 agent: pending,
                 argv: vec!["claude".into()],
             }),
-            Ok(ResponseResult::AgentInfo { agent: failed }),
-            Ok(ResponseResult::Ok {}),
         ]);
+        let _ = failed; // exit state is intentionally never requested
         let preset = launcher_test_managed_preset(ManagedAgentKind::Claude);
 
-        let error = launch_preset_with(
+        let response = launch_preset_with(
             &mut api,
             &preset,
             "Claude",
@@ -7047,14 +6947,23 @@ mod tests {
                 workspace_id: "workspace-1".into(),
             },
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(error.message.contains("exited before becoming interactive"));
-        assert!(matches!(api.requests[3], Method::AgentGet(_)));
-        let Method::TabClose(params) = &api.requests[4] else {
-            panic!("expected tab.close rollback");
-        };
-        assert_eq!(params.tab_id, "tab-new");
+        assert_eq!(response.pane_id, "pane-new");
+        assert_eq!(
+            api.requests
+                .iter()
+                .filter(|request| matches!(request, Method::AgentGet(_)))
+                .count(),
+            0
+        );
+        assert_eq!(
+            api.requests
+                .iter()
+                .filter(|request| matches!(request, Method::TabClose(_)))
+                .count(),
+            0
+        );
     }
 
     struct MockLauncherApi {

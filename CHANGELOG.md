@@ -4,6 +4,17 @@
 
 ### Breaking Changes
 
+### Changed
+
+- Launcher preset launches of managed agents now complete as soon as the daemon
+  acknowledges the agent start, instead of waiting for the agent to become
+  interactive. The "New tab" dialog closes in a fraction of a second for every
+  preset (previously ~4s for agents, and a 30s hang followed by tab rollback and
+  a launch error when the agent CLI was missing on the bridge host). Agent
+  startup failures — e.g. a missing CLI — now surface directly inside the new
+  terminal pane. Bridge compatibility note: no wire-protocol change; the
+  `/api/launcher-presets/launch` response is unchanged, only faster.
+
 ### Fixed
 
 - Recover open panes within ~a second after a herdr server restart: terminal sockets
@@ -12,6 +23,10 @@
   the 10-second periodic poll notices.
 
 ### Added
+
+- Add a Russian troubleshooting section for a hung bridge: idle WebSocket
+  connections, heartbeat timeouts and `terminal not found` on re-attach, with
+  diagnosis steps and a `systemctl restart herdr-web-tui.service` recovery.
 
 - Add middle-button clipboard paste into the clicked terminal, activating its pane
   and preserving native bracketed paste. Retain Ghostty's automatic copy on selection.
