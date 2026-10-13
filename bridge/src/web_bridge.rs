@@ -823,12 +823,6 @@ impl From<io::Error> for UploadError {
 }
 
 pub(crate) fn run_command(args: &[String]) -> io::Result<i32> {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .try_init();
     let options = match parse_options(args) {
         Ok(Some(options)) => options,
         Ok(None) => return Ok(0),
@@ -1068,13 +1062,16 @@ async fn serve_tls(listener: tokio::net::TcpListener, app: Router, bind: &str) -
         crate::tls::load_or_generate_self_signed(&state_dir, time::OffsetDateTime::now_utc())?;
     let cert_path = state_dir.join(crate::tls::CERT_FILE);
     let fingerprint = crate::tls::cert_sha256_fingerprint(&pair.cert_der);
-    info!(
-        cert = %cert_path.display(),
-        sans = crate::tls::certificate_san_entries(&pair.cert_der).len(),
-        fingerprint = %fingerprint,
-        "self-signed TLS certificate in use; verify this fingerprint out-of-band (TOFU)"
+    // operator-facing banner goes to stderr: the global tracing subscriber is
+    // the file logger, and TOFU verification must not depend on log config
+    eprintln!(
+        "herdr-web-bridge: self-signed TLS certificate in use; verify this fingerprint out-of-band (TOFU)\n  cert: {}\n  sans: {}\n  fingerprint: {}",
+        cert_path.display(),
+        crate::tls::certificate_san_entries(&pair.cert_der).len(),
+        fingerprint
     );
     for warning in crate::tls::san_drift_warnings(&crate::tls::host_san_entries(), &pair.cert_der) {
+        eprintln!("herdr-web-bridge: warning: {warning}");
         warn!(warning = %warning, "TLS certificate SAN drift");
     }
     let rustls_config =
@@ -1689,28 +1686,47 @@ fn is_unspecified_bind_host(host: &str) -> bool {
     matches!(host, "0.0.0.0" | "::" | "[::]")
 }
 
-fn authority_port_matches(authority: &str, expected_port: u16, default_port: u16) -> bool {
-    match authority_port(authority) {
-        Some(port) => port == expected_port,
-        None => expected_port == default_port,
+enum AuthorityPort {
+    Implicit,
+    Explicit(u16),
+    Invalid,
+}
+
+fn authority_port(authority: &str) -> AuthorityPort {
+    if authority.parse::<IpAddr>().is_ok() {
+        return AuthorityPort::Implicit;
+    }
+    if let Some(rest) = authority.strip_prefix('[') {
+        let Some(end) = rest.find(']') else {
+            return AuthorityPort::Implicit;
+        };
+        return match rest[end + 1..].strip_prefix(':') {
+            None => AuthorityPort::Implicit,
+            Some(port) => explicit_or_invalid(port),
+        };
+    }
+    let Some((_, port)) = authority.rsplit_once(':') else {
+        return AuthorityPort::Implicit;
+    };
+    if port.contains(':') {
+        return AuthorityPort::Implicit;
+    }
+    explicit_or_invalid(port)
+}
+
+fn explicit_or_invalid(port: &str) -> AuthorityPort {
+    match port.parse::<u16>() {
+        Ok(number) => AuthorityPort::Explicit(number),
+        Err(_) => AuthorityPort::Invalid,
     }
 }
 
-fn authority_port(authority: &str) -> Option<u16> {
-    if authority.parse::<IpAddr>().is_ok() {
-        return None;
+fn authority_port_matches(authority: &str, expected_port: u16, default_port: u16) -> bool {
+    match authority_port(authority) {
+        AuthorityPort::Explicit(port) => port == expected_port,
+        AuthorityPort::Implicit => expected_port == default_port,
+        AuthorityPort::Invalid => false,
     }
-    if let Some(rest) = authority.strip_prefix('[') {
-        let end = rest.find(']')?;
-        return rest[end + 1..]
-            .strip_prefix(':')
-            .and_then(|port| port.parse().ok());
-    }
-    let (_, port) = authority.rsplit_once(':')?;
-    if port.contains(':') {
-        return None;
-    }
-    port.parse().ok()
 }
 
 fn host_part(authority: &str) -> &str {

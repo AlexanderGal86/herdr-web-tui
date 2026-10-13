@@ -212,9 +212,7 @@ fn interface_ips() -> Vec<IpAddr> {
                 let family = unsafe { (*sockaddr).sa_family };
                 if family == AF_INET as u16 {
                     let v4 = unsafe { &*(sockaddr as *const SOCKADDR_IN) };
-                    ips.push(IpAddr::V4(std::net::Ipv4Addr::from(unsafe {
-                        v4.sin_addr.S_un.S_addr
-                    })));
+                    ips.push(IpAddr::V4(ipv4_from_saddr(unsafe { v4.sin_addr.S_un.S_addr })));
                 } else if family == AF_INET6 as u16 {
                     let v6 = unsafe { &*(sockaddr as *const SOCKADDR_IN6) };
                     ips.push(IpAddr::V6(std::net::Ipv6Addr::from(unsafe {
@@ -230,6 +228,12 @@ fn interface_ips() -> Vec<IpAddr> {
 }
 
 // --- Certificate lifecycle (t3) -------------------------------------------
+
+/// Decode a windows sin_addr.S_addr (network-order bytes in native u32)
+/// into an Ipv4Addr without host-order reinterpretation.
+fn ipv4_from_saddr(saddr: u32) -> std::net::Ipv4Addr {
+    std::net::Ipv4Addr::from(saddr.to_ne_bytes())
+}
 
 pub(crate) struct SelfSignedCertificate {
     pub cert_pem: String,
@@ -251,6 +255,11 @@ pub(crate) fn load_or_generate_self_signed(
         dir = %dir.display(),
         "TLS certificate missing or invalid; regenerating self-signed certificate"
     );
+    // interprocess lock: simultaneous first starts must converge on one identity
+    let _guard = lock_tls_dir(dir)?;
+    if let Some(existing) = read_valid_pair(dir, now) {
+        return Ok(existing);
+    }
     let sans = host_san_entries();
     let pair = generate_with_validity(
         &sans,
@@ -259,6 +268,51 @@ pub(crate) fn load_or_generate_self_signed(
     )?;
     persist_pair(dir, &pair)?;
     Ok(pair)
+}
+
+struct TlsDirGuard {
+    // closing the file releases the flock / LockFileEx lock
+    #[allow(dead_code)]
+    file: std::fs::File,
+}
+
+fn lock_tls_dir(dir: &Path) -> std::io::Result<TlsDirGuard> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    let _ = builder.create(dir);
+    let lock_path = dir.join(".lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)?;
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        let mut overlapped: windows_sys::Win32::System::IO::OVERLAPPED = std::mem::zeroed();
+        let ok = unsafe {
+            windows_sys::Win32::Storage::FileSystem::LockFileEx(
+                file.as_raw_handle() as _,
+                windows_sys::Win32::Storage::FileSystem::LOCKFILE_EXCLUSIVE_LOCK,
+                0,
+                u32::MAX,
+                0,
+                &mut overlapped,
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(TlsDirGuard { file })
 }
 
 fn read_valid_pair(dir: &Path, now: OffsetDateTime) -> Option<SelfSignedCertificate> {
