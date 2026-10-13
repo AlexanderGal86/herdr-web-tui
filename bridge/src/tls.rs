@@ -1,5 +1,6 @@
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use time::OffsetDateTime;
 
 pub(crate) fn default_tls_state_dir() -> PathBuf {
     if let Some(path) = crate::store_util::non_empty_env_path("HERDR_WEB_TLS_DIR") {
@@ -222,6 +223,44 @@ fn interface_ips() -> Vec<IpAddr> {
     ips
 }
 
+// --- Certificate lifecycle (t3) -------------------------------------------
+
+pub(crate) struct SelfSignedCertificate {
+    pub cert_pem: String,
+    pub key_pem: String,
+    pub cert_der: Vec<u8>,
+}
+
+const CERT_FILE: &str = "self-signed.crt.pem";
+const KEY_FILE: &str = "self-signed.key.pem";
+
+pub(crate) fn load_or_generate_self_signed(
+    dir: &Path,
+    now: OffsetDateTime,
+) -> std::io::Result<SelfSignedCertificate> {
+    todo!("t3: reuse valid persisted pair, regenerate missing/corrupt/expired")
+}
+
+fn generate_with_validity(
+    sans: &[String],
+    not_before: OffsetDateTime,
+    not_after: OffsetDateTime,
+) -> std::io::Result<SelfSignedCertificate> {
+    todo!("t3: rcgen ECDSA P-256, CN herdr-web-bridge")
+}
+
+pub(crate) fn certificate_san_entries(cert_der: &[u8]) -> Vec<String> {
+    todo!("t3: parse DNS + IP SANs from DER")
+}
+
+pub(crate) fn missing_san_entries(current: &[String], cert_sans: &[String]) -> Vec<String> {
+    todo!("t3: order-insensitive diff")
+}
+
+pub(crate) fn cert_sha256_fingerprint(cert_der: &[u8]) -> String {
+    todo!("t3: hex sha256")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,5 +339,106 @@ mod tests {
                 "::1".to_string(),
             ]
         );
+    }
+
+    // --- t3 lifecycle tests -------------------------------------------------
+
+    fn fixed_now() -> OffsetDateTime {
+        OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap()
+    }
+
+    fn temp_tls_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-tls-test-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    const TEST_SANS: &[&str] = &["localhost", "127.0.0.1", "::1", "192.168.1.5"];
+
+    #[test]
+    fn reuse_identity_stable_across_calls() {
+        let dir = temp_tls_dir("reuse");
+        let now = fixed_now();
+        let first = load_or_generate_self_signed(&dir, now).unwrap();
+        let second = load_or_generate_self_signed(&dir, now).unwrap();
+        assert_eq!(first.cert_pem, second.cert_pem);
+        assert_eq!(first.key_pem, second.key_pem);
+        assert_eq!(first.cert_der, second.cert_der);
+    }
+
+    #[test]
+    fn corrupt_cert_file_regenerates() {
+        let dir = temp_tls_dir("corrupt-cert");
+        let now = fixed_now();
+        let first = load_or_generate_self_signed(&dir, now).unwrap();
+        std::fs::write(dir.join(CERT_FILE), "this is not a certificate").unwrap();
+        let second = load_or_generate_self_signed(&dir, now).unwrap();
+        assert_ne!(first.cert_pem, second.cert_pem);
+    }
+
+    #[test]
+    fn truncated_key_file_regenerates() {
+        let dir = temp_tls_dir("truncated-key");
+        let now = fixed_now();
+        let first = load_or_generate_self_signed(&dir, now).unwrap();
+        let truncated: String = first.key_pem.chars().take(40).collect();
+        std::fs::write(dir.join(KEY_FILE), truncated).unwrap();
+        let second = load_or_generate_self_signed(&dir, now).unwrap();
+        assert_ne!(first.key_pem, second.key_pem);
+    }
+
+    #[test]
+    fn expired_cert_regenerates() {
+        let dir = temp_tls_dir("expired");
+        let now = fixed_now();
+        let expired = generate_with_validity(
+            &TEST_SANS.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            now - time::Duration::days(10 * 365),
+            now - time::Duration::days(5 * 365),
+        )
+        .unwrap();
+        std::fs::write(dir.join(CERT_FILE), &expired.cert_pem).unwrap();
+        std::fs::write(dir.join(KEY_FILE), &expired.key_pem).unwrap();
+        let fresh = load_or_generate_self_signed(&dir, now).unwrap();
+        assert_ne!(expired.cert_pem, fresh.cert_pem);
+        // fresh pair must be valid at `now` and persist as the new identity
+        let reread = load_or_generate_self_signed(&dir, now).unwrap();
+        assert_eq!(fresh.cert_pem, reread.cert_pem);
+    }
+
+    #[test]
+    fn san_roundtrip_and_missing_diff() {
+        let sans: Vec<String> = TEST_SANS.iter().map(|s| s.to_string()).collect();
+        let pair =
+            generate_with_validity(&sans, fixed_now(), fixed_now() + time::Duration::days(1))
+                .unwrap();
+        let parsed = certificate_san_entries(&pair.cert_der);
+        for san in &sans {
+            assert!(parsed.contains(san), "missing SAN {san} in {parsed:?}");
+        }
+        let mut drifted = sans.clone();
+        drifted.push("10.0.0.9".to_string());
+        assert_eq!(missing_san_entries(&drifted, &parsed), vec!["10.0.0.9"]);
+        assert!(missing_san_entries(&sans, &parsed).is_empty());
+    }
+
+    #[test]
+    fn fingerprint_is_stable_hex_and_differs_per_cert() {
+        let sans: Vec<String> = TEST_SANS.iter().map(|s| s.to_string()).collect();
+        let one =
+            generate_with_validity(&sans, fixed_now(), fixed_now() + time::Duration::days(1))
+                .unwrap();
+        let two =
+            generate_with_validity(&sans, fixed_now(), fixed_now() + time::Duration::days(1))
+                .unwrap();
+        let fp_one = cert_sha256_fingerprint(&one.cert_der);
+        assert_eq!(fp_one, cert_sha256_fingerprint(&one.cert_der));
+        assert_eq!(fp_one.len(), 64);
+        assert!(fp_one.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(fp_one, cert_sha256_fingerprint(&two.cert_der));
     }
 }
