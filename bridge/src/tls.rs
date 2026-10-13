@@ -1,6 +1,7 @@
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
+use x509_parser::prelude::FromDer as _;
 
 pub(crate) fn default_tls_state_dir() -> PathBuf {
     if let Some(path) = crate::store_util::non_empty_env_path("HERDR_WEB_TLS_DIR") {
@@ -238,7 +239,50 @@ pub(crate) fn load_or_generate_self_signed(
     dir: &Path,
     now: OffsetDateTime,
 ) -> std::io::Result<SelfSignedCertificate> {
-    todo!("t3: reuse valid persisted pair, regenerate missing/corrupt/expired")
+    if let Some(existing) = read_valid_pair(dir, now) {
+        return Ok(existing);
+    }
+    tracing::warn!(
+        dir = %dir.display(),
+        "TLS certificate missing or invalid; regenerating self-signed certificate"
+    );
+    let sans = host_san_entries();
+    let pair = generate_with_validity(
+        &sans,
+        now - time::Duration::hours(24),
+        now + time::Duration::days(5 * 365),
+    )?;
+    persist_pair(dir, &pair)?;
+    Ok(pair)
+}
+
+fn read_valid_pair(dir: &Path, now: OffsetDateTime) -> Option<SelfSignedCertificate> {
+    let cert_pem = std::fs::read_to_string(dir.join(CERT_FILE)).ok()?;
+    let key_pem = std::fs::read_to_string(dir.join(KEY_FILE)).ok()?;
+    let cert_der = pem_certificate_der(&cert_pem)?;
+    pem_private_key(&key_pem)?;
+    let (_, cert) = x509_parser::prelude::X509Certificate::from_der(&cert_der).ok()?;
+    let validity = cert.validity();
+    if now < validity.not_before.to_datetime() || now > validity.not_after.to_datetime() {
+        return None;
+    }
+    Some(SelfSignedCertificate {
+        cert_pem,
+        key_pem,
+        cert_der,
+    })
+}
+
+fn pem_certificate_der(cert_pem: &str) -> Option<Vec<u8>> {
+    let mut cursor = std::io::BufReader::new(cert_pem.as_bytes());
+    let certificate = rustls_pemfile::certs(&mut cursor).next()?.ok()?;
+    Some(certificate.as_ref().to_vec())
+}
+
+fn pem_private_key(key_pem: &str) -> Option<()> {
+    let mut cursor = std::io::BufReader::new(key_pem.as_bytes());
+    rustls_pemfile::private_key(&mut cursor).ok().flatten()?;
+    Some(())
 }
 
 fn generate_with_validity(
@@ -246,19 +290,109 @@ fn generate_with_validity(
     not_before: OffsetDateTime,
     not_after: OffsetDateTime,
 ) -> std::io::Result<SelfSignedCertificate> {
-    todo!("t3: rcgen ECDSA P-256, CN herdr-web-bridge")
+    let mut params = rcgen::CertificateParams::new(sans.to_vec())
+        .map_err(|err| std::io::Error::other(format!("certificate params: {err}")))?;
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "herdr-web-bridge");
+    params.not_before = not_before;
+    params.not_after = not_after;
+    let key_pair = rcgen::KeyPair::generate()
+        .map_err(|err| std::io::Error::other(format!("key generation: {err}")))?;
+    let certificate = params
+        .self_signed(&key_pair)
+        .map_err(|err| std::io::Error::other(format!("self-signing: {err}")))?;
+    Ok(SelfSignedCertificate {
+        cert_pem: certificate.pem(),
+        key_pem: key_pair.serialize_pem(),
+        cert_der: certificate.der().as_ref().to_vec(),
+    })
+}
+
+fn persist_pair(dir: &Path, pair: &SelfSignedCertificate) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    match builder.create(dir) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(err) => return Err(err),
+    }
+    write_atomic(dir.join(CERT_FILE), pair.cert_pem.as_bytes(), 0o644)?;
+    write_atomic(dir.join(KEY_FILE), pair.key_pem.as_bytes(), 0o600)
+}
+
+fn write_atomic(path: std::path::PathBuf, contents: &[u8], unix_mode: u32) -> std::io::Result<()> {
+    use std::io::Write;
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+    let temp = dir.join(format!(".tmp-{file_name}"));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(unix_mode);
+    }
+    {
+        let mut file = options.open(&temp)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+    }
+    // unix rename() replaces an existing target atomically
+    std::fs::rename(&temp, &path)
 }
 
 pub(crate) fn certificate_san_entries(cert_der: &[u8]) -> Vec<String> {
-    todo!("t3: parse DNS + IP SANs from DER")
+    let Ok((_, cert)) = x509_parser::prelude::X509Certificate::from_der(cert_der) else {
+        return Vec::new();
+    };
+    let Ok(Some(extension)) = cert.subject_alternative_name() else {
+        return Vec::new();
+    };
+    extension
+        .value
+        .general_names
+        .iter()
+        .filter_map(|name| match name {
+            x509_parser::extensions::GeneralName::DNSName(dns) => Some(dns.to_string()),
+            x509_parser::extensions::GeneralName::IPAddress(octets) => match octets.len() {
+                4 => {
+                    let mut bytes = [0u8; 4];
+                    bytes.copy_from_slice(&octets[..4]);
+                    Some(IpAddr::V4(std::net::Ipv4Addr::from(bytes)).to_string())
+                }
+                16 => {
+                    let mut bytes = [0u8; 16];
+                    bytes.copy_from_slice(&octets[..16]);
+                    Some(IpAddr::V6(std::net::Ipv6Addr::from(bytes)).to_string())
+                },
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
 }
 
 pub(crate) fn missing_san_entries(current: &[String], cert_sans: &[String]) -> Vec<String> {
-    todo!("t3: order-insensitive diff")
+    current
+        .iter()
+        .filter(|entry| {
+            !cert_sans
+                .iter()
+                .any(|san| san.eq_ignore_ascii_case(entry.as_str()))
+        })
+        .cloned()
+        .collect()
 }
 
 pub(crate) fn cert_sha256_fingerprint(cert_der: &[u8]) -> String {
-    todo!("t3: hex sha256")
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(cert_der);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(test)]
