@@ -7155,6 +7155,16 @@ mod tests {
     }
 
     #[test]
+    fn tls_listener_url_formats_scheme() {
+        assert_eq!(listener_scheme(true), "https");
+        assert_eq!(listener_scheme(false), "http");
+        assert_eq!(
+            format!("{}://{}", listener_scheme(true), "0.0.0.0:8787"),
+            "https://0.0.0.0:8787"
+        );
+    }
+
+    #[test]
     fn tls_self_signed_flag_in_help() {
         assert!(help_text().contains("--tls-self-signed"));
     }

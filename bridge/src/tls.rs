@@ -592,6 +592,35 @@ mod tests {
     }
 
     #[test]
+    fn san_drift_warning_lists_missing_entries() {
+        let sans: Vec<String> = TEST_SANS.iter().map(|s| s.to_string()).collect();
+        let pair =
+            generate_with_validity(&sans, fixed_now(), fixed_now() + time::Duration::days(1))
+                .unwrap();
+        let mut current = sans.clone();
+        current.push("10.0.0.9".to_string());
+        let warnings = san_drift_warnings(&current, &pair.cert_der);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("10.0.0.9"), "got {warnings:?}");
+        assert!(san_drift_warnings(&sans, &pair.cert_der).is_empty());
+    }
+
+    #[test]
+    fn san_drift_does_not_regenerate_valid_cert() {
+        let dir = temp_tls_dir("drift");
+        let sans: Vec<String> = TEST_SANS.iter().map(|s| s.to_string()).collect();
+        let pair =
+            generate_with_validity(&sans, fixed_now(), fixed_now() + time::Duration::days(1))
+                .unwrap();
+        std::fs::write(dir.join(CERT_FILE), &pair.cert_pem).unwrap();
+        std::fs::write(dir.join(KEY_FILE), &pair.key_pem).unwrap();
+        let drifted = ["10.0.0.9".to_string()];
+        assert!(!san_drift_warnings(&drifted, &pair.cert_der).is_empty());
+        let reloaded = load_or_generate_self_signed(&dir, fixed_now()).unwrap();
+        assert_eq!(reloaded.cert_pem, pair.cert_pem);
+    }
+
+    #[test]
     fn fingerprint_is_stable_hex_and_differs_per_cert() {
         let sans: Vec<String> = TEST_SANS.iter().map(|s| s.to_string()).collect();
         let one =
