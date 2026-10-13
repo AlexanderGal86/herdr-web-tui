@@ -1598,7 +1598,7 @@ fn normalize_allowed_host(host: &str) -> Result<String, String> {
     Ok(host.to_ascii_lowercase())
 }
 
-fn is_valid_dns_hostname(host: &str) -> bool {
+pub(crate) fn is_valid_dns_hostname(host: &str) -> bool {
     if host.len() > 253 {
         return false;
     }

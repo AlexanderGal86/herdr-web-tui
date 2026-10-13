@@ -2,15 +2,224 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 
 pub(crate) fn default_tls_state_dir() -> PathBuf {
-    todo!("t2: HERDR_WEB_TLS_DIR > XDG_STATE_HOME > HOME > ./herdr-web-tls")
+    if let Some(path) = crate::store_util::non_empty_env_path("HERDR_WEB_TLS_DIR") {
+        return path;
+    }
+    if let Some(state_home) = crate::store_util::non_empty_env_path("XDG_STATE_HOME") {
+        return state_home.join("herdr-web").join("tls");
+    }
+    if let Some(home) = crate::store_util::non_empty_env_path("HOME") {
+        return home
+            .join(".local")
+            .join("state")
+            .join("herdr-web")
+            .join("tls");
+    }
+    PathBuf::from("herdr-web-tls")
 }
 
 pub(crate) fn host_san_entries() -> Vec<String> {
-    todo!("t2: gather hostname (+FQDN) and non-loopback/non-link-local interface IPs")
+    let hostname = os_hostname();
+    let fqdn = fqdn_for_hostname(hostname.as_deref());
+    let ips = interface_ips();
+    san_entry_set(hostname.as_deref().unwrap_or(""), fqdn.as_deref(), &ips)
 }
 
 fn san_entry_set(hostname: &str, fqdn: Option<&str>, ips: &[IpAddr]) -> Vec<String> {
-    todo!("t2: localhost + loopbacks + hostname + fqdn + suitable IPs, deduped")
+    let mut entries: Vec<String> = vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+    ];
+    let push_unique = |entries: &mut Vec<String>, value: String| {
+        if !entries.iter().any(|entry| entry.eq_ignore_ascii_case(&value)) {
+            entries.push(value);
+        }
+    };
+    for name in [Some(hostname), fqdn].into_iter().flatten() {
+        let name = name.to_ascii_lowercase();
+        if crate::web_bridge::is_valid_dns_hostname(&name) {
+            push_unique(&mut entries, name);
+        }
+    }
+    let mut suitable: Vec<IpAddr> = ips
+        .iter()
+        .copied()
+        .filter(|ip| is_suitable_san_ip(*ip))
+        .collect();
+    suitable.sort();
+    suitable.dedup();
+    for ip in suitable {
+        push_unique(&mut entries, ip.to_string());
+    }
+    entries
+}
+
+fn is_suitable_san_ip(ip: IpAddr) -> bool {
+    if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+        return false;
+    }
+    match ip {
+        IpAddr::V4(v4) => !v4.is_link_local() && !v4.is_broadcast() && !v4.is_documentation(),
+        // v6 link-local fe80::/10 has no stable std helper yet
+        IpAddr::V6(v6) => v6.segments()[0] & 0xffc0 != 0xfe80,
+    }
+}
+
+#[cfg(unix)]
+fn os_hostname() -> Option<String> {
+    use std::os::unix::ffi::OsStringExt;
+    let mut buffer = [0u8; 256];
+    let status = unsafe {
+        libc::gethostname(buffer.as_mut_ptr() as *mut libc::c_char, buffer.len())
+    };
+    if status != 0 {
+        return None;
+    }
+    let end = buffer.iter().position(|byte| *byte == 0).unwrap_or(buffer.len());
+    std::ffi::OsString::from_vec(buffer[..end].to_vec())
+        .into_string()
+        .ok()
+}
+
+#[cfg(unix)]
+fn fqdn_for_hostname(hostname: Option<&str>) -> Option<String> {
+    use std::ptr;
+    let hostname = hostname?;
+    let mut hints: libc::addrinfo = unsafe { std::mem::zeroed() };
+    hints.ai_flags = libc::AI_CANONNAME;
+    let c_hostname = std::ffi::CString::new(hostname).ok()?;
+    let mut result: *mut libc::addrinfo = ptr::null_mut();
+    let status = unsafe {
+        libc::getaddrinfo(c_hostname.as_ptr(), ptr::null(), &hints, &mut result)
+    };
+    if status != 0 {
+        return None;
+    }
+    let canon = unsafe { (*result).ai_canonname };
+    let fqdn = if canon.is_null() {
+        None
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(canon) }
+            .to_str()
+            .ok()
+            .map(str::to_string)
+    };
+    unsafe { libc::freeaddrinfo(result) };
+    fqdn
+}
+
+#[cfg(unix)]
+fn interface_ips() -> Vec<IpAddr> {
+    use std::ptr;
+    let mut ips = Vec::new();
+    let mut ifap: *mut libc::ifaddrs = ptr::null_mut();
+    if unsafe { libc::getifaddrs(&mut ifap) } != 0 {
+        return ips;
+    }
+    let mut cursor = ifap;
+    while !cursor.is_null() {
+        let ifa = unsafe { &*cursor };
+        let addr = ifa.ifa_addr;
+        if !addr.is_null() {
+            let family = unsafe { (*addr).sa_family } as i32;
+            match family {
+                libc::AF_INET => {
+                    let sockaddr = unsafe { &*(addr as *const libc::sockaddr_in) };
+                    ips.push(IpAddr::V4(std::net::Ipv4Addr::from(
+                        sockaddr.sin_addr.s_addr.to_ne_bytes(),
+                    )));
+                }
+                libc::AF_INET6 => {
+                    let sockaddr = unsafe { &*(addr as *const libc::sockaddr_in6) };
+                    ips.push(IpAddr::V6(std::net::Ipv6Addr::from(
+                        sockaddr.sin6_addr.s6_addr,
+                    )));
+                }
+                _ => {}
+            }
+        }
+        cursor = ifa.ifa_next;
+    }
+    unsafe { libc::freeifaddrs(ifap) };
+    ips
+}
+
+// shortcut: windows hostname/FQDN come from env (COMPUTERNAME/USERDNSDOMAIN);
+// cross-check on a real Windows host before shipping a Windows build
+#[cfg(windows)]
+fn os_hostname() -> Option<String> {
+    std::env::var("COMPUTERNAME").ok()
+}
+
+#[cfg(windows)]
+fn fqdn_for_hostname(hostname: Option<&str>) -> Option<String> {
+    let hostname = hostname?;
+    let domain = std::env::var("USERDNSDOMAIN").ok()?;
+    Some(format!("{hostname}.{domain}"))
+}
+
+#[cfg(windows)]
+fn interface_ips() -> Vec<IpAddr> {
+    use std::ptr;
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
+        GAA_FLAG_SKIP_MULTICAST, IP_ADAPTER_ADDRESSES_LH,
+    };
+    use windows_sys::Win32::Networking::WinSock::{
+        AF_INET, AF_INET6, AF_UNSPEC, SOCKADDR, SOCKADDR_IN, SOCKADDR_IN6,
+    };
+
+    const FLAGS: u32 = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    let mut size: u32 = 16 * 1024;
+    let mut buffer = vec![0u8; size as usize];
+    loop {
+        let status = unsafe {
+            GetAdaptersAddresses(
+                AF_UNSPEC as u32,
+                FLAGS,
+                ptr::null_mut(),
+                buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH,
+                &mut size,
+            )
+        };
+        if status == ERROR_SUCCESS {
+            break;
+        }
+        if size as usize > buffer.len() {
+            buffer = vec![0u8; size as usize];
+            continue;
+        }
+        return Vec::new();
+    }
+    let mut ips = Vec::new();
+    let mut adapter = buffer.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
+    while !adapter.is_null() {
+        let adapter_ref = unsafe { &*adapter };
+        let mut entry = adapter_ref.FirstUnicastAddress;
+        while !entry.is_null() {
+            let entry_ref = unsafe { &*entry };
+            let sockaddr = entry_ref.Address.lpSockaddr as *const SOCKADDR;
+            if !sockaddr.is_null() {
+                let family = unsafe { (*sockaddr).sa_family };
+                if family == AF_INET as u16 {
+                    let v4 = unsafe { &*(sockaddr as *const SOCKADDR_IN) };
+                    ips.push(IpAddr::V4(std::net::Ipv4Addr::from(unsafe {
+                        v4.sin_addr.S_un.S_addr
+                    })));
+                } else if family == AF_INET6 as u16 {
+                    let v6 = unsafe { &*(sockaddr as *const SOCKADDR_IN6) };
+                    ips.push(IpAddr::V6(std::net::Ipv6Addr::from(unsafe {
+                        v6.sin6_addr.u.Byte
+                    })));
+                }
+            }
+            entry = entry_ref.Next;
+        }
+        adapter = adapter_ref.Next;
+    }
+    ips
 }
 
 #[cfg(test)]
