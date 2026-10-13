@@ -7670,6 +7670,23 @@ mod tests {
     }
 
     #[test]
+    fn authority_port_malformed_explicit_ports_are_rejected() {
+        let policy = RequestPolicy {
+            bind_host: "0.0.0.0".to_string(),
+            bind_port: 443,
+            allowed_hosts: vec!["srv.example".to_string()],
+            allowed_origins: Vec::new(),
+            allowed_connect_sources: Vec::new(),
+            default_scheme_port: 443,
+        };
+        assert!(host_authority_allowed("srv.example", &policy));
+        assert!(host_authority_allowed("srv.example:443", &policy));
+        assert!(!host_authority_allowed("srv.example:bogus", &policy));
+        assert!(!host_authority_allowed("srv.example:", &policy));
+        assert!(!host_authority_allowed("srv.example:65536", &policy));
+    }
+
+    #[test]
     fn authority_port_loopback_bypasses_scheme_default() {
         let policy = test_policy("0.0.0.0", 9999);
         assert!(host_authority_allowed("localhost:443", &policy));

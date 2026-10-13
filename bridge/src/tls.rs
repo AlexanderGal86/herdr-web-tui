@@ -673,6 +673,31 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_first_starts_share_one_identity() {
+        let dir = temp_tls_dir("concurrent");
+        let now = fixed_now();
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let dir = dir.clone();
+            handles.push(std::thread::spawn(move || {
+                load_or_generate_self_signed(&dir, now)
+                    .unwrap()
+                    .cert_pem
+            }));
+        }
+        let certs: Vec<String> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert!(certs.windows(2).all(|w| w[0] == w[1]));
+    }
+
+    #[test]
+    fn ipv4_from_saddr_decodes_network_order() {
+        // a sockaddr_in holds the address bytes in network order; rebuild the
+        // u32 the way this host's memory does, as the windows adapter walk sees it
+        let saddr = u32::from_ne_bytes([192, 168, 1, 5]);
+        assert_eq!(ipv4_from_saddr(saddr), std::net::Ipv4Addr::new(192, 168, 1, 5));
+    }
+
+    #[test]
     fn san_drift_warning_lists_missing_entries() {
         let sans: Vec<String> = TEST_SANS.iter().map(|s| s.to_string()).collect();
         let pair =
