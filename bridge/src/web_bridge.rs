@@ -7346,6 +7346,40 @@ mod tests {
     }
 
     #[test]
+    fn tls_origin_https_origin_accepted_on_tls_port() {
+        let mut policy = test_policy("0.0.0.0", 9443);
+        policy.default_scheme_port = 443;
+        policy.allowed_hosts = vec!["srv.example".to_string()];
+        assert!(request_allowed(
+            &origin_headers("srv.example:9443", Some("https://srv.example:9443")),
+            &policy
+        ));
+        let mut implicit = test_policy("0.0.0.0", 443);
+        implicit.default_scheme_port = 443;
+        implicit.allowed_hosts = vec!["srv.example".to_string()];
+        assert!(request_allowed(
+            &origin_headers("srv.example", Some("https://srv.example")),
+            &implicit
+        ));
+        assert!(!request_allowed(
+            &origin_headers("srv.example:9443", Some("https://evil.example")),
+            &policy
+        ));
+    }
+
+    #[test]
+    fn tls_origin_wss_connect_sources() {
+        let mut policy = test_policy("0.0.0.0", 9443);
+        policy.allowed_connect_sources =
+            connect_sources_for_origin("https://srv.example:9443").unwrap();
+        let csp = content_security_policy(&policy);
+        let csp = csp.to_str().expect("csp header");
+        assert!(csp.contains("https://srv.example:9443"));
+        assert!(csp.contains("wss://srv.example:9443"));
+        assert!(!csp.contains("ws://srv.example"));
+    }
+
+    #[test]
     fn tls_self_signed_flag_in_help() {
         assert!(help_text().contains("--tls-self-signed"));
     }
