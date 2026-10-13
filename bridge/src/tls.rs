@@ -1,5 +1,6 @@
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use time::OffsetDateTime;
 use x509_parser::prelude::FromDer as _;
 
@@ -395,6 +396,12 @@ pub(crate) fn cert_sha256_fingerprint(cert_der: &[u8]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+pub(crate) fn server_config(
+    pair: &SelfSignedCertificate,
+) -> std::io::Result<Arc<rustls::ServerConfig>> {
+    todo!("t4: rustls ServerConfig with explicit ring provider")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -558,6 +565,17 @@ mod tests {
         drifted.push("10.0.0.9".to_string());
         assert_eq!(missing_san_entries(&drifted, &parsed), vec!["10.0.0.9"]);
         assert!(missing_san_entries(&sans, &parsed).is_empty());
+    }
+
+    #[test]
+    fn server_config_builds_from_fresh_pair() {
+        let sans: Vec<String> = TEST_SANS.iter().map(|s| s.to_string()).collect();
+        let pair =
+            generate_with_validity(&sans, fixed_now(), fixed_now() + time::Duration::days(1))
+                .unwrap();
+        assert_eq!(pem_certificate_der(&pair.cert_pem).unwrap(), pair.cert_der);
+        let config = server_config(&pair).unwrap();
+        assert!(format!("{config:?}").contains("ServerConfig"));
     }
 
     #[test]
