@@ -129,6 +129,7 @@ struct RequestPolicy {
     allowed_hosts: Vec<String>,
     allowed_origins: Vec<String>,
     allowed_connect_sources: Vec<String>,
+    default_scheme_port: u16,
 }
 
 #[derive(Debug, Serialize)]
@@ -1005,6 +1006,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         allowed_hosts: options.allowed_hosts.clone(),
         allowed_origins: options.allowed_origins.clone(),
         allowed_connect_sources: options.allowed_connect_sources.clone(),
+        default_scheme_port: if options.tls_self_signed { 443 } else { 80 },
     };
     let api = ApiClient::for_socket_path(crate::session::active_api_socket_path());
     let daemon_status = startup_daemon_status(&api)?;
@@ -1505,7 +1507,11 @@ fn host_authority_allowed(authority: &str, policy: &RequestPolicy) -> bool {
         return true;
     }
 
-    if !authority_port_matches(authority, policy.bind_port) {
+    if !authority_port_matches(
+        authority,
+        policy.bind_port,
+        policy.default_scheme_port,
+    ) {
         return false;
     }
 
@@ -1638,10 +1644,10 @@ fn is_unspecified_bind_host(host: &str) -> bool {
     matches!(host, "0.0.0.0" | "::" | "[::]")
 }
 
-fn authority_port_matches(authority: &str, expected_port: u16) -> bool {
+fn authority_port_matches(authority: &str, expected_port: u16, default_port: u16) -> bool {
     match authority_port(authority) {
         Some(port) => port == expected_port,
-        None => expected_port == 80,
+        None => expected_port == default_port,
     }
 }
 
@@ -6072,6 +6078,7 @@ mod tests {
             allowed_hosts: Vec::new(),
             allowed_origins: vec!["http://localhost".to_string()],
             allowed_connect_sources: Vec::new(),
+        default_scheme_port: 80,
         };
         assert!(request_allowed(
             &origin_headers("192.168.1.10:4000", Some("http://localhost")),
@@ -6138,6 +6145,7 @@ mod tests {
             allowed_hosts: vec!["herdr-host.local".to_string()],
             allowed_origins: Vec::new(),
             allowed_connect_sources: Vec::new(),
+        default_scheme_port: 80,
         };
         assert!(host_authority_allowed("herdr-host.local:4000", &policy));
         assert!(host_authority_allowed("HERDR-HOST.LOCAL:4000", &policy));
@@ -6153,6 +6161,7 @@ mod tests {
             allowed_hosts: Vec::new(),
             allowed_origins: vec!["http://localhost".to_string()],
             allowed_connect_sources: Vec::new(),
+        default_scheme_port: 80,
         };
         assert_eq!(
             cors_origin_header(
