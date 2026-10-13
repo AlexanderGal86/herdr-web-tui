@@ -7403,6 +7403,40 @@ mod tests {
             allowed_hosts: Vec::new(),
             allowed_origins: Vec::new(),
             allowed_connect_sources: Vec::new(),
+            default_scheme_port: 80,
         }
+    }
+
+    #[test]
+    fn authority_port_implicit_matches_scheme_default() {
+        assert!(authority_port_matches("example.com", 443, 443));
+        assert!(authority_port_matches("example.com", 80, 80));
+        assert!(!authority_port_matches("example.com", 443, 80));
+        assert!(!authority_port_matches("example.com", 80, 443));
+    }
+
+    #[test]
+    fn authority_port_explicit_must_equal_bind_port() {
+        assert!(authority_port_matches("example.com:8443", 8443, 80));
+        assert!(!authority_port_matches("example.com:8443", 8444, 443));
+    }
+
+    #[test]
+    fn authority_port_gate_accepts_implicit_tls_host_only_for_tls_policy() {
+        let mut tls_policy = test_policy("0.0.0.0", 443);
+        tls_policy.default_scheme_port = 443;
+        tls_policy.allowed_hosts = vec!["example.com".to_string()];
+        assert!(host_authority_allowed("example.com", &tls_policy));
+
+        let mut plain_policy = test_policy("0.0.0.0", 443);
+        plain_policy.allowed_hosts = vec!["example.com".to_string()];
+        assert!(!host_authority_allowed("example.com", &plain_policy));
+    }
+
+    #[test]
+    fn authority_port_loopback_bypasses_scheme_default() {
+        let policy = test_policy("0.0.0.0", 9999);
+        assert!(host_authority_allowed("localhost:443", &policy));
+        assert!(host_authority_allowed("127.0.0.1", &policy));
     }
 }
