@@ -238,7 +238,7 @@ pub(crate) struct SelfSignedCertificate {
 }
 
 pub(crate) const CERT_FILE: &str = "self-signed.crt.pem";
-pub(crate) const KEY_FILE: &str = "self-signed.key.pem";
+const KEY_FILE: &str = "self-signed.key.pem";
 
 pub(crate) fn load_or_generate_self_signed(
     dir: &Path,
@@ -651,12 +651,18 @@ mod tests {
         let dir = temp_tls_dir("mismatched");
         let now = fixed_now();
         let sans: Vec<String> = TEST_SANS.iter().map(|s| s.to_string()).collect();
-        let one =
-            generate_with_validity(&sans, now - time::Duration::hours(24), now + time::Duration::days(30))
-                .unwrap();
-        let two =
-            generate_with_validity(&sans, now - time::Duration::hours(24), now + time::Duration::days(30))
-                .unwrap();
+        let one = generate_with_validity(
+            &sans,
+            now - time::Duration::hours(24),
+            now + time::Duration::days(30),
+        )
+        .unwrap();
+        let two = generate_with_validity(
+            &sans,
+            now - time::Duration::hours(24),
+            now + time::Duration::days(30),
+        )
+        .unwrap();
         // cert from pair one, key from pair two: each file parses alone
         std::fs::write(dir.join(CERT_FILE), &one.cert_pem).unwrap();
         std::fs::write(dir.join(KEY_FILE), &two.key_pem).unwrap();
