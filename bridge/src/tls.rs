@@ -212,7 +212,9 @@ fn interface_ips() -> Vec<IpAddr> {
                 let family = unsafe { (*sockaddr).sa_family };
                 if family == AF_INET as u16 {
                     let v4 = unsafe { &*(sockaddr as *const SOCKADDR_IN) };
-                    ips.push(IpAddr::V4(ipv4_from_saddr(unsafe { v4.sin_addr.S_un.S_addr })));
+                    ips.push(IpAddr::V4(ipv4_from_saddr(unsafe {
+                        v4.sin_addr.S_un.S_addr
+                    })));
                 } else if family == AF_INET6 as u16 {
                     let v6 = unsafe { &*(sockaddr as *const SOCKADDR_IN6) };
                     ips.push(IpAddr::V6(std::net::Ipv6Addr::from(unsafe {
@@ -279,6 +281,11 @@ struct TlsDirGuard {
 fn lock_tls_dir(dir: &Path) -> std::io::Result<TlsDirGuard> {
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
     let _ = builder.create(dir);
     let lock_path = dir.join(".lock");
     let file = std::fs::OpenOptions::new()
@@ -734,9 +741,7 @@ mod tests {
         for _ in 0..8 {
             let dir = dir.clone();
             handles.push(std::thread::spawn(move || {
-                load_or_generate_self_signed(&dir, now)
-                    .unwrap()
-                    .cert_pem
+                load_or_generate_self_signed(&dir, now).unwrap().cert_pem
             }));
         }
         let certs: Vec<String> = handles.into_iter().map(|h| h.join().unwrap()).collect();
@@ -748,7 +753,10 @@ mod tests {
         // a sockaddr_in holds the address bytes in network order; rebuild the
         // u32 the way this host's memory does, as the windows adapter walk sees it
         let saddr = u32::from_ne_bytes([192, 168, 1, 5]);
-        assert_eq!(ipv4_from_saddr(saddr), std::net::Ipv4Addr::new(192, 168, 1, 5));
+        assert_eq!(
+            ipv4_from_saddr(saddr),
+            std::net::Ipv4Addr::new(192, 168, 1, 5)
+        );
     }
 
     #[test]
