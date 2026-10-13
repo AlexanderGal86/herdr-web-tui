@@ -271,11 +271,14 @@ fn read_valid_pair(dir: &Path, now: OffsetDateTime) -> Option<SelfSignedCertific
     if now < validity.not_before.to_datetime() || now > validity.not_after.to_datetime() {
         return None;
     }
-    Some(SelfSignedCertificate {
+    let pair = SelfSignedCertificate {
         cert_pem,
         key_pem,
         cert_der,
-    })
+    };
+    // a pair only counts as valid when rustls can actually serve it (cert matches key)
+    server_config(&pair).ok()?;
+    Some(pair)
 }
 
 fn pem_certificate_der(cert_pem: &str) -> Option<Vec<u8>> {
@@ -319,7 +322,11 @@ fn persist_pair(dir: &Path, pair: &SelfSignedCertificate) -> std::io::Result<()>
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
+        builder.mode(0o700).recursive(true);
+    }
+    #[cfg(not(unix))]
+    {
+        builder.recursive(true);
     }
     match builder.create(dir) {
         Ok(()) => {}
@@ -334,21 +341,44 @@ fn write_atomic(path: std::path::PathBuf, contents: &[u8], unix_mode: u32) -> st
     use std::io::Write;
     let dir = path.parent().unwrap_or(Path::new("."));
     let file_name = path.file_name().unwrap_or_default().to_string_lossy();
-    let temp = dir.join(format!(".tmp-{file_name}"));
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(unix_mode);
     }
-    {
-        let mut file = options.open(&temp)?;
-        file.write_all(contents)?;
-        file.sync_all()?;
+    let mut last_err = None;
+    for attempt in 0..8 {
+        // O_EXCL via create_new + a unique name blocks symlink/predictable-temp attacks
+        let temp = dir.join(format!(".tmp-{file_name}.{}", std::process::id() + attempt));
+        match options.open(&temp) {
+            Ok(mut file) => {
+                let result = file
+                    .write_all(contents)
+                    .and_then(|()| file.sync_all())
+                    .and_then(|()| {
+                        #[cfg(windows)]
+                        {
+                            // shortcut: std rename cannot replace an existing file on Windows;
+                            // remove first and accept a non-atomic window there
+                            let _ = std::fs::remove_file(&path);
+                        }
+                        std::fs::rename(&temp, &path)
+                    });
+                if result.is_err() {
+                    let _ = std::fs::remove_file(&temp);
+                }
+                return result;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                last_err = Some(err);
+                continue;
+            }
+            Err(err) => return Err(err),
+        }
     }
-    // unix rename() replaces an existing target atomically
-    std::fs::rename(&temp, &path)
+    Err(last_err.unwrap_or_else(|| std::io::Error::other("exhausted temp file attempts")))
 }
 
 pub(crate) fn certificate_san_entries(cert_der: &[u8]) -> Vec<String> {
