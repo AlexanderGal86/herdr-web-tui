@@ -4921,6 +4921,146 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn integration_tls_https_and_wss() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let _guard = crate::session::TEST_ENV_LOCK.lock().unwrap();
+        let unique = format!("herdr-e02-t9-{}", std::process::id());
+        let tls_dir = std::env::temp_dir().join(format!("{unique}-tls"));
+        let static_dir = std::env::temp_dir().join(format!("{unique}-static"));
+        let pins_dir = std::env::temp_dir().join(format!("{unique}-pins"));
+        let notes_dir = std::env::temp_dir().join(format!("{unique}-notes"));
+        std::fs::create_dir_all(&static_dir).expect("test static dir");
+        std::fs::write(static_dir.join("index.html"), "tls-ok").expect("test static file");
+
+        let previous_tls = std::env::var("HERDR_WEB_TLS_DIR").ok();
+        let previous_pins = std::env::var("HERDR_WEB_AGENT_PINS_DIR").ok();
+        let previous_notes = std::env::var("HERDR_WEB_NOTES_DIR").ok();
+        std::env::set_var("HERDR_WEB_TLS_DIR", &tls_dir);
+        std::env::set_var("HERDR_WEB_AGENT_PINS_DIR", &pins_dir);
+        std::env::set_var("HERDR_WEB_NOTES_DIR", &notes_dir);
+
+        let result = integration_tls_https_and_wss_inner(&static_dir).await;
+
+        restore_env("HERDR_WEB_TLS_DIR", previous_tls);
+        restore_env("HERDR_WEB_AGENT_PINS_DIR", previous_pins);
+        restore_env("HERDR_WEB_NOTES_DIR", previous_notes);
+        std::fs::remove_dir_all(&tls_dir).ok();
+        std::fs::remove_dir_all(&static_dir).ok();
+        std::fs::remove_dir_all(&pins_dir).ok();
+        std::fs::remove_dir_all(&notes_dir).ok();
+        result.unwrap();
+    }
+
+    async fn integration_tls_https_and_wss_inner(
+        static_dir: &Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use futures_util::StreamExt;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let cert_pair = crate::tls::load_or_generate_self_signed(
+            &crate::tls::default_tls_state_dir(),
+            time::OffsetDateTime::now_utc(),
+        )?;
+        let server_tls = crate::tls::server_config(&cert_pair)?;
+
+        let request_policy = RequestPolicy {
+            bind_host: "127.0.0.1".to_string(),
+            bind_port: 0,
+            allowed_hosts: Vec::new(),
+            allowed_origins: Vec::new(),
+            allowed_connect_sources: Vec::new(),
+            default_scheme_port: 443,
+        };
+        let state = BridgeState {
+            api: ApiClient::for_socket_path(PathBuf::from("/nonexistent-herdr-api.sock")),
+            client_socket_path: PathBuf::from("/nonexistent-herdr-client.sock"),
+            request_policy: request_policy.clone(),
+            terminal_sessions: Arc::new(Mutex::new(TerminalSessions::default())),
+            selected_pane_id: Arc::new(Mutex::new(None)),
+            agent_activity: Arc::new(AgentActivityManager::new()),
+            agent_pins: Arc::new(AgentPinsManager::new()?),
+            launcher_presets: Arc::new(
+                LauncherPresetStore::load(None).map_err(io::Error::other)?,
+            ),
+            notes: Arc::new(NotesManager::new()?),
+            ui_event_tx: tokio::sync::broadcast::channel(256).0,
+            activity_tx: tokio::sync::broadcast::channel(512).0,
+            upload_dir: static_dir.to_path_buf(),
+        };
+        let activity_tx = state.activity_tx.clone();
+        let app = build_app(state, request_policy, static_dir.to_path_buf());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let rustls_config = axum_server::tls_rustls::RustlsConfig::from_config(server_tls);
+        let server = tokio::spawn(async move {
+            axum_server::tls_rustls::from_tcp_rustls(
+                listener.into_std().expect("std listener"),
+                rustls_config,
+            )
+            .serve(app.into_make_service())
+            .await
+            .expect("tls test server");
+        });
+
+        // (a) raw rustls HTTPS GET against the real app + static fallback
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(rustls::pki_types::CertificateDer::from(
+            cert_pair.cert_der.clone(),
+        ))?;
+        let https_client = rustls::ClientConfig::builder_with_provider(provider.clone())
+            .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
+            .with_root_certificates(roots.clone())
+            .with_no_client_auth();
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(https_client));
+        let tcp = tokio::net::TcpStream::connect(address).await?;
+        let mut tls_stream = connector
+            .connect(
+                rustls::pki_types::ServerName::try_from("localhost")?,
+                tcp,
+            )
+            .await?;
+        let request = format!(
+            "GET /index.html HTTP/1.1\r\nHost: localhost:{}\r\nConnection: close\r\n\r\n",
+            address.port()
+        );
+        tls_stream.write_all(request.as_bytes()).await?;
+        let mut response_bytes = Vec::new();
+        tls_stream.read_to_end(&mut response_bytes).await?;
+        let response = String::from_utf8_lossy(&response_bytes);
+        assert!(response.starts_with("HTTP/1.1 200"), "GET failed: {response}");
+        assert!(response.contains("tls-ok"), "body missing: {response}");
+
+        // (b) wss handshake + one deterministic activity frame
+        let wss_client = rustls::ClientConfig::builder_with_provider(provider)
+            .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let (mut ws, _handshake) = tokio_tungstenite::connect_async_tls_with_config(
+            format!("wss://127.0.0.1:{}/ws/activity", address.port()),
+            None,
+            false,
+            Some(tokio_tungstenite::Connector::Rustls(Arc::new(wss_client))),
+        )
+        .await?;
+        activity_tx.send(ActivityMessage::ResyncRequired {
+            reason: "tls-integration".to_string(),
+        })?;
+        let frame = tokio::time::timeout(Duration::from_secs(10), ws.next())
+            .await
+            .map_err(|_| "activity frame timed out")?
+            .ok_or("activity socket closed")?
+            .map_err(|err| format!("ws read: {err}"))?;
+        let text = frame.into_text().map_err(|_| "non-text frame")?;
+        assert!(text.contains("resync_required"), "frame: {text}");
+        assert!(text.contains("tls-integration"), "frame: {text}");
+
+        server.abort();
+        Ok(())
+    }
+
     struct PendingWebSocketSink;
 
     impl Sink<Message> for PendingWebSocketSink {
