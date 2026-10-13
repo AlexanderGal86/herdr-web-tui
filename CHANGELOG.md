@@ -17,6 +17,12 @@
 
 ### Fixed
 
+- Terminal selections no longer copy to the clipboard by themselves.
+  Finishing a mouse selection in the web terminal silently overwrote the
+  clipboard with the selected text (ghostty-web's built-in copy-on-select).
+  Copying now happens only through explicit actions: right-click copy, the
+  copy keyboard shortcut, or the mobile copy flow.
+
 - Recover open panes within ~a second after a herdr server restart: terminal sockets
   that close without a close reason now trigger an immediate snapshot refresh, so
   panes remount on the rotated terminal ids instead of retrying the dead ones until
@@ -24,6 +30,12 @@
 
 ### Added
 
+- Copying selected terminal text with a right-click: when a selection is
+  active, right-click copies it to the clipboard (with the same wrapped-URL
+  normalization as the mobile copy flow) and clears the selection, instead of
+  opening the pane menu. Shift+right-click always opens the menu, and
+  right-clicking without a selection keeps the previous behavior (menu, or
+  forwarding to the pane in "Send right-clicks to pane" mode).
 - Add a Russian troubleshooting section for a hung bridge: idle WebSocket
   connections, heartbeat timeouts and `terminal not found` on re-attach, with
   diagnosis steps and a `systemctl restart herdr-web-tui.service` recovery.

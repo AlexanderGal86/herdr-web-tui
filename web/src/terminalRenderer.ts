@@ -106,6 +106,7 @@ type GhosttySelectionManagerAccess = {
   getSelectionCoords(): { startRow: number; endRow: number } | null;
   getDirtySelectionRows(): Set<number>;
   requestRender(): void;
+  copyToClipboard?: (text: string) => void;
   selectionChangedEmitter?: {
     fire?: () => void;
   };
@@ -155,6 +156,7 @@ export type TerminalRenderer = {
   setFontSize(fontSizePx: number): TerminalSize | null;
   focus(): void;
   focusTextInput(): void;
+  getSelection(): string;
   clearSelection(): void;
   paste(text: string): void;
   setScrollSensitivity(value: number): void;
@@ -184,6 +186,7 @@ export class GhosttyRenderer implements TerminalRenderer {
   #eventDrivenRendering: boolean;
   #renderFrameId: number | null = null;
   #renderInteractionCleanup: (() => void) | null = null;
+  #selectionClipboardCleanup: (() => void) | null = null;
   #disposed = false;
 
   constructor(fontSizePx = DEFAULT_TERMINAL_FONT_SIZE_PX, cursorBlink = true) {
@@ -248,6 +251,7 @@ export class GhosttyRenderer implements TerminalRenderer {
     terminal.renderer?.getCanvas().style.setProperty("image-rendering", "auto");
     this.#terminal = terminal;
     this.#fitAddon = fitAddon;
+    this.#selectionClipboardCleanup = disableGhosttySelectionClipboardWrites(terminal);
     this.#installAccessibleScreenPublisher();
     this.#installScrollHandlers();
     this.#installMobileInputBridge();
@@ -363,6 +367,10 @@ export class GhosttyRenderer implements TerminalRenderer {
     }, 0);
   }
 
+  getSelection() {
+    return this.#terminal?.getSelection() ?? "";
+  }
+
   clearSelection() {
     this.#terminal?.clearSelection();
   }
@@ -375,6 +383,8 @@ export class GhosttyRenderer implements TerminalRenderer {
     this.#disposed = true;
     this.#renderInteractionCleanup?.();
     this.#renderInteractionCleanup = null;
+    this.#selectionClipboardCleanup?.();
+    this.#selectionClipboardCleanup = null;
     if (this.#renderFrameId !== null) {
       window.cancelAnimationFrame(this.#renderFrameId);
       this.#renderFrameId = null;
@@ -1836,6 +1846,23 @@ function isGhosttySelectionManager(value: unknown): value is GhosttySelectionMan
     typeof candidate.getDirtySelectionRows === "function" &&
     typeof candidate.requestRender === "function"
   );
+}
+
+export function disableGhosttySelectionClipboardWrites(terminal: Terminal): () => void {
+  // SAFETY: ghostty-web 0.4.0 SelectionManager copies finished mouse
+  // selections to the clipboard on mouseup (copy-on-select) and offers no
+  // public opt-out (copyToClipboard is private in typings). Replace the
+  // method on the validated live instance; copying stays available through
+  // the explicit paths (right-click copy, copy shortcut, mobile flow).
+  const selectionManager = terminalSelectionManager(terminal);
+  const originalCopy = selectionManager?.copyToClipboard;
+  if (!selectionManager || typeof originalCopy !== "function") {
+    return () => {};
+  }
+  selectionManager.copyToClipboard = () => {};
+  return () => {
+    selectionManager.copyToClipboard = originalCopy;
+  };
 }
 
 function markSelectionRowsDirty(

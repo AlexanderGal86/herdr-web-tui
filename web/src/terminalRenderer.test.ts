@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  disableGhosttySelectionClipboardWrites,
   handleTerminalCustomKeyEvent,
   installTerminalInteractionRendering,
   renderGhosttyTerminalFrame,
@@ -131,6 +132,49 @@ describe("terminal selection copy shortcuts", () => {
     expect(dispatchCtrlC(keyEvent({ ctrlKey: true }), terminal, "MacIntel")).toBe(false);
     expect(terminal.input).toHaveBeenCalledOnce();
     expect(terminal.input).toHaveBeenCalledWith("\x03", true);
+  });
+});
+
+describe("terminal selection clipboard suppression", () => {
+  it("replaces the ghostty selection clipboard write with a no-op and restores it on cleanup", () => {
+    const originalCopy = vi.fn();
+    const selectionManager = {
+      getSelectionCoords: vi.fn(),
+      getDirtySelectionRows: vi.fn(() => new Set<number>()),
+      requestRender: vi.fn(),
+      copyToClipboard: originalCopy,
+    };
+    const terminal = { selectionManager } as never;
+
+    const cleanup = disableGhosttySelectionClipboardWrites(terminal);
+
+    expect(selectionManager.copyToClipboard).not.toBe(originalCopy);
+    selectionManager.copyToClipboard?.("copied text");
+    expect(originalCopy).not.toHaveBeenCalled();
+
+    cleanup();
+    expect(selectionManager.copyToClipboard).toBe(originalCopy);
+  });
+
+  it("leaves terminals without a usable selection manager untouched", () => {
+    const cleanup = disableGhosttySelectionClipboardWrites({} as never);
+
+    expect(() => cleanup()).not.toThrow();
+  });
+
+  it("ignores selection managers that do not expose copyToClipboard", () => {
+    const selectionManager = {
+      getSelectionCoords: vi.fn(),
+      getDirtySelectionRows: vi.fn(() => new Set<number>()),
+      requestRender: vi.fn(),
+    };
+    const terminal = { selectionManager } as never;
+
+    const cleanup = disableGhosttySelectionClipboardWrites(terminal);
+
+    expect((selectionManager as { copyToClipboard?: unknown }).copyToClipboard)
+      .toBeUndefined();
+    expect(() => cleanup()).not.toThrow();
   });
 });
 

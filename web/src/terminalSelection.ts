@@ -104,6 +104,16 @@ export function normalizeSelectionForUrl(selection: string) {
   return selection.replace(/\s*\n\s*/gu, "").replace(/[ \t\r\f\v]+/gu, " ").trim();
 }
 
+/**
+ * Text to copy when the user right-clicks over an active selection, or null
+ * when the selection has no copyable content. Applies the same wrapped-URL
+ * normalization as the mobile copy flow.
+ */
+export function terminalSelectionRightClickCopyText(selection: string): string | null {
+  const normalized = normalizeMobileTerminalCopyText(selection).trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
 function wrappedUrl(lines: string[], startIndex: number, match: RegExpMatchArray) {
   const matchStart = match.index ?? 0;
   let url = match[0];
