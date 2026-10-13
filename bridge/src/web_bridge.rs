@@ -7121,6 +7121,24 @@ mod tests {
     }
 
     #[test]
+    fn tls_self_signed_flag_parses() {
+        let args = vec!["--tls-self-signed".to_string()];
+        let options = parse_options(&args).unwrap().expect("options");
+        assert!(options.tls_self_signed);
+
+        let plain = parse_options(&[]).unwrap().expect("options");
+        assert!(!plain.tls_self_signed);
+
+        let rejected = parse_options(&["--tls-self-signed=false".to_string()]);
+        assert!(rejected.is_err());
+    }
+
+    #[test]
+    fn tls_self_signed_flag_in_help() {
+        assert!(help_text().contains("--tls-self-signed"));
+    }
+
+    #[test]
     fn parse_options_configures_explicit_session() {
         let _guard = crate::session::TEST_ENV_LOCK.lock().unwrap();
         let previous_session = std::env::var(crate::session::SESSION_ENV_VAR).ok();
