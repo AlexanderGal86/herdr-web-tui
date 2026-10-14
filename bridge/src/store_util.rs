@@ -107,6 +107,8 @@ pub(crate) fn set_private_dir_permissions(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+// `path` is only read under cfg(unix)
+#[cfg_attr(not(unix), allow(unused_variables))]
 pub(crate) fn set_private_file_permissions(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
