@@ -4,6 +4,7 @@ mod launcher_presets;
 mod notes;
 mod session;
 mod store_util;
+mod tls;
 mod web_bridge;
 mod websocket_heartbeat;
 mod workspace;

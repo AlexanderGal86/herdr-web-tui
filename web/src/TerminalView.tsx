@@ -43,6 +43,7 @@ import {
   findFirstUrlInSelection,
   normalizeMobileTerminalCopyText,
   openableHttpUrl,
+  terminalSelectionRightClickCopyText,
 } from "./terminalSelection";
 import { GhosttyRenderer } from "./terminalRenderer";
 import type { MobileTerminalTouchEvent, TerminalRenderer, TerminalSize } from "./terminalRenderer";
@@ -331,9 +332,11 @@ export function TerminalView({
       try {
         await copyToClipboard(text);
         showUploadStatus(successMessage, 2200);
+        return true;
       } catch (error) {
         console.warn("selection copy failed", error);
         showUploadStatus("Copy failed", 3000);
+        return false;
       }
     },
     [showUploadStatus],
@@ -1462,6 +1465,23 @@ export function TerminalView({
     if ("pointerType" in event.nativeEvent && event.nativeEvent.pointerType === "touch") return;
     const gesture = contextGestureRef.current;
     const down = event.type === "pointerdown" || event.type === "mousedown";
+    // Right-clicking an active selection copies it instead of opening the pane
+    // menu (Shift+right-click always forces the menu). The whole gesture is
+    // consumed so neither the pane app nor the browser menu reacts.
+    if (down && !event.shiftKey && (event.type === "pointerdown" || !gesture.pointerDown)) {
+      const selectionCopy = terminalSelectionRightClickCopyText(rendererRef.current?.getSelection() ?? "");
+      if (selectionCopy !== null) {
+        gesture.blocked = true;
+        gesture.opened = true;
+        gesture.pointerDown = event.type === "pointerdown";
+        event.preventDefault();
+        event.stopPropagation();
+        void copyText(selectionCopy, "Copied selection").then((copied) => {
+          if (copied) rendererRef.current?.clearSelection();
+        });
+        return;
+      }
+    }
     if (down) {
       if (event.type === "pointerdown" || !gesture.pointerDown) {
         gesture.blocked = !rightClickPassthrough || event.shiftKey;

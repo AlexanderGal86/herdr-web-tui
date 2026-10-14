@@ -103,6 +103,7 @@ struct BridgeOptions {
     allowed_hosts: Vec<String>,
     allowed_origins: Vec<String>,
     allowed_connect_sources: Vec<String>,
+    tls_self_signed: bool,
 }
 
 #[derive(Clone)]
@@ -128,6 +129,7 @@ struct RequestPolicy {
     allowed_hosts: Vec<String>,
     allowed_origins: Vec<String>,
     allowed_connect_sources: Vec<String>,
+    default_scheme_port: u16,
 }
 
 #[derive(Debug, Serialize)]
@@ -858,6 +860,7 @@ fn parse_options(args: &[String]) -> Result<Option<BridgeOptions>, String> {
     let mut allowed_origins = Vec::new();
     let mut allowed_connect_sources = Vec::new();
     let mut explicit_session = None;
+    let mut tls_self_signed = false;
     let mut index = 0;
 
     while index < args.len() {
@@ -911,6 +914,10 @@ fn parse_options(args: &[String]) -> Result<Option<BridgeOptions>, String> {
                 launcher_presets_path = Some(expand_home(value));
                 index += 2;
             }
+            "--tls-self-signed" => {
+                tls_self_signed = true;
+                index += 1;
+            }
             "--allow-host" => {
                 let Some(value) = args.get(index + 1) else {
                     return Err("missing value for --allow-host".into());
@@ -952,6 +959,7 @@ fn parse_options(args: &[String]) -> Result<Option<BridgeOptions>, String> {
         allowed_hosts,
         allowed_origins,
         allowed_connect_sources,
+        tls_self_signed,
     }))
 }
 
@@ -962,12 +970,13 @@ fn print_help() {
 fn help_text() -> &'static str {
     "herdr-web-bridge\n\
 \n\
-Usage: herdr-web-bridge [--session NAME] [--host HOST] [--port PORT] [--static-dir DIR] [--upload-dir DIR] [--launcher-presets PATH] [--allow-origin ORIGIN] [--allow-host HOSTNAME] [--allow-connect-origin ORIGIN]\n\
+Usage: herdr-web-bridge [--session NAME] [--host HOST] [--port PORT] [--static-dir DIR] [--upload-dir DIR] [--launcher-presets PATH] [--allow-origin ORIGIN] [--allow-host HOSTNAME] [--allow-connect-origin ORIGIN] [--tls-self-signed]\n\
 \n\
 Runs the local HTTP/WebSocket bridge for herdr-web.\n\
 Defaults to the active Herdr daemon sockets and 127.0.0.1:8787.\n\
 Use --session NAME to target a named Herdr session and ignore HERDR_SOCKET_PATH.\n\
 Use --host 0.0.0.0 to listen on non-loopback interfaces.\n\
+Use --tls-self-signed to serve HTTPS/WSS with a persistent self-signed certificate.\n\
 Use --allow-origin http://localhost for bundled Android app access.\n\
 Use --allow-host HOSTNAME to accept that exact DNS hostname in Host headers.\n\
 Use --allow-connect-origin ORIGIN to let the served web app connect to another bridge origin.\n\
@@ -997,6 +1006,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         allowed_hosts: options.allowed_hosts.clone(),
         allowed_origins: options.allowed_origins.clone(),
         allowed_connect_sources: options.allowed_connect_sources.clone(),
+        default_scheme_port: if options.tls_self_signed { 443 } else { 80 },
     };
     let api = ApiClient::for_socket_path(crate::session::active_api_socket_path());
     let daemon_status = startup_daemon_status(&api)?;
@@ -1027,6 +1037,56 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         upload_dir: options.upload_dir.clone(),
     };
     spawn_agent_activity_watcher(state.clone());
+    let app = build_app(state, request_policy, options.static_dir);
+    let bind = format!("{}:{}", options.host, options.port);
+    let listener = tokio::net::TcpListener::bind(&bind).await?;
+    if options.tls_self_signed {
+        serve_tls(listener, app, &bind).await
+    } else {
+        info!(url = %format!("http://{bind}"), "herdr-web-bridge listening");
+        axum::serve(listener, app).await
+    }
+}
+
+fn listener_scheme(tls_self_signed: bool) -> &'static str {
+    if tls_self_signed {
+        "https"
+    } else {
+        "http"
+    }
+}
+
+async fn serve_tls(listener: tokio::net::TcpListener, app: Router, bind: &str) -> io::Result<()> {
+    let state_dir = crate::tls::default_tls_state_dir();
+    let pair =
+        crate::tls::load_or_generate_self_signed(&state_dir, time::OffsetDateTime::now_utc())?;
+    let cert_path = state_dir.join(crate::tls::CERT_FILE);
+    let fingerprint = crate::tls::cert_sha256_fingerprint(&pair.cert_der);
+    // operator-facing banner goes to stderr: the global tracing subscriber is
+    // the file logger, and TOFU verification must not depend on log config
+    eprintln!(
+        "herdr-web-bridge: self-signed TLS certificate in use; verify this fingerprint out-of-band (TOFU)\n  cert: {}\n  sans: {}\n  fingerprint: {}",
+        cert_path.display(),
+        crate::tls::certificate_san_entries(&pair.cert_der).len(),
+        fingerprint
+    );
+    for warning in crate::tls::san_drift_warnings(&crate::tls::host_san_entries(), &pair.cert_der) {
+        eprintln!("herdr-web-bridge: warning: {warning}");
+        warn!(warning = %warning, "TLS certificate SAN drift");
+    }
+    let rustls_config =
+        axum_server::tls_rustls::RustlsConfig::from_config(crate::tls::server_config(&pair)?);
+    info!(
+        url = %format!("{}://{bind}", listener_scheme(true)),
+        "herdr-web-bridge listening"
+    );
+    let std_listener = listener.into_std()?;
+    axum_server::tls_rustls::from_tcp_rustls(std_listener, rustls_config)
+        .serve(app.into_make_service())
+        .await
+}
+
+fn build_app(state: BridgeState, request_policy: RequestPolicy, static_dir: PathBuf) -> Router {
     let agent_activity_routes = Router::new().route(
         "/api/agent-activity",
         get(agent_activity_list_handler).options(preflight_handler),
@@ -1085,7 +1145,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
             "/api/launcher-presets/launch",
             post(launcher_preset_launch_handler).options(preflight_handler),
         );
-    let app = Router::new()
+    Router::new()
         .merge(agent_activity_routes)
         .merge(agent_pins_routes)
         .merge(notes_routes)
@@ -1118,18 +1178,14 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
             ServiceBuilder::new()
                 .layer(middleware::from_fn(add_static_cache_headers))
                 .layer(CompressionLayer::new())
-                .service(ServeDir::new(options.static_dir)),
+                .service(ServeDir::new(static_dir)),
         )
         .layer(middleware::from_fn_with_state(
             request_policy.clone(),
             add_security_headers,
         ))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
-        .with_state(state);
-    let bind = format!("{}:{}", options.host, options.port);
-    let listener = tokio::net::TcpListener::bind(&bind).await?;
-    info!(url = %format!("http://{bind}"), "herdr-web-bridge listening");
-    axum::serve(listener, app).await
+        .with_state(state)
 }
 
 async fn add_security_headers(
@@ -1497,7 +1553,7 @@ fn host_authority_allowed(authority: &str, policy: &RequestPolicy) -> bool {
         return true;
     }
 
-    if !authority_port_matches(authority, policy.bind_port) {
+    if !authority_port_matches(authority, policy.bind_port, policy.default_scheme_port) {
         return false;
     }
 
@@ -1598,7 +1654,7 @@ fn normalize_allowed_host(host: &str) -> Result<String, String> {
     Ok(host.to_ascii_lowercase())
 }
 
-fn is_valid_dns_hostname(host: &str) -> bool {
+pub(crate) fn is_valid_dns_hostname(host: &str) -> bool {
     if host.len() > 253 {
         return false;
     }
@@ -1630,28 +1686,47 @@ fn is_unspecified_bind_host(host: &str) -> bool {
     matches!(host, "0.0.0.0" | "::" | "[::]")
 }
 
-fn authority_port_matches(authority: &str, expected_port: u16) -> bool {
-    match authority_port(authority) {
-        Some(port) => port == expected_port,
-        None => expected_port == 80,
+enum AuthorityPort {
+    Implicit,
+    Explicit(u16),
+    Invalid,
+}
+
+fn authority_port(authority: &str) -> AuthorityPort {
+    if authority.parse::<IpAddr>().is_ok() {
+        return AuthorityPort::Implicit;
+    }
+    if let Some(rest) = authority.strip_prefix('[') {
+        let Some(end) = rest.find(']') else {
+            return AuthorityPort::Implicit;
+        };
+        return match rest[end + 1..].strip_prefix(':') {
+            None => AuthorityPort::Implicit,
+            Some(port) => explicit_or_invalid(port),
+        };
+    }
+    let Some((_, port)) = authority.rsplit_once(':') else {
+        return AuthorityPort::Implicit;
+    };
+    if port.contains(':') {
+        return AuthorityPort::Implicit;
+    }
+    explicit_or_invalid(port)
+}
+
+fn explicit_or_invalid(port: &str) -> AuthorityPort {
+    match port.parse::<u16>() {
+        Ok(number) => AuthorityPort::Explicit(number),
+        Err(_) => AuthorityPort::Invalid,
     }
 }
 
-fn authority_port(authority: &str) -> Option<u16> {
-    if authority.parse::<IpAddr>().is_ok() {
-        return None;
+fn authority_port_matches(authority: &str, expected_port: u16, default_port: u16) -> bool {
+    match authority_port(authority) {
+        AuthorityPort::Explicit(port) => port == expected_port,
+        AuthorityPort::Implicit => expected_port == default_port,
+        AuthorityPort::Invalid => false,
     }
-    if let Some(rest) = authority.strip_prefix('[') {
-        let end = rest.find(']')?;
-        return rest[end + 1..]
-            .strip_prefix(':')
-            .and_then(|port| port.parse().ok());
-    }
-    let (_, port) = authority.rsplit_once(':')?;
-    if port.contains(':') {
-        return None;
-    }
-    port.parse().ok()
 }
 
 fn host_part(authority: &str) -> &str {
@@ -4862,6 +4937,144 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn integration_tls_https_and_wss() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let _guard = crate::session::TEST_ENV_LOCK.lock().unwrap();
+        let unique = format!("herdr-e02-t9-{}", std::process::id());
+        let tls_dir = std::env::temp_dir().join(format!("{unique}-tls"));
+        let static_dir = std::env::temp_dir().join(format!("{unique}-static"));
+        let pins_dir = std::env::temp_dir().join(format!("{unique}-pins"));
+        let notes_dir = std::env::temp_dir().join(format!("{unique}-notes"));
+        std::fs::create_dir_all(&static_dir).expect("test static dir");
+        std::fs::write(static_dir.join("index.html"), "tls-ok").expect("test static file");
+
+        let previous_tls = std::env::var("HERDR_WEB_TLS_DIR").ok();
+        let previous_pins = std::env::var("HERDR_WEB_AGENT_PINS_DIR").ok();
+        let previous_notes = std::env::var("HERDR_WEB_NOTES_DIR").ok();
+        std::env::set_var("HERDR_WEB_TLS_DIR", &tls_dir);
+        std::env::set_var("HERDR_WEB_AGENT_PINS_DIR", &pins_dir);
+        std::env::set_var("HERDR_WEB_NOTES_DIR", &notes_dir);
+
+        let result = integration_tls_https_and_wss_inner(&static_dir).await;
+
+        restore_env("HERDR_WEB_TLS_DIR", previous_tls);
+        restore_env("HERDR_WEB_AGENT_PINS_DIR", previous_pins);
+        restore_env("HERDR_WEB_NOTES_DIR", previous_notes);
+        std::fs::remove_dir_all(&tls_dir).ok();
+        std::fs::remove_dir_all(&static_dir).ok();
+        std::fs::remove_dir_all(&pins_dir).ok();
+        std::fs::remove_dir_all(&notes_dir).ok();
+        result.unwrap();
+    }
+
+    async fn integration_tls_https_and_wss_inner(
+        static_dir: &Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use futures_util::StreamExt;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let cert_pair = crate::tls::load_or_generate_self_signed(
+            &crate::tls::default_tls_state_dir(),
+            time::OffsetDateTime::now_utc(),
+        )?;
+        let server_tls = crate::tls::server_config(&cert_pair)?;
+
+        let request_policy = RequestPolicy {
+            bind_host: "127.0.0.1".to_string(),
+            bind_port: 0,
+            allowed_hosts: Vec::new(),
+            allowed_origins: Vec::new(),
+            allowed_connect_sources: Vec::new(),
+            default_scheme_port: 443,
+        };
+        let state = BridgeState {
+            api: ApiClient::for_socket_path(PathBuf::from("/nonexistent-herdr-api.sock")),
+            client_socket_path: PathBuf::from("/nonexistent-herdr-client.sock"),
+            request_policy: request_policy.clone(),
+            terminal_sessions: Arc::new(Mutex::new(TerminalSessions::default())),
+            selected_pane_id: Arc::new(Mutex::new(None)),
+            agent_activity: Arc::new(AgentActivityManager::new()),
+            agent_pins: Arc::new(AgentPinsManager::new()?),
+            launcher_presets: Arc::new(LauncherPresetStore::load(None).map_err(io::Error::other)?),
+            notes: Arc::new(NotesManager::new()?),
+            ui_event_tx: tokio::sync::broadcast::channel(256).0,
+            activity_tx: tokio::sync::broadcast::channel(512).0,
+            upload_dir: static_dir.to_path_buf(),
+        };
+        let activity_tx = state.activity_tx.clone();
+        let app = build_app(state, request_policy, static_dir.to_path_buf());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let rustls_config = axum_server::tls_rustls::RustlsConfig::from_config(server_tls);
+        let server = tokio::spawn(async move {
+            axum_server::tls_rustls::from_tcp_rustls(
+                listener.into_std().expect("std listener"),
+                rustls_config,
+            )
+            .serve(app.into_make_service())
+            .await
+            .expect("tls test server");
+        });
+
+        // (a) raw rustls HTTPS GET against the real app + static fallback
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(rustls::pki_types::CertificateDer::from(
+            cert_pair.cert_der.clone(),
+        ))?;
+        let https_client = rustls::ClientConfig::builder_with_provider(provider.clone())
+            .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
+            .with_root_certificates(roots.clone())
+            .with_no_client_auth();
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(https_client));
+        let tcp = tokio::net::TcpStream::connect(address).await?;
+        let mut tls_stream = connector
+            .connect(rustls::pki_types::ServerName::try_from("localhost")?, tcp)
+            .await?;
+        let request = format!(
+            "GET /index.html HTTP/1.1\r\nHost: localhost:{}\r\nConnection: close\r\n\r\n",
+            address.port()
+        );
+        tls_stream.write_all(request.as_bytes()).await?;
+        let mut response_bytes = Vec::new();
+        tls_stream.read_to_end(&mut response_bytes).await?;
+        let response = String::from_utf8_lossy(&response_bytes);
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "GET failed: {response}"
+        );
+        assert!(response.contains("tls-ok"), "body missing: {response}");
+
+        // (b) wss handshake + one deterministic activity frame
+        let wss_client = rustls::ClientConfig::builder_with_provider(provider)
+            .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let (mut ws, _handshake) = tokio_tungstenite::connect_async_tls_with_config(
+            format!("wss://127.0.0.1:{}/ws/activity", address.port()),
+            None,
+            false,
+            Some(tokio_tungstenite::Connector::Rustls(Arc::new(wss_client))),
+        )
+        .await?;
+        activity_tx.send(ActivityMessage::ResyncRequired {
+            reason: "tls-integration".to_string(),
+        })?;
+        let frame = tokio::time::timeout(Duration::from_secs(10), ws.next())
+            .await
+            .map_err(|_| "activity frame timed out")?
+            .ok_or("activity socket closed")?
+            .map_err(|err| format!("ws read: {err}"))?;
+        let text = frame.into_text().map_err(|_| "non-text frame")?;
+        assert!(text.contains("resync_required"), "frame: {text}");
+        assert!(text.contains("tls-integration"), "frame: {text}");
+
+        server.abort();
+        Ok(())
+    }
+
     struct PendingWebSocketSink;
 
     impl Sink<Message> for PendingWebSocketSink {
@@ -6064,6 +6277,7 @@ mod tests {
             allowed_hosts: Vec::new(),
             allowed_origins: vec!["http://localhost".to_string()],
             allowed_connect_sources: Vec::new(),
+            default_scheme_port: 80,
         };
         assert!(request_allowed(
             &origin_headers("192.168.1.10:4000", Some("http://localhost")),
@@ -6130,6 +6344,7 @@ mod tests {
             allowed_hosts: vec!["herdr-host.local".to_string()],
             allowed_origins: Vec::new(),
             allowed_connect_sources: Vec::new(),
+            default_scheme_port: 80,
         };
         assert!(host_authority_allowed("herdr-host.local:4000", &policy));
         assert!(host_authority_allowed("HERDR-HOST.LOCAL:4000", &policy));
@@ -6145,6 +6360,7 @@ mod tests {
             allowed_hosts: Vec::new(),
             allowed_origins: vec!["http://localhost".to_string()],
             allowed_connect_sources: Vec::new(),
+            default_scheme_port: 80,
         };
         assert_eq!(
             cors_origin_header(
@@ -7121,6 +7337,68 @@ mod tests {
     }
 
     #[test]
+    fn tls_self_signed_flag_parses() {
+        let args = vec!["--tls-self-signed".to_string()];
+        let options = parse_options(&args).unwrap().expect("options");
+        assert!(options.tls_self_signed);
+
+        let plain = parse_options(&[]).unwrap().expect("options");
+        assert!(!plain.tls_self_signed);
+
+        let rejected = parse_options(&["--tls-self-signed=false".to_string()]);
+        assert!(rejected.is_err());
+    }
+
+    #[test]
+    fn tls_listener_url_formats_scheme() {
+        assert_eq!(listener_scheme(true), "https");
+        assert_eq!(listener_scheme(false), "http");
+        assert_eq!(
+            format!("{}://{}", listener_scheme(true), "0.0.0.0:8787"),
+            "https://0.0.0.0:8787"
+        );
+    }
+
+    #[test]
+    fn tls_origin_https_origin_accepted_on_tls_port() {
+        let mut policy = test_policy("0.0.0.0", 9443);
+        policy.default_scheme_port = 443;
+        policy.allowed_hosts = vec!["srv.example".to_string()];
+        assert!(request_allowed(
+            &origin_headers("srv.example:9443", Some("https://srv.example:9443")),
+            &policy
+        ));
+        let mut implicit = test_policy("0.0.0.0", 443);
+        implicit.default_scheme_port = 443;
+        implicit.allowed_hosts = vec!["srv.example".to_string()];
+        assert!(request_allowed(
+            &origin_headers("srv.example", Some("https://srv.example")),
+            &implicit
+        ));
+        assert!(!request_allowed(
+            &origin_headers("srv.example:9443", Some("https://evil.example")),
+            &policy
+        ));
+    }
+
+    #[test]
+    fn tls_origin_wss_connect_sources() {
+        let mut policy = test_policy("0.0.0.0", 9443);
+        policy.allowed_connect_sources =
+            connect_sources_for_origin("https://srv.example:9443").unwrap();
+        let csp = content_security_policy(&policy);
+        let csp = csp.to_str().expect("csp header");
+        assert!(csp.contains("https://srv.example:9443"));
+        assert!(csp.contains("wss://srv.example:9443"));
+        assert!(!csp.contains("ws://srv.example"));
+    }
+
+    #[test]
+    fn tls_self_signed_flag_in_help() {
+        assert!(help_text().contains("--tls-self-signed"));
+    }
+
+    #[test]
     fn parse_options_configures_explicit_session() {
         let _guard = crate::session::TEST_ENV_LOCK.lock().unwrap();
         let previous_session = std::env::var(crate::session::SESSION_ENV_VAR).ok();
@@ -7377,6 +7655,57 @@ mod tests {
             allowed_hosts: Vec::new(),
             allowed_origins: Vec::new(),
             allowed_connect_sources: Vec::new(),
+            default_scheme_port: 80,
         }
+    }
+
+    #[test]
+    fn authority_port_implicit_matches_scheme_default() {
+        assert!(authority_port_matches("example.com", 443, 443));
+        assert!(authority_port_matches("example.com", 80, 80));
+        assert!(!authority_port_matches("example.com", 443, 80));
+        assert!(!authority_port_matches("example.com", 80, 443));
+    }
+
+    #[test]
+    fn authority_port_explicit_must_equal_bind_port() {
+        assert!(authority_port_matches("example.com:8443", 8443, 80));
+        assert!(!authority_port_matches("example.com:8443", 8444, 443));
+    }
+
+    #[test]
+    fn authority_port_gate_accepts_implicit_tls_host_only_for_tls_policy() {
+        let mut tls_policy = test_policy("0.0.0.0", 443);
+        tls_policy.default_scheme_port = 443;
+        tls_policy.allowed_hosts = vec!["example.com".to_string()];
+        assert!(host_authority_allowed("example.com", &tls_policy));
+
+        let mut plain_policy = test_policy("0.0.0.0", 443);
+        plain_policy.allowed_hosts = vec!["example.com".to_string()];
+        assert!(!host_authority_allowed("example.com", &plain_policy));
+    }
+
+    #[test]
+    fn authority_port_malformed_explicit_ports_are_rejected() {
+        let policy = RequestPolicy {
+            bind_host: "0.0.0.0".to_string(),
+            bind_port: 443,
+            allowed_hosts: vec!["srv.example".to_string()],
+            allowed_origins: Vec::new(),
+            allowed_connect_sources: Vec::new(),
+            default_scheme_port: 443,
+        };
+        assert!(host_authority_allowed("srv.example", &policy));
+        assert!(host_authority_allowed("srv.example:443", &policy));
+        assert!(!host_authority_allowed("srv.example:bogus", &policy));
+        assert!(!host_authority_allowed("srv.example:", &policy));
+        assert!(!host_authority_allowed("srv.example:65536", &policy));
+    }
+
+    #[test]
+    fn authority_port_loopback_bypasses_scheme_default() {
+        let policy = test_policy("0.0.0.0", 9999);
+        assert!(host_authority_allowed("localhost:443", &policy));
+        assert!(host_authority_allowed("127.0.0.1", &policy));
     }
 }

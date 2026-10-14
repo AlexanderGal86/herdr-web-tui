@@ -116,6 +116,17 @@ Open `http://127.0.0.1:8787` and verify:
 - Multiple browser clients can attach to the same terminal.
 - Pane selection syncs between browser clients.
 - Typing, mobile text input, stage-only input, tap-focus setting, scrolling, and refit work.
+- TLS smoke (release tarball binary): run the packaged bridge with
+  `--tls-self-signed`, open the `https://` URL, accept the self-signed
+  certificate once, and verify the app and an interactive terminal work over
+  https/wss; restart the bridge and confirm the browser does NOT warn again
+  (certificate is reused, not regenerated).
+- LAN clipboard acceptance (durable, per release): from another machine on the
+  LAN open the non-loopback `https://<lan-ip>:<port>` URL with all
+  insecure-origin overrides DISABLED, assert `window.isSecureContext === true`
+  in DevTools, then middle-click paste copied text into a terminal pane and
+  confirm the round-trip. Record browser + version and the trust procedure
+  used.
 - New tabs can launch Shell and every enabled managed built-in agent.
 - Split right/down can launch Shell and every enabled managed built-in agent.
 - A custom preset launches its exact configured `argv`, including a wrapper or SSH-shaped command,

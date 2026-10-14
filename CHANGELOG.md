@@ -17,6 +17,12 @@
 
 ### Fixed
 
+- Terminal selections no longer copy to the clipboard by themselves.
+  Finishing a mouse selection in the web terminal silently overwrote the
+  clipboard with the selected text (ghostty-web's built-in copy-on-select).
+  Copying now happens only through explicit actions: right-click copy, the
+  copy keyboard shortcut, or the mobile copy flow.
+
 - Recover open panes within ~a second after a herdr server restart: terminal sockets
   that close without a close reason now trigger an immediate snapshot refresh, so
   panes remount on the rotated terminal ids instead of retrying the dead ones until
@@ -24,6 +30,22 @@
 
 ### Added
 
+- Add native TLS to the bridge behind a new `--tls-self-signed` flag. The
+  single bridge port serves HTTPS and secure WebSockets (`wss://`) when the
+  flag is enabled and stays plain HTTP otherwise. The self-signed certificate
+  is generated once and kept stable across restarts — it is stored under the
+  XDG state directory (e.g. `~/.local/state/herdr-web/tls`, overridable with
+  `HERDR_WEB_TLS_DIR`), covers `localhost`, `127.0.0.1`, `::1`, the machine
+  hostname, and local network IPs, and is regenerated only when missing or
+  invalid. Bridge compatibility note: no wire-protocol or API change; the
+  Host-header gate now treats 443 as the implicit port when TLS is enabled
+  (80 remains the implicit port for plain HTTP).
+- Copying selected terminal text with a right-click: when a selection is
+  active, right-click copies it to the clipboard (with the same wrapped-URL
+  normalization as the mobile copy flow) and clears the selection, instead of
+  opening the pane menu. Shift+right-click always opens the menu, and
+  right-clicking without a selection keeps the previous behavior (menu, or
+  forwarding to the pane in "Send right-clicks to pane" mode).
 - Add a Russian troubleshooting section for a hung bridge: idle WebSocket
   connections, heartbeat timeouts and `terminal not found` on re-attach, with
   diagnosis steps and a `systemctl restart herdr-web-tui.service` recovery.

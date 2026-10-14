@@ -18,6 +18,7 @@ const REFRESHED_TERMINAL_SIZE: TerminalSize = { cols: 120, rows: 48 };
 class FakeTerminalRenderer implements TerminalRenderer {
   readonly refreshedSizes: TerminalSize[] = [];
   private pendingMountCompletion: (() => void) | null = null;
+  selection = "";
 
   readonly input = document.createElement("textarea");
   readonly childEvents = vi.fn();
@@ -74,7 +75,11 @@ class FakeTerminalRenderer implements TerminalRenderer {
 
   focusTextInput() {}
 
-  clearSelection() {}
+  clearSelection = vi.fn();
+
+  getSelection() {
+    return this.selection;
+  }
 
   paste = vi.fn();
 
@@ -468,6 +473,72 @@ describe("TerminalView context menu capture", () => {
     }
     expect(renderer.childEvents).not.toHaveBeenCalled();
     expect(onContextMenu).toHaveBeenCalledExactlyOnceWith(91, 72);
+  });
+
+  it("copies the selection on right-click instead of opening the menu", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    const { renderer, onContextMenu } = await mountMenu();
+    renderer.clearSelection.mockClear();
+    renderer.selection = "build output\n";
+    await act(async () => {
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "contextmenu"]) {
+        expect(mouse(renderer.input, type).defaultPrevented).toBe(true);
+      }
+    });
+    expect(writeText).toHaveBeenCalledExactlyOnceWith("build output");
+    expect(renderer.clearSelection).toHaveBeenCalledOnce();
+    expect(renderer.childEvents).not.toHaveBeenCalled();
+    expect(onContextMenu).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("Copied selection");
+  });
+
+  it("keeps the selection and opens the menu on Shift right-click even with a selection", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    const { renderer, onContextMenu } = await mountMenu();
+    renderer.clearSelection.mockClear();
+    renderer.selection = "keep me";
+    await act(async () => {
+      for (const type of ["pointerdown", "mousedown", "contextmenu", "pointerup", "mouseup"]) {
+        expect(mouse(renderer.input, type, { shiftKey: true }).defaultPrevented).toBe(true);
+      }
+    });
+    expect(writeText).not.toHaveBeenCalled();
+    expect(renderer.clearSelection).not.toHaveBeenCalled();
+    expect(onContextMenu).toHaveBeenCalledExactlyOnceWith(91, 72);
+  });
+
+  it("copies the selection on right-click in passthrough mode without forwarding the click", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    const { renderer, onContextMenu } = await mountMenu(true);
+    renderer.clearSelection.mockClear();
+    renderer.selection = "copy through";
+    await act(async () => {
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "contextmenu"]) {
+        expect(mouse(renderer.input, type).defaultPrevented).toBe(true);
+      }
+    });
+    expect(writeText).toHaveBeenCalledExactlyOnceWith("copy through");
+    expect(renderer.clearSelection).toHaveBeenCalledOnce();
+    expect(renderer.childEvents).not.toHaveBeenCalled();
+    expect(onContextMenu).not.toHaveBeenCalled();
+  });
+
+  it("keeps the selection when the right-click clipboard copy fails", async () => {
+    vi.stubGlobal("navigator", { clipboard: { writeText: vi.fn().mockRejectedValue(new Error("denied")) } });
+    const { renderer, onContextMenu } = await mountMenu();
+    renderer.clearSelection.mockClear();
+    renderer.selection = "still selected";
+    await act(async () => {
+      mouse(renderer.input, "pointerdown");
+      mouse(renderer.input, "contextmenu");
+    });
+    expect(renderer.clearSelection).not.toHaveBeenCalled();
+    expect(renderer.childEvents).not.toHaveBeenCalled();
+    expect(onContextMenu).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("Copy failed");
   });
 
   it.each([{ key: "ContextMenu" }, { key: "F10", shiftKey: true }])("captures keyboard menu shortcut $key in passthrough mode", async (shortcut) => {

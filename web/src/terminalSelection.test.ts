@@ -6,6 +6,7 @@ import {
   openableHttpUrl,
   selectedTextFromVisibleRows,
   terminalSelectionRange,
+  terminalSelectionRightClickCopyText,
   terminalUrlTapTarget,
 } from "./terminalSelection";
 
@@ -152,5 +153,17 @@ describe("terminal selection helpers", () => {
     expect(selectedTextFromVisibleRows(["alpha"], { col: 1, row: 0 }, { col: 1, row: 0 }, 10)).toBe(
       "l",
     );
+  });
+
+  it("returns null for right-click copy text without selectable content", () => {
+    expect(terminalSelectionRightClickCopyText("")).toBeNull();
+    expect(terminalSelectionRightClickCopyText(" \n\t \n")).toBeNull();
+  });
+
+  it("normalizes and trims right-click copy text", () => {
+    expect(terminalSelectionRightClickCopyText("  build output \n")).toBe("build output");
+    expect(
+      terminalSelectionRightClickCopyText("https://example.com/release/\nNext\n"),
+    ).toBe("https://example.com/release/Next");
   });
 });
