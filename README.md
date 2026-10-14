@@ -22,7 +22,7 @@
 Запускайте bridge от того же пользователя, у которого работает Herdr. Установите перечисленные выше зависимости, запустите Herdr, затем:
 
 ```bash
-git clone http://10.0.109.128:6610/herdr-web-tui.git
+git clone https://github.com/AlexanderGal86/herdr-web-tui.git
 cd herdr-web-tui
 npm ci --prefix web
 npm run build
@@ -38,7 +38,7 @@ HERDR_SOCKET_PATH=/path/to/herdr.sock \
   HOST=127.0.0.1 PORT=8787 bash scripts/run-bridge.sh
 ```
 
-Адрес OneDev доступен из вашей локальной сети/VPN. Для закрытого проекта клонирование потребует учётную запись с доступом к репозиторию.
+Публичный репозиторий: https://github.com/AlexanderGal86/herdr-web-tui. Внутреннее зеркало OneDev (`http://10.0.109.128:6610/herdr-web-tui.git`) доступно только из локальной сети/VPN и требует учётную запись.
 
 ### Если Linux — удалённый сервер
 
@@ -55,7 +55,7 @@ ssh -N -L 8788:127.0.0.1:8787 user@server
 Запустите Herdr и выполните в PowerShell:
 
 ```powershell
-git clone http://10.0.109.128:6610/herdr-web-tui.git
+git clone https://github.com/AlexanderGal86/herdr-web-tui.git
 cd herdr-web-tui
 npm ci --prefix web
 npm run build
@@ -178,4 +178,4 @@ npm run build:web
 - [Исходный README herdr-web](README.upstream.md).
 - [Упаковка desktop-сборок](docs/packaging.md), [Android](docs/android.md), [совместимость с Herdr](docs/vendoring.md).
 
-Сгенерированные сборки, зависимости, локальные заметки и закрепления агентов исключены из Git. Установка из OneDev собирает приложение из исходного кода; готовые Linux-бинарники в репозиторий не включены.
+Сгенерированные сборки, зависимости, локальные заметки и закрепления агентов исключены из Git. Установка из репозитория собирает приложение из исходного кода; готовые Linux-бинарники в репозиторий не включены.

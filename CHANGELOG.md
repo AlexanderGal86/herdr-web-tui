@@ -6,6 +6,9 @@
 
 ### Changed
 
+- Installation instructions now clone from the public GitHub repository
+  (`https://github.com/AlexanderGal86/herdr-web-tui.git`); the LAN-only OneDev
+  address remains documented as an internal mirror.
 - Launcher preset launches of managed agents now complete as soon as the daemon
   acknowledges the agent start, instead of waiting for the agent to become
   interactive. The "New tab" dialog closes in a fraction of a second for every
