@@ -1327,6 +1327,7 @@ fn expand_home(value: &str) -> PathBuf {
 fn ensure_upload_dir(path: &Path) -> io::Result<()> {
     // Only tighten permissions on directories the bridge itself creates; an
     // operator-supplied pre-existing directory keeps its permissions.
+    #[cfg(unix)]
     let pre_existing = path.is_dir();
     std::fs::create_dir_all(path)?;
     #[cfg(unix)]
