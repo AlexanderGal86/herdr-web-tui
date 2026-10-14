@@ -305,7 +305,8 @@ fn lock_tls_dir(dir: &Path) -> std::io::Result<TlsDirGuard> {
     #[cfg(windows)]
     {
         use std::os::windows::io::AsRawHandle;
-        let mut overlapped: windows_sys::Win32::System::IO::OVERLAPPED = std::mem::zeroed();
+        let mut overlapped: windows_sys::Win32::System::IO::OVERLAPPED =
+            unsafe { std::mem::zeroed() };
         let ok = unsafe {
             windows_sys::Win32::Storage::FileSystem::LockFileEx(
                 file.as_raw_handle() as _,
@@ -399,6 +400,7 @@ fn persist_pair(dir: &Path, pair: &SelfSignedCertificate) -> std::io::Result<()>
     write_atomic(dir.join(KEY_FILE), pair.key_pem.as_bytes(), 0o600)
 }
 
+#[cfg_attr(windows, allow(unused_variables))]
 fn write_atomic(path: std::path::PathBuf, contents: &[u8], unix_mode: u32) -> std::io::Result<()> {
     use std::io::Write;
     let dir = path.parent().unwrap_or(Path::new("."));
