@@ -32,7 +32,7 @@ npm run build
 
 Open `http://127.0.0.1:8787`. The startup script binds only to loopback and points debug bridge builds at the stable `%APPDATA%\herdr\herdr.sock` endpoint. It respects `HERDR_SOCKET_PATH` and accepts `-Port 8788`. For `-Session NAME`, first set `$env:HERDR_CONFIG_DIR = Join-Path $env:APPDATA 'herdr'` (or your actual configuration directory): the compatibility crate does not automatically select APPDATA, and an explicit session ignores `HERDR_SOCKET_PATH`. It does not start, stop or replace the Herdr daemon. Runtime notes, pins, and uploads created by the bridge in the working directory are ignored by Git.
 
-For frontend development on Linux, run `npm run dev` using the upstream launcher. On Windows, its Node.js `spawn("npm.cmd", ...)` call fails with EINVAL; use two terminals instead: `.\scripts\start-tui.ps1` for the bridge and `npm run dev:web` for Vite. See the [root README](../README.md) for installation from OneDev, platform requirements, updates, and bridge options. The [original README](../README.upstream.md) is retained separately as upstream reference, not as the platform-specific guide for this fork.
+For frontend development on Linux, run `npm run dev` using the upstream launcher. On Windows, its Node.js `spawn("npm.cmd", ...)` call fails with EINVAL; use two terminals instead: `.\scripts\start-tui.ps1` for the bridge and `npm run dev:web` for Vite. See the [root README](../README.md) for installation from the GitHub repository, platform requirements, updates, and bridge options. The [original README](../README.upstream.md) is retained separately as upstream reference, not as the platform-specific guide for this fork.
 
 ## Visual preview
 
