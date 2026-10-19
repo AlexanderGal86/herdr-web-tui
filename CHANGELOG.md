@@ -6,6 +6,21 @@
 
 ### Changed
 
+- Development model documented in `README.md` and `AGENTS.md`: upstream
+  `kcosr/herdr-web` is a source of ideas only; this fork develops independently
+  and does not track or layer on upstream releases.
+- Vendored Herdr compatibility snapshot refreshed from upstream `v0.9.0` to `v0.9.5`
+  (commit `2ecf19a92fc3a7fff75b6ce3655ef04f4625ec01`): the exact-compared upstream
+  copies (JSON API schema modules, input model, wire production body) now match
+  upstream `v0.9.5` (locally adapted files — `client`, `status`, `tests`,
+  `tabs`, `workspaces` — stay documented adaptations); the shim grew
+  `DefaultColorKind`/`RgbColor` host default-color support for the new
+  `ClientInputEvent::HostDefaultColor` variant, and the upstream graphics
+  bulk-codec regression tests are now included. Terminal wire protocol stays at
+  `22` (frozen generation-1 digests unchanged); new JSON fields deserialize with
+  `serde` defaults, and the refreshed build was smoke-tested end-to-end against
+  a live Herdr `v0.9.5` daemon. The bridge still enforces the documented
+  `v0.9.0`+ / protocol-`22` floor.
 - Installation instructions now clone from the public GitHub repository
   (`https://github.com/AlexanderGal86/herdr-web-tui.git`); the LAN-only OneDev
   address remains documented as an internal mirror.
