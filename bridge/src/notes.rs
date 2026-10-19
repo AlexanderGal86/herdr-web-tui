@@ -1400,6 +1400,7 @@ mod tests {
             agent_session: None,
             scroll: None,
             revision,
+            restore_error: None,
         }
     }
 

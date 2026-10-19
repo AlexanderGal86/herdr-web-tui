@@ -531,6 +531,7 @@ mod tests {
             tokens: HashMap::new(),
             scroll: None,
             revision: 1,
+            restore_error: None,
         }
     }
 }

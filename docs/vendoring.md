@@ -1,7 +1,7 @@
 # Vendoring Herdr Compatibility
 
 `herdr-web` vendors a small Herdr compatibility crate because the bridge depends on private API and
-wire protocol details needed for its existing per-terminal ANSI attach behavior. Herdr v0.9.0 also
+wire protocol details needed for its existing per-terminal ANSI attach behavior. Herdr v0.9.5 also
 provides stable whole-tab endpoints, but this bridge deliberately retains the pane-oriented ANSI path.
 
 ## What Is Vendored
@@ -33,9 +33,9 @@ The browser app is not vendored into Herdr. It lives at `web/`, and `herdr-web-b
 ## Current Reference
 
 - Upstream checkout: a clean Herdr source checkout outside this repository
-- Upstream release baseline: `v0.9.0`
+- Upstream release baseline: `v0.9.5`
 - Terminal wire baseline: protocol `22`
-- Upstream commit: `b99002ac99b09e00b4ca692436cb15a6b0d676f1`
+- Upstream commit: `2ecf19a92fc3a7fff75b6ce3655ef04f4625ec01`
 
 Use the upstream checkout as an external reference for audits and refreshes. It is not required to
 build `herdr-web`.
@@ -64,7 +64,7 @@ bridge narrows the drift check to only the terminal attach message regions.
 
 ## Refresh Process
 
-Use a clean Herdr checkout at the reviewed `v0.9.0` release tag as the source reference. Do not
+Use a clean Herdr checkout at the reviewed `v0.9.5` release tag as the source reference. Do not
 refresh from an experimental tree that may contain unrelated local drift. Copy the reviewed
 upstream source files into the minimal compatibility crate; do not make the bridge compile against
 the external checkout or recreate a full upstream vendor snapshot.

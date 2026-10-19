@@ -19,6 +19,9 @@ This is a lightweight internal onboarding note for agents working in this repo.
 
 - Keep product changes scoped to the web app, bridge executable, and minimal compatibility crate
   unless the user explicitly asks for core Herdr changes.
+- Upstream `kcosr/herdr-web` is a source of ideas only, not a base to track or rebase onto.
+  Development here is independent: review upstream releases for ideas, then implement deliberately
+  in this codebase instead of merging or layering upstream changes.
 - Prefer small pure helpers in `web/src/` for state, launch, and protocol formatting logic that can be unit tested.
 - Keep bridge command exposure narrow. Browser commands should stay allow-listed and parameter-validated in `web_bridge.rs`.
 - Keep generated outputs out of commits: `web/dist/`, `bridge/target/`, and

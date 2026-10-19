@@ -6216,6 +6216,7 @@ mod tests {
             agent_session: None,
             scroll: None,
             revision: 1,
+            restore_error: None,
         }
     }
 
@@ -7270,6 +7271,7 @@ mod tests {
             agent_session: None,
             scroll: None,
             revision: 1,
+            restore_error: None,
         }
     }
 
@@ -7298,6 +7300,7 @@ mod tests {
             launch_pending: true,
             interactive_ready: false,
             state_change_seq: 1,
+            completion_seq: None,
             cwd: None,
             foreground_cwd: None,
             revision: 1,
