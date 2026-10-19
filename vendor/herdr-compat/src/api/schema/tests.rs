@@ -658,6 +658,7 @@ fn success_response_round_trips() {
                 endpoint_protocol_generation: Some(1),
                 surface_interest: true,
                 health_check: true,
+                ssh_agent_registration: false,
             }),
         },
     };
@@ -755,6 +756,7 @@ fn worktree_request_and_response_round_trip() {
                 focused: true,
                 cwd: Some("/worktrees/herdr/worktree-api".into()),
                 foreground_cwd: None,
+                restore_error: None,
                 label: None,
                 agent: None,
                 title: None,
@@ -1183,6 +1185,7 @@ fn create_response_round_trips_with_root_pane() {
                 focused: false,
                 cwd: Some("/tmp/review".into()),
                 foreground_cwd: None,
+                restore_error: None,
                 label: None,
                 agent: None,
                 title: None,
