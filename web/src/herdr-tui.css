@@ -301,3 +301,21 @@
 @media (prefers-reduced-motion: reduce) {
   :root[data-appearance="tui"] *, :root[data-appearance="tui"] *::after { animation: none !important; transition: none !important; }
 }
+
+/* Saved-machine connection indicator, mirroring the CLI machine badge. */
+.machine-conn {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--overlay0, #6c7086);
+}
+.machine-conn[data-connection="connected"] {
+  background: #a6e3a1;
+}
+.machine-conn[data-connection="connecting"] {
+  background: #f9e2af;
+}
+.machine-conn[data-connection="unavailable"] {
+  background: #f38ba8;
+}

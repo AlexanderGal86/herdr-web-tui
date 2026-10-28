@@ -50,10 +50,26 @@ The app expects these bridge routes:
 - `/api/agent-pins` (and `/api/agent-pins/{pane_id}/pin|unpin`)
 - `/api/agent-activity`
 - `/api/uploads`
+- `/api/workspace-zones` (GET/PUT)
+- `/api/machines` (GET)
+- `/api/machines/{machine_id}/snapshot`
+- `/api/machines/{machine_id}/capabilities`
+- `/api/machines/{machine_id}/command`
+- `/api/machines/{machine_id}/selection`
+- `/api/machines/{machine_id}/uploads`
+- `/api/machines/{machine_id}/ws/events`
+- `/api/machines/{machine_id}/ws/terminal`
 - `/ws/activity`
 - `/ws/events`
 - `/ws/ui-events`
 - `/ws/terminal`
+
+Machine-scoped routes forward same-origin requests to the operator's saved Herdr SSH machines
+over Herdr's hidden remote bridge transports; they are distinct from manually configured HTTP
+bridge backends. A machine advertises the `uploads` capability only when an `scp` binary is
+reachable in the bridge's `PATH`, so the UI hides upload affordances on machines that cannot
+receive them. See [docs/native-machines-and-uploads.md](../docs/native-machines-and-uploads.md)
+for discovery, routing, capability semantics, and the two-stage SCP upload pipeline.
 
 Launcher execution belongs to the bridge. The frontend selects a preset and placement; it does not
 construct Herdr `agent.start` requests. Built-in agents use Herdr's managed-agent flow after the

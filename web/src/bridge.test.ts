@@ -16,6 +16,7 @@ import {
   removeNoteDraftsForBridgeConnection,
   SAME_ORIGIN_BRIDGE_ID,
 } from "./bridge";
+import { supportsUploads } from "./terminalUploads";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -381,4 +382,56 @@ describe("capabilities", () => {
 
     fetchMock.mockRestore();
   });
+  it("parses the machines capability", () => {
+    expect(
+      parseCapabilities({ commands: [], machines: { version: 1 } }).machines,
+    ).toEqual({ version: 1 });
+    expect(parseCapabilities({ commands: [] }).machines).toBeUndefined();
+    expect(
+      parseCapabilities({ commands: [], machines: { version: 2 } }).machines,
+    ).toBeUndefined();
+    expect(parseCapabilities({ commands: [], machines: "x" }).machines).toBeUndefined();
+  });
+
+  it("parses the uploads capability from a real server-shaped payload", () => {
+    const serverPayload = {
+      commands: ["pane.split"],
+      bridge_version: "1.2.3",
+      web_compat: 1,
+      agent_activity: { version: 1 },
+      agent_pins: { version: 1 },
+      notes: { version: 1 },
+      launcher_presets: { version: 1 },
+      workspace_zones: { version: 1 },
+      machines: { version: 1 },
+      uploads: { version: 1 },
+    };
+    const parsed = parseCapabilities(serverPayload);
+    expect(parsed.machines).toEqual({ version: 1 });
+    expect(parsed.uploads).toEqual({ version: 1 });
+    expect(parseCapabilities({ commands: [] }).uploads).toBeUndefined();
+    expect(
+      parseCapabilities({ commands: [], uploads: { version: 2 } }).uploads,
+    ).toBeUndefined();
+    expect(parseCapabilities({ commands: [], uploads: "x" }).uploads).toBeUndefined();
+  });
+
+  it("feeds parsed capabilities into machine-scoped upload enablement", () => {
+    const parsed = parseCapabilities({
+      commands: [],
+      machines: { version: 1 },
+      uploads: { version: 1 },
+    });
+    expect(supportsUploads(parsed, true)).toBe(true);
+
+    const parsedWithoutUploads = parseCapabilities({
+      commands: [],
+      machines: { version: 1 },
+    });
+    // Machine-scoped runtime without an advertisement: no upload path.
+    expect(supportsUploads(parsedWithoutUploads, true)).toBe(false);
+    // A stage-1 machines-aware local bridge still serves /api/uploads.
+    expect(supportsUploads(parsedWithoutUploads, false)).toBe(true);
+  });
+
 });

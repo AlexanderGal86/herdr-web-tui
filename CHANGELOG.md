@@ -1,52 +1,44 @@
-# Changelog
-
 ## [Unreleased]
 
 ### Breaking Changes
 
-### Changed
-
-- Development model documented in `README.md` and `AGENTS.md`: upstream
-  `kcosr/herdr-web` is a source of ideas only; this fork develops independently
-  and does not track or layer on upstream releases (#1).
-- Vendored Herdr compatibility snapshot refreshed from upstream `v0.9.0` to `v0.9.5`
-  (commit `2ecf19a92fc3a7fff75b6ce3655ef04f4625ec01`): the exact-compared upstream
-  copies (JSON API schema modules, input model, wire production body) now match
-  upstream `v0.9.5` (locally adapted files — `client`, `status`, `tests`,
-  `tabs`, `workspaces` — stay documented adaptations); the shim grew
-  `DefaultColorKind`/`RgbColor` host default-color support for the new
-  `ClientInputEvent::HostDefaultColor` variant, and the upstream graphics
-  bulk-codec regression tests are now included. Terminal wire protocol stays at
-  `22` (frozen generation-1 digests unchanged); new JSON fields deserialize with
-  `serde` defaults, and the refreshed build was smoke-tested end-to-end against
-  a live Herdr `v0.9.5` daemon. The bridge still enforces the documented
-  `v0.9.0`+ / protocol-`22` floor (#1).
-- Installation instructions now clone from the public GitHub repository
-  (`https://github.com/AlexanderGal86/herdr-web-tui.git`); the LAN-only OneDev
-  address remains documented as an internal mirror.
-- Launcher preset launches of managed agents now complete as soon as the daemon
-  acknowledges the agent start, instead of waiting for the agent to become
-  interactive. The "New tab" dialog closes in a fraction of a second for every
-  preset (previously ~4s for agents, and a 30s hang followed by tab rollback and
-  a launch error when the agent CLI was missing on the bridge host). Agent
-  startup failures — e.g. a missing CLI — now surface directly inside the new
-  terminal pane. Bridge compatibility note: no wire-protocol change; the
-  `/api/launcher-presets/launch` response is unchanged, only faster.
-
-### Fixed
-
-- Terminal selections no longer copy to the clipboard by themselves.
-  Finishing a mouse selection in the web terminal silently overwrote the
-  clipboard with the selected text (ghostty-web's built-in copy-on-select).
-  Copying now happens only through explicit actions: right-click copy, the
-  copy keyboard shortcut, or the mobile copy flow.
-
-- Recover open panes within ~a second after a herdr server restart: terminal sockets
-  that close without a close reason now trigger an immediate snapshot refresh, so
-  panes remount on the rotated terminal ids instead of retrying the dead ones until
-  the 10-second periodic poll notices.
-
 ### Added
+
+- Two-stage SCP uploads for saved SSH machines: uploading from a machine runtime now stages the file privately on the bridge host and copies it with `scp -s` into the remote user's `~/.local/share/herdr-web/uploads` directory, committing atomically with no-clobber semantics, conflict renaming, and explicit overwrite. The uploads UI is gated on a new `uploads` capability so runtimes without the route no longer advertise it, while older local bridges keep their existing upload behavior.
+
+- Added a built-in `omp` launcher preset: the launch dialog offers OMP alongside the other managed
+  agents, started through Herdr `agent.start` with kind `omp`.
+- Added an OMP agent icon shown for the `omp` agent hint and `omp`/`oh my pi` labels in panes,
+  agent rows, and the launch dialog.
+- Added a `Paste` item to the terminal right-click menu: it reads the clipboard and pastes into
+  the pane the menu was opened on (same path as middle-click paste, including bracketed paste and
+  the clipboard-unavailable fallback message).
+- Added Local/Remote workspace zones in the sidebar spaces list, mirroring the CLI client's
+  local-versus-remote endpoint split: spaces of the serving bridge group under a `Local` header,
+  configured remote bridges under `Remote` (with per-host subheaders when several remote bridges
+  are enabled; the `Local` header stays hidden while no remote bridge exists, like the CLI).
+  The mode is a server-side bridge setting stored on the bridge host under
+  `herdr-web/workspace-zones` (override with `HERDR_WEB_WORKSPACE_ZONES_DIR`), exposed via
+  `GET/PUT /api/workspace-zones` and the `workspace_zones` capability, and toggled from the space
+  list options menu (`Zones: Local / Remote | Off`). Default: on.
+- Added saved-machine grouping with real remote routing, matching the CLI `machines` sidebar:
+  the bridge discovers the operator's saved Herdr SSH machines from Herdr's own client state
+  (`~/.local/state/herdr/client/endpoints.json`) and exposes them via `GET /api/machines`
+  (`machines` capability). The sidebar shows a `machines` section with a collapsible `Local`
+  group (the serving bridge daemon) and one collapsible group per enabled saved machine with
+  a connection indicator; workspaces always sit under the machine that serves them, so the
+  tree also works with a single serving bridge. All machine data flows through same-origin
+  machine-scoped bridge routes (`/api/machines/{id}/snapshot|command|selection|capabilities`
+  and `/api/machines/{id}/ws/events|terminal`): snapshot, browser commands (same allow-list),
+  pane selection, events, and terminal attach are forwarded to the selected machine over
+  Herdr hidden `remote-api-bridge` / `remote-client-bridge` SSH transports - nothing falls
+  back to local data, and unknown, disabled, unreachable, or unsupported machines fail closed.
+  SSH arguments are built as plain argv vectors from the operator-configured catalog only, the
+  remote capability marker (`herdr-api-bridge-v1`) is verified before serving a machine, and
+  per-machine terminal-session and selection state stays isolated so colliding workspace or
+  pane ids on different machines never mix. Machine selection is browser-session state and is
+  never persisted to browser storage; configured HTTP bridge backends keep their existing
+  grouping and remain distinct from saved machines.
 
 - Add native TLS to the bridge behind a new `--tls-self-signed` flag. The
   single bridge port serves HTTPS and secure WebSockets (`wss://`) when the
@@ -87,6 +79,35 @@
 
 ### Changed
 
+- Development model documented in `README.md` and `AGENTS.md`: upstream
+  `kcosr/herdr-web` is a source of ideas only; this fork develops independently
+  and does not track or layer on upstream releases (#1).
+- Vendored Herdr compatibility snapshot refreshed from upstream `v0.9.0` to `v0.9.5`
+  (commit `2ecf19a92fc3a7fff75b6ce3655ef04f4625ec01`): the exact-compared upstream
+  copies (JSON API schema modules, input model, wire production body) now match
+  upstream `v0.9.5` (locally adapted files — `client`, `status`, `tests`,
+  `tabs`, `workspaces` — stay documented adaptations); the shim grew
+  `DefaultColorKind`/`RgbColor` host default-color support for the new
+  `ClientInputEvent::HostDefaultColor` variant, and the upstream graphics
+  bulk-codec regression tests are now included. Terminal wire protocol stays at
+  `22` (frozen generation-1 digests unchanged); new JSON fields deserialize with
+  `serde` defaults, and the refreshed build was smoke-tested end-to-end against
+  a live Herdr `v0.9.5` daemon. The bridge still enforces the documented
+  `v0.9.0`+ / protocol-`22` floor (#1).
+- Installation instructions now clone from the public GitHub repository
+  (`https://github.com/AlexanderGal86/herdr-web-tui.git`); the LAN-only OneDev
+  address remains documented as an internal mirror.
+- Launcher preset launches of managed agents now complete as soon as the daemon
+  acknowledges the agent start, instead of waiting for the agent to become
+  interactive. The "New tab" dialog closes in a fraction of a second for every
+  preset (previously ~4s for agents, and a 30s hang followed by tab rollback and
+  a launch error when the agent CLI was missing on the bridge host). Agent
+  startup failures — e.g. a missing CLI — now surface directly inside the new
+  terminal pane. Bridge compatibility note: no wire-protocol change; the
+  `/api/launcher-presets/launch` response is unchanged, only faster.
+- Removed the `Zoom` entry from the terminal right-click menu. `Restore split layout` is still
+  offered when a tab is already zoomed, so an existing zoom state remains recoverable.
+
 - Automatically increment Android `versionCode` and stamp `versionName` in the tagged release
   commit, keeping repeated builds of that release on the same Android version.
   [PR #91](https://github.com/kcosr/herdr-web/pull/91).
@@ -95,6 +116,19 @@
   [Will Hampson (@Whamp)](https://github.com/Whamp).
 
 ### Fixed
+
+- Fixed the machine host selector resetting to the local bridge: ephemeral SSH machine runtimes are now included in the enabled bridge id list the web app validates selections against, so picking a saved machine stays selected (machine selection remains session-only and is never written to browser storage).
+
+- Terminal selections no longer copy to the clipboard by themselves.
+  Finishing a mouse selection in the web terminal silently overwrote the
+  clipboard with the selected text (ghostty-web's built-in copy-on-select).
+  Copying now happens only through explicit actions: right-click copy, the
+  copy keyboard shortcut, or the mobile copy flow.
+
+- Recover open panes within ~a second after a herdr server restart: terminal sockets
+  that close without a close reason now trigger an immediate snapshot refresh, so
+  panes remount on the rotated terminal ids instead of retrying the dead ones until
+  the 10-second periodic poll notices.
 
 - Send protocol-level pings on idle browser WebSockets and close connections that do not return peer
   traffic within 15 seconds, removing dead transports without claiming to detect frozen JavaScript.

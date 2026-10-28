@@ -71,10 +71,10 @@ import type { ActivityLogEntry } from "./activity";
 import { BackendSettingsDialog } from "./BackendSettingsDialog";
 import { defaultDisplayScope, defaultSidebarWidth, useAppearance } from "./appearance";
 import { spaceScrollContainer } from "./sidebarScroll";
-import { useBridge } from "./bridge";
+import { SAME_ORIGIN_BRIDGE_ID, useBridge } from "./bridge";
 import type { BridgeId, BridgeRuntime } from "./bridge";
-import { createCommands, createdPaneId } from "./commands";
 import type { LaunchSpec, PaneFocusDirection, SplitDirection } from "./commands";
+import { createCommands, createdPaneId } from "./commands";
 import { isConnectionResultCurrent } from "./connectionState";
 import {
   DEFAULT_CONTENT_INSET_BOTTOM_PX,
@@ -131,6 +131,15 @@ import {
   updateNote,
 } from "./notes";
 import type { NoteAttachment, NotesListResponse, PaneNote } from "./notes";
+import {
+  buildMachineGroups,
+  entriesForGroup,
+  machinesGroupingActive,
+  type MachineGroupStatus,
+  type MachineInfo,
+} from "./machines";
+import { bridgeZone, parseWorkspaceZonesMode, splitByZone, zoneHeadersVisible } from "./workspaceZones";
+import type { WorkspaceZonesMode } from "./workspaceZones";
 import {
   NAVIGATION_SYNC_MODE_KEY,
   navigationSyncModeForStorageEvent,
@@ -215,6 +224,7 @@ import {
 } from "./workspaceReorder";
 import type { WorkspaceReorderDirection } from "./workspaceReorder";
 import { TERMINAL_CONNECTION_LOST_EVENT } from "./terminalConnectionStatus";
+import { supportsUploads } from "./terminalUploads";
 
 const NoteMarkdownPreview = lazy(() => import("./NoteMarkdownPreview"));
 
@@ -1060,6 +1070,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
     [],
   );
   const [spaceGroup, setSpaceGroup] = useState<SpaceGroup>(initialPrefs.spaceGroup);
+  const [workspaceZonesMode, setWorkspaceZonesMode] = useState<WorkspaceZonesMode>("off");
   const [agentPinnedOnly, setAgentPinnedOnly] = useState(initialPrefs.agentPinnedOnly);
   const [agentActiveOnly, setAgentActiveOnly] = useState(initialPrefs.agentActiveOnly);
   const [agentFeaturesInTabs, setAgentFeaturesInTabs] = useState(initialPrefs.agentFeaturesInTabs);
@@ -1169,6 +1180,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
   const [error, setError] = useState<string | null>(null);
   const [refitToken, setRefitToken] = useState(0);
   const [terminalFocusToken, setTerminalFocusToken] = useState(0);
+  const [terminalPasteToken, setTerminalPasteToken] = useState(0);
   const isCompactLayout = useIsCompactLayout();
   const isTouchInput = useIsTouchInput();
   const showMobileKeyboardHideRefit = isNativeAndroid();
@@ -1426,6 +1438,10 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
   const selectedHttpUrl = useMemo(
     () => selectedRuntime?.httpUrl ?? disconnectedHttpUrl,
     [selectedRuntime?.connectionKey],
+  );
+  const selectedUploadsEnabled = supportsUploads(
+    selectedRuntime?.capabilities,
+    selectedRuntime?.mode === "machine",
   );
   const selectedWsUrl = useMemo(
     () => selectedRuntime?.wsUrl ?? disconnectedWsUrl,
@@ -3457,6 +3473,64 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
       }
     }
   }, [bridge.enabledRuntimes]);
+  useEffect(() => {
+    for (const runtime of bridge.enabledRuntimes) {
+      if (
+        runtime.id === SAME_ORIGIN_BRIDGE_ID &&
+        runtime.capabilityState === "ready" &&
+        runtime.capabilities?.workspace_zones
+      ) {
+        let cancelled = false;
+        void (async () => {
+          try {
+            const response = await fetch(runtime.httpUrl("/api/workspace-zones"));
+            if (!response.ok) {
+              throw new Error(`workspace zones request failed (${response.status})`);
+            }
+            const body = (await response.json()) as { mode?: unknown };
+            const mode = parseWorkspaceZonesMode(body.mode);
+            if (!cancelled && mode) {
+              setWorkspaceZonesMode(mode);
+            }
+          } catch {
+            // Older bridge or transient failure: keep the current mode.
+          }
+        })();
+        return () => {
+          cancelled = true;
+        };
+      }
+    }
+    return undefined;
+  }, [bridge.enabledRuntimes]);
+
+  const workspaceZonesSupported = Boolean(
+    bridge.getRuntime(SAME_ORIGIN_BRIDGE_ID)?.capabilities?.workspace_zones,
+  );
+  const machines = bridge.machines;
+
+  const applyWorkspaceZonesMode = async (mode: WorkspaceZonesMode) => {
+    const runtime = bridge.getRuntime(SAME_ORIGIN_BRIDGE_ID);
+    if (!runtime?.capabilities?.workspace_zones) {
+      setError("Workspace zones are not available on this bridge");
+      return;
+    }
+    try {
+      const response = await fetch(runtime.httpUrl("/api/workspace-zones"), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode }),
+      });
+      if (!response.ok) {
+        throw new Error(`bridge returned ${response.status}`);
+      }
+      setWorkspaceZonesMode(mode);
+      setError(null);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not update workspace zones");
+    }
+  };
+
 
   async function refreshBridgeAgentPins(runtime: BridgeRuntime, setLoading: boolean) {
     return refreshBridgeResource({
@@ -3694,6 +3768,12 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
           if (next.has(preferenceKey)) next.delete(preferenceKey); else next.add(preferenceKey);
           return next;
         });
+        return;
+      }
+      if (key === "paste") {
+        openPane(bridgeId, target);
+        requestTerminalFocus();
+        setTerminalPasteToken((token) => token + 1);
         return;
       }
       if (!commands || !menuCommandsReady) {
@@ -4014,6 +4094,10 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
           onToggleCollapsedGroup={toggleCollapsedSidebarGroup}
           onSetCollapsedGroups={setVisibleSidebarGroupsCollapsed}
           onSpaceGroup={setSpaceGroup}
+          machines={machines}
+          workspaceZonesMode={workspaceZonesMode}
+          workspaceZonesSupported={workspaceZonesSupported}
+          onSetWorkspaceZones={(mode) => void applyWorkspaceZonesMode(mode)}
           onCancelSpaceReorder={cancelSpaceReorder}
           onAnnounceSpaceReorder={announceSpaceReorder}
           onReorderSpace={(bridgeId, workspaceId, beforeWorkspaceId, keepMode) =>
@@ -4261,6 +4345,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
             }}
             refitToken={refitToken}
             focusToken={terminalFocusToken}
+            pasteToken={terminalPasteToken}
             touchInput={isTouchInput}
             desktopCommandComposer={desktopCommandComposer}
             desktopCommandEnterNewline={desktopCommandEnterNewline}
@@ -4268,6 +4353,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
             terminalFontSizePx={terminalFontSizePx}
             terminalScreenReaderText={terminalScreenReaderText}
             autoRenameUploadConflicts={autoRenameUploadConflicts}
+            uploadsEnabled={selectedUploadsEnabled}
             mobileControlsScalePercent={mobileControlsScalePercent}
             mobileTapTarget={mobileTerminalTapTarget}
             mobileLongPressBehavior={mobileLongPressBehavior}
@@ -4302,6 +4388,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
             terminalFontSizePx={terminalFontSizePx}
             terminalScreenReaderText={terminalScreenReaderText}
             autoRenameUploadConflicts={autoRenameUploadConflicts}
+            uploadsEnabled={selectedUploadsEnabled}
             mobileControlsScalePercent={mobileControlsScalePercent}
             mobileTapTarget={mobileTerminalTapTarget}
             mobileLongPressBehavior={mobileLongPressBehavior}
@@ -4314,6 +4401,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
             terminalOutputCoalesceMs={terminalOutputCoalesceMs}
             refitToken={refitToken}
             focusToken={terminalFocusToken}
+            pasteToken={terminalPasteToken}
             accessibilityLabel={
               selectedPane ? `Selected pane terminal: ${paneTitle(selectedPane)}` : "Terminal"
             }
@@ -5188,7 +5276,7 @@ export function buildVisibleAgentPaneEntries(
 }
 
 type CollapsibleSidebarView = "agents" | "tabs" | "spaces";
-type CollapsibleGroupLevel = "host" | "workspace";
+type CollapsibleGroupLevel = "host" | "workspace" | "zone" | "machine";
 
 export function sidebarGroupCollapseKey(
   view: CollapsibleSidebarView,
@@ -6038,6 +6126,7 @@ function SplitGrid({
   onSelectPane,
   refitToken,
   focusToken,
+  pasteToken,
   touchInput,
   desktopCommandComposer,
   desktopCommandEnterNewline,
@@ -6045,6 +6134,7 @@ function SplitGrid({
   terminalFontSizePx,
   terminalScreenReaderText,
   autoRenameUploadConflicts,
+  uploadsEnabled,
   mobileControlsScalePercent,
   mobileTapTarget,
   mobileLongPressBehavior,
@@ -6068,6 +6158,7 @@ function SplitGrid({
   onSelectPane: (pane: PaneInfo) => void;
   refitToken: number;
   focusToken: number;
+  pasteToken: number;
   touchInput: boolean;
   desktopCommandComposer: boolean;
   desktopCommandEnterNewline: boolean;
@@ -6075,6 +6166,7 @@ function SplitGrid({
   terminalFontSizePx: number;
   terminalScreenReaderText: boolean;
   autoRenameUploadConflicts: boolean;
+  uploadsEnabled: boolean;
   mobileControlsScalePercent: number;
   mobileTapTarget: MobileTerminalTapTarget;
   mobileLongPressBehavior: MobileLongPressBehavior;
@@ -6123,6 +6215,7 @@ function SplitGrid({
               terminalFontSizePx={terminalFontSizePx}
               terminalScreenReaderText={terminalScreenReaderText}
               autoRenameUploadConflicts={autoRenameUploadConflicts}
+              uploadsEnabled={uploadsEnabled}
               mobileControlsScalePercent={mobileControlsScalePercent}
               mobileTapTarget={mobileTapTarget}
               mobileLongPressBehavior={mobileLongPressBehavior}
@@ -6135,6 +6228,7 @@ function SplitGrid({
               terminalOutputCoalesceMs={terminalOutputCoalesceMs}
               refitToken={selected ? refitToken : 0}
               focusToken={selected ? focusToken : 0}
+              pasteToken={selected ? pasteToken : 0}
               accessibilityLabel={accessibilityLabel}
               selected={selected}
             />
@@ -6274,6 +6368,10 @@ function Switcher({
   onToggleCollapsedGroup,
   onSetCollapsedGroups,
   onSpaceGroup,
+  machines,
+  workspaceZonesMode,
+  workspaceZonesSupported,
+  onSetWorkspaceZones,
   onCancelSpaceReorder,
   onAnnounceSpaceReorder,
   onReorderSpace,
@@ -6296,7 +6394,7 @@ function Switcher({
   bridgeCanConnect: boolean;
   bridgeError: string | null;
   bridgeLabel: string;
-  bridgeMode: "same-origin" | "configured" | "disconnected";
+  bridgeMode: "same-origin" | "configured" | "machine" | "disconnected";
   capabilityState: "idle" | "probing" | "ready" | "error";
   scope: Scope;
   sidebarView: SidebarView;
@@ -6332,6 +6430,10 @@ function Switcher({
   onToggleCollapsedGroup: (key: string) => void;
   onSetCollapsedGroups: (keys: readonly string[], collapsed: boolean) => void;
   onSpaceGroup: (group: SpaceGroup) => void;
+  machines: MachineInfo[];
+  workspaceZonesMode: WorkspaceZonesMode;
+  workspaceZonesSupported: boolean;
+  onSetWorkspaceZones: (mode: WorkspaceZonesMode) => void;
   onCancelSpaceReorder: () => void;
   onAnnounceSpaceReorder: (message: string) => void;
   onReorderSpace: (
@@ -6445,6 +6547,78 @@ function Switcher({
     hostScope,
     hostBridgeViews.length,
   );
+  const zoneSplit = splitByZone(
+    spaceEntries,
+    (entry) =>
+      bridgeZone(entry.view.runtime.id, entry.view.runtime.mode, SAME_ORIGIN_BRIDGE_ID),
+  );
+  const zonesActive = zoneHeadersVisible(workspaceZonesMode, zoneSplit.remote.length);
+  const machinesActive = machinesGroupingActive(workspaceZonesMode, machines);
+  const machineGroups = useMemo(() => {
+    if (!machinesActive) {
+      return [];
+    }
+    // CLI parity: the machine tree always lists every machine (and every
+    // enabled bridge), independent of the host-scope narrowing that filters
+    // single-bridge workspaces.
+    return buildMachineGroups(
+      machines,
+      bridgeViews.map((view) => ({
+        runtimeId: view.runtime.id,
+        mode: view.runtime.mode,
+        label: view.runtime.label,
+        loadState: view.loadState,
+        capabilityState: view.runtime.capabilityState,
+        hasSnapshot: Boolean(view.snapshot),
+        bridgeColor: view.runtime.color,
+      })),
+      SAME_ORIGIN_BRIDGE_ID,
+    );
+  }, [bridgeViews, machines, machinesActive]);
+  // The machine tree lists workspaces for every machine regardless of the
+  // host-scope narrowing applied to spaceEntries.
+  const machineSpaceEntries = useMemo(
+    () =>
+      bridgeViews.flatMap((view) => {
+        const viewSnapshot = view.snapshot;
+        if (!viewSnapshot) {
+          return [];
+        }
+        const activeWorkspace = activeWorkspaceForView(view);
+        return viewSnapshot.workspaces.map((workspace) => {
+          const workspacePanes = viewSnapshot.panes.filter(
+            (pane) => pane.workspace_id === workspace.workspace_id,
+          );
+          return {
+            view,
+            workspace,
+            workspacePanes,
+            active: workspace.workspace_id === activeWorkspace?.workspace_id,
+            runtimeId: view.runtime.id,
+          };
+        });
+      }),
+    [activeWorkspaceForView, bridgeViews],
+  );
+  const localZoneCollapseKey = sidebarGroupCollapseKey(
+    "spaces",
+    effectiveSpaceGroup,
+    "zone",
+    "local",
+  );
+  const remoteZoneCollapseKey = sidebarGroupCollapseKey(
+    "spaces",
+    effectiveSpaceGroup,
+    "zone",
+    "remote",
+  );
+  const remoteZoneViews = hostBridgeViews.filter(
+    (view) =>
+      view.runtime.id !== SAME_ORIGIN_BRIDGE_ID && view.runtime.mode !== "same-origin",
+  );
+  const remoteZoneBridgeCount = remoteZoneViews.filter((view) =>
+    zoneSplit.remote.some((entry) => entry.view.runtime.id === view.runtime.id),
+  ).length;
   const scopedWorkspaces = useMemo<ScopedWorkspace[]>(
     () =>
       buildVisibleScopedWorkspaces(
@@ -6584,7 +6758,7 @@ function Switcher({
       ),
     [agentActivityTransitions, agentFeaturesInTabs, agentSort, spaceGroups],
   );
-  const spaceCount = spaceEntries.length;
+  const spaceCount = machinesActive ? machineSpaceEntries.length : spaceEntries.length;
   const showGroupedHostContext = hostScope === "all";
   const showGroupControl =
     sidebarView !== "notes" &&
@@ -7400,7 +7574,7 @@ function Switcher({
             <span className="brand-sub">
               <b>{headerSummary}</b>
             </span>
-          ) : bridgeMode === "configured" ? (
+          ) : bridgeMode === "configured" || bridgeMode === "machine" ? (
             <span className="brand-sub">{bridgeLabel}</span>
           ) : null}
         </div>
@@ -7550,7 +7724,7 @@ function Switcher({
             {(scope === "space" || appearance === "tui") && hostBridgeViews.some((view) => view.snapshot) ? (
             <section className="sec" data-sidebar-section="spaces">
               <div className="sec-head">
-                <span className="sec-label">spaces</span>
+                <span className="sec-label">{machinesActive ? "machines" : "spaces"}</span>
                 <span className="sec-rule" />
                 <span className="sec-count mono">{spaceCount}</span>
                 {hostScope === "selected" ? (
@@ -7588,6 +7762,105 @@ function Switcher({
                   <strong>No spaces yet</strong>
                   <span>{hostScope === "selected" ? "Tap + to create one." : "No enabled host has spaces."}</span>
                 </div>
+              ) : machinesActive ? (
+                <>
+                  {machineGroups.map((group) => {
+                    const entries = entriesForGroup(machineSpaceEntries, group);
+                    const groupCollapseKey = sidebarGroupCollapseKey(
+                      "spaces",
+                      effectiveSpaceGroup,
+                      "machine",
+                      group.key,
+                    );
+                    const collapsed = collapsedSidebarGroupKeys.has(groupCollapseKey);
+                    return (
+                      <Fragment key={group.key}>
+                        <GroupHeader
+                          label={group.label}
+                          bridgeColor={group.view.bridgeColor}
+                          connection={group.status}
+                          status={aggregateStatus(
+                            entries.flatMap((entry) => entry.workspacePanes),
+                          )}
+                          count={entries.length}
+                          collapsed={collapsed}
+                          onToggle={() => onToggleCollapsedGroup(groupCollapseKey)}
+                        />
+                        {!collapsed
+                          ? entries.map((entry, index) => renderSpaceEntry(entry, index, false))
+                          : null}
+                      </Fragment>
+                    );
+                  })}
+                </>
+              ) : zonesActive ? (
+                <>
+                  {zoneSplit.local.length > 0 ? (
+                    <GroupHeader
+                      label="Local"
+                      status={aggregateStatus(
+                        zoneSplit.local.flatMap((entry) => entry.workspacePanes),
+                      )}
+                      count={zoneSplit.local.length}
+                      collapsed={collapsedSidebarGroupKeys.has(localZoneCollapseKey)}
+                      onToggle={() => onToggleCollapsedGroup(localZoneCollapseKey)}
+                    />
+                  ) : null}
+                  {!collapsedSidebarGroupKeys.has(localZoneCollapseKey)
+                    ? zoneSplit.local.map((entry, index) => renderSpaceEntry(entry, index, false))
+                    : null}
+                  <GroupHeader
+                    label="Remote"
+                    status={aggregateStatus(
+                      zoneSplit.remote.flatMap((entry) => entry.workspacePanes),
+                    )}
+                    count={zoneSplit.remote.length}
+                    collapsed={collapsedSidebarGroupKeys.has(remoteZoneCollapseKey)}
+                    onToggle={() => onToggleCollapsedGroup(remoteZoneCollapseKey)}
+                  />
+                  {!collapsedSidebarGroupKeys.has(remoteZoneCollapseKey)
+                    ? remoteZoneViews.map((view) => {
+                        const entries = zoneSplit.remote.filter(
+                          (entry) => entry.view.runtime.id === view.runtime.id,
+                        );
+                        if (entries.length === 0) {
+                          return null;
+                        }
+                        if (remoteZoneBridgeCount <= 1) {
+                          return (
+                            <Fragment key={view.runtime.id}>
+                              {entries.map((entry, index) => renderSpaceEntry(entry, index, false))}
+                            </Fragment>
+                          );
+                        }
+                        const bridgeCollapseKey = sidebarGroupCollapseKey(
+                          "spaces",
+                          effectiveSpaceGroup,
+                          "host",
+                          view.runtime.id,
+                        );
+                        return (
+                          <Fragment key={view.runtime.id}>
+                            <GroupHeader
+                              label={view.runtime.label}
+                              bridgeColor={view.runtime.color}
+                              status={aggregateStatus(
+                                entries.flatMap((entry) => entry.workspacePanes),
+                              )}
+                              count={entries.length}
+                              collapsed={collapsedSidebarGroupKeys.has(bridgeCollapseKey)}
+                              onToggle={() => onToggleCollapsedGroup(bridgeCollapseKey)}
+                            />
+                            {!collapsedSidebarGroupKeys.has(bridgeCollapseKey)
+                              ? entries.map((entry, index) =>
+                                  renderSpaceEntry(entry, index, false),
+                                )
+                              : null}
+                          </Fragment>
+                        );
+                      })
+                    : null}
+                </>
               ) : effectiveSpaceGroup === "host" ? (
                 hostBridgeViews.map((view) => {
                   const entries = spaceEntries.filter(
@@ -7812,6 +8085,9 @@ function Switcher({
           y={spaceOptionsMenu.y}
           spaceGroup={spaceGroup}
           onSpaceGroup={onSpaceGroup}
+          workspaceZonesMode={workspaceZonesMode}
+          workspaceZonesSupported={workspaceZonesSupported}
+          onSetWorkspaceZones={onSetWorkspaceZones}
           onClose={() => setSpaceOptionsMenu(null)}
         />
       ) : null}
@@ -7889,13 +8165,19 @@ function SpaceOptionsMenu({
   x,
   y,
   spaceGroup,
+  workspaceZonesMode,
+  workspaceZonesSupported,
   onSpaceGroup,
+  onSetWorkspaceZones,
   onClose,
 }: {
   x: number;
   y: number;
   spaceGroup: SpaceGroup;
+  workspaceZonesMode: WorkspaceZonesMode;
+  workspaceZonesSupported: boolean;
   onSpaceGroup: (group: SpaceGroup) => void;
+  onSetWorkspaceZones: (mode: WorkspaceZonesMode) => void;
   onClose: () => void;
 }) {
   return (
@@ -7910,6 +8192,20 @@ function SpaceOptionsMenu({
           <option value="host">Host</option>
         </select>
       </label>
+      {workspaceZonesSupported ? (
+        <label className="sidebar-option-field">
+          <span>Zones</span>
+          <select
+            value={workspaceZonesMode}
+            onChange={(event) =>
+              onSetWorkspaceZones(event.currentTarget.value as WorkspaceZonesMode)
+            }
+          >
+            <option value="local_remote">Local / Remote</option>
+            <option value="off">Off</option>
+          </select>
+        </label>
+      ) : null}
     </OptionsMenuShell>
   );
 }
@@ -8938,6 +9234,7 @@ function GroupHeader({
   label,
   bridgeColor,
   status,
+  connection,
   count,
   collapsed,
   nested = false,
@@ -8946,6 +9243,7 @@ function GroupHeader({
   label: string;
   bridgeColor?: string;
   status?: AgentStatus;
+  connection?: MachineGroupStatus;
   count: number;
   collapsed: boolean;
   nested?: boolean;
@@ -8978,6 +9276,14 @@ function GroupHeader({
       ) : null}
       {bridgeColor && status ? <span className="dot" data-status={status} /> : null}
       <span className="grp-space-name">{label}</span>
+      {connection ? (
+        <span
+          className="machine-conn"
+          data-connection={connection}
+          aria-label={`machine ${connection}`}
+          title={`machine ${connection}`}
+        />
+      ) : null}
       <span className="grp-space-count mono">{count}</span>
       <span className="grp-space-line" />
     </button>

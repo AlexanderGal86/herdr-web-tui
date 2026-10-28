@@ -7,6 +7,8 @@ describe("agentIconKindFromValues", () => {
     expect(agentIconKindFromValues(["codex"])).toBe("codex");
     expect(agentIconKindFromValues(["pi"])).toBe("pi");
     expect(agentIconKindFromValues(["grok"])).toBe("grok");
+    expect(agentIconKindFromValues(["omp"])).toBe("omp");
+    expect(agentIconKindFromValues(["oh my pi"])).toBe("omp");
     expect(agentIconKindFromValues(["opencode"])).toBe("opencode");
     expect(agentIconKindFromValues(["open-code"])).toBe("opencode");
   });
@@ -29,6 +31,7 @@ describe("agentIconKindFromHint", () => {
     expect(agentIconKindFromHint("claude")).toBe("claude");
     expect(agentIconKindFromHint("codex")).toBe("codex");
     expect(agentIconKindFromHint("pi")).toBe("pi");
+    expect(agentIconKindFromHint("omp")).toBe("omp");
     expect(agentIconKindFromHint("grok")).toBe("grok");
     expect(agentIconKindFromHint("grok-build")).toBe("grok");
     expect(agentIconKindFromHint("opencode")).toBe("opencode");

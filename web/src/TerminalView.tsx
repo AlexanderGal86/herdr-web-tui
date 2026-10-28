@@ -128,10 +128,14 @@ type Props = {
   refitToken?: number;
   /** Incrementing token from the parent that requests focus on the preferred terminal input. */
   focusToken?: number;
+  /** Incrementing token from the parent that requests pasting the clipboard into this terminal. */
+  pasteToken?: number;
   /** Whether to maintain a hidden plain-text mirror of the visible terminal viewport. */
   terminalScreenReaderText?: boolean;
   /** Whether upload filename conflicts are resolved with a numeric suffix. */
   autoRenameUploadConflicts?: boolean;
+  /** Whether the runtime behind httpUrl supports file uploads at all. */
+  uploadsEnabled?: boolean;
   /** Pane-specific accessible name for the terminal and its screen mirror. */
   accessibilityLabel?: string;
   /** Whether this is the currently selected terminal in a split. */
@@ -201,8 +205,10 @@ export function TerminalView({
   terminalOutputCoalesceMs = DEFAULT_TERMINAL_OUTPUT_COALESCE_MS,
   refitToken = 0,
   focusToken = 0,
+  pasteToken = 0,
   terminalScreenReaderText = false,
   autoRenameUploadConflicts = true,
+  uploadsEnabled = true,
   accessibilityLabel = "Terminal",
   selected = false,
   onContextMenu,
@@ -1253,7 +1259,7 @@ export function TerminalView({
     };
   }, [mobileControls, pane?.terminal_id, rendererReady, resizeTerminal]);
 
-  const uploadDisabled = !pane || uploading;
+  const uploadDisabled = !pane || uploading || !uploadsEnabled;
 
   const closeMobileSelectionActions = () => {
     setMobileSelectionAction(null);
@@ -1313,6 +1319,10 @@ export function TerminalView({
       if (files.length > 0) {
         showUploadStatus("No pane selected", 3000);
       }
+      return;
+    }
+    if (!uploadsEnabled) {
+      showUploadStatus("Uploads are not supported on this connection", 3000);
       return;
     }
     if (uploadInFlightRef.current) {
@@ -1446,6 +1456,14 @@ export function TerminalView({
       }
     }
   };
+  const pasteClipboardRef = useRef(pasteClipboard);
+  pasteClipboardRef.current = pasteClipboard;
+
+  useEffect(() => {
+    if (pasteToken <= 0) return;
+    void pasteClipboardRef.current();
+  }, [pasteToken]);
+
 
   const captureTerminalMouse = (event: ReactMouseEvent<HTMLDivElement>) => {
     if (event.button === 1) {

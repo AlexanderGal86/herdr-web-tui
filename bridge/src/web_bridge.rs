@@ -57,6 +57,7 @@ use crate::notes::{
     NotesListResponse, NotesManager, RevisionRequest, UpdateNoteRequest,
 };
 use crate::websocket_heartbeat::{WebSocketHeartbeat, WebSocketHeartbeatAction};
+use crate::workspace_zones::{WorkspaceZonesError, WorkspaceZonesManager, WorkspaceZonesResponse};
 
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 8787;
@@ -115,6 +116,8 @@ struct BridgeState {
     selected_pane_id: Arc<Mutex<Option<String>>>,
     agent_activity: Arc<AgentActivityManager>,
     agent_pins: Arc<AgentPinsManager>,
+    workspace_zones: Arc<WorkspaceZonesManager>,
+    machines: Arc<crate::machines::MachineManager>,
     launcher_presets: Arc<LauncherPresetStore>,
     notes: Arc<NotesManager>,
     ui_event_tx: tokio::sync::broadcast::Sender<String>,
@@ -162,6 +165,19 @@ struct Capabilities {
     agent_pins: AgentPinsCapability,
     launcher_presets: LauncherPresetsCapability,
     notes: NotesCapability,
+    workspace_zones: WorkspaceZonesCapability,
+    machines: MachinesCapability,
+    uploads: UploadsCapability,
+}
+
+#[derive(Debug, Serialize)]
+struct MachinesCapability {
+    version: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct UploadsCapability {
+    version: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -181,6 +197,10 @@ struct LauncherPresetsCapability {
 
 #[derive(Debug, Serialize)]
 struct NotesCapability {
+    version: u32,
+}
+#[derive(Debug, Serialize)]
+struct WorkspaceZonesCapability {
     version: u32,
 }
 
@@ -608,7 +628,7 @@ fn terminal_output_coalesce_window(coalesce_ms: Option<u64>) -> Duration {
 /// keep is an independent race — so concurrent acquires instead wait for the
 /// in-flight handshake and join the session it publishes.
 #[derive(Default)]
-struct TerminalSessions {
+pub(crate) struct TerminalSessions {
     active: HashMap<String, SharedTerminalSession>,
     draining: HashMap<String, Arc<ConnectionClosed>>,
     attaching: HashMap<String, Arc<ConnectionClosed>>,
@@ -701,6 +721,7 @@ enum BridgeError {
     BadRequest(String),
     Conflict(String),
     Forbidden(String),
+    NotFound(String),
     Protocol(String),
 }
 
@@ -711,6 +732,8 @@ enum UploadError {
     NameExhausted(String),
     Forbidden(String),
     TooLarge,
+    NotFound(String),
+    Remote(String),
     Io(io::Error),
 }
 
@@ -722,6 +745,7 @@ impl fmt::Display for BridgeError {
             Self::BadRequest(message) => write!(f, "{message}"),
             Self::Conflict(message) => write!(f, "{message}"),
             Self::Forbidden(message) => write!(f, "{message}"),
+            Self::NotFound(message) => write!(f, "{message}"),
             Self::Protocol(message) => write!(f, "{message}"),
         }
     }
@@ -733,6 +757,7 @@ impl IntoResponse for BridgeError {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
+            Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Api(_) | Self::Io(_) | Self::Protocol(_) => StatusCode::BAD_GATEWAY,
         };
         let body = Json(serde_json::json!({
@@ -775,6 +800,15 @@ impl From<AgentPinsError> for BridgeError {
     }
 }
 
+impl From<WorkspaceZonesError> for BridgeError {
+    fn from(err: WorkspaceZonesError) -> Self {
+        match err {
+            WorkspaceZonesError::BadRequest(message) => Self::BadRequest(message),
+            WorkspaceZonesError::Io(err) => Self::Io(err),
+        }
+    }
+}
+
 impl IntoResponse for UploadError {
     fn into_response(self) -> Response {
         let (status, body) = match self {
@@ -807,6 +841,14 @@ impl IntoResponse for UploadError {
                 StatusCode::PAYLOAD_TOO_LARGE,
                 serde_json::json!({ "error": "upload exceeds 25 MB limit" }),
             ),
+            Self::NotFound(message) => (
+                StatusCode::NOT_FOUND,
+                serde_json::json!({ "error": message }),
+            ),
+            Self::Remote(message) => (
+                StatusCode::BAD_GATEWAY,
+                serde_json::json!({ "error": message }),
+            ),
             Self::Io(err) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 serde_json::json!({ "error": err.to_string() }),
@@ -819,6 +861,20 @@ impl IntoResponse for UploadError {
 impl From<io::Error> for UploadError {
     fn from(err: io::Error) -> Self {
         Self::Io(err)
+    }
+}
+
+impl From<crate::remote_uploads::RemoteUploadError> for UploadError {
+    fn from(err: crate::remote_uploads::RemoteUploadError) -> Self {
+        use crate::remote_uploads::RemoteUploadError as RemoteError;
+        match err {
+            // Client-visible, name-carrying outcomes mirror the local route.
+            RemoteError::BadRequest(message) => Self::BadRequest(message),
+            RemoteError::Conflict { name, path } => Self::Conflict { name, path },
+            RemoteError::NameExhausted(name) => Self::NameExhausted(name),
+            // Generic transport/commit failures: details stay in server logs.
+            RemoteError::Failure(_) => Self::Remote("remote upload failed".to_string()),
+        }
     }
 }
 
@@ -995,6 +1051,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
     ensure_upload_dir(&options.upload_dir)?;
     let agent_activity = Arc::new(AgentActivityManager::new());
     let agent_pins = Arc::new(AgentPinsManager::new()?);
+    let workspace_zones = Arc::new(WorkspaceZonesManager::new()?);
     let launcher_presets = Arc::new(
         LauncherPresetStore::load(options.launcher_presets_path.clone())
             .map_err(|message| io::Error::new(ErrorKind::InvalidInput, message))?,
@@ -1030,6 +1087,8 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         selected_pane_id: Arc::new(Mutex::new(None)),
         agent_activity,
         agent_pins,
+        workspace_zones,
+        machines: Arc::new(crate::machines::MachineManager::new()?),
         launcher_presets,
         notes,
         ui_event_tx: tokio::sync::broadcast::channel(256).0,
@@ -1104,6 +1163,12 @@ fn build_app(state: BridgeState, request_policy: RequestPolicy, static_dir: Path
             "/api/agent-pins/{pane_id}/unpin",
             post(agent_pins_unpin_handler).options(preflight_handler),
         );
+    let workspace_zones_routes = Router::new().route(
+        "/api/workspace-zones",
+        get(workspace_zones_get_handler)
+            .put(workspace_zones_set_handler)
+            .options(preflight_handler),
+    );
     let notes_routes = Router::new()
         .route(
             "/api/notes",
@@ -1145,9 +1210,44 @@ fn build_app(state: BridgeState, request_policy: RequestPolicy, static_dir: Path
             "/api/launcher-presets/launch",
             post(launcher_preset_launch_handler).options(preflight_handler),
         );
+    let machines_routes = Router::new()
+        .route(
+            "/api/machines",
+            get(machines_list_handler).options(preflight_handler),
+        )
+        .route(
+            "/api/machines/{machine_id}/snapshot",
+            get(machine_snapshot_handler).options(preflight_handler),
+        )
+        .route(
+            "/api/machines/{machine_id}/capabilities",
+            get(machine_capabilities_handler).options(preflight_handler),
+        )
+        .route(
+            "/api/machines/{machine_id}/command",
+            post(machine_command_handler).options(preflight_handler),
+        )
+        .route(
+            "/api/machines/{machine_id}/selection",
+            post(machine_selection_handler).options(preflight_handler),
+        )
+        .route(
+            "/api/machines/{machine_id}/uploads",
+            post(machine_upload_handler).options(preflight_handler),
+        )
+        .route(
+            "/api/machines/{machine_id}/ws/events",
+            get(machine_events_ws_handler),
+        )
+        .route(
+            "/api/machines/{machine_id}/ws/terminal",
+            get(machine_terminal_ws_handler),
+        );
     Router::new()
         .merge(agent_activity_routes)
         .merge(agent_pins_routes)
+        .merge(workspace_zones_routes)
+        .merge(machines_routes)
         .merge(notes_routes)
         .merge(launcher_preset_routes)
         .route(
@@ -2106,6 +2206,26 @@ async fn command_handler(
     Json(body): Json<CommandRequest>,
 ) -> Result<Json<serde_json::Value>, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
+    run_web_command(&state, state.local_route_target(), true, body).await
+}
+
+async fn machine_command_handler(
+    State(state): State<BridgeState>,
+    AxumPath(machine_id): AxumPath<String>,
+    headers: HeaderMap,
+    Json(body): Json<CommandRequest>,
+) -> Result<Json<serde_json::Value>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    let (target, is_local) = state.machine_route_target(&machine_id).await?;
+    run_web_command(&state, target, is_local, body).await
+}
+
+async fn run_web_command(
+    state: &BridgeState,
+    target: MachineRouteTarget,
+    is_local: bool,
+    body: CommandRequest,
+) -> Result<Json<serde_json::Value>, BridgeError> {
     if !ALLOWED_COMMANDS.contains(&body.method.as_str()) {
         return Err(BridgeError::Forbidden(format!(
             "command not allowed: {}",
@@ -2128,35 +2248,42 @@ async fn command_handler(
     validate_web_command(&request.method)?;
     let should_prune_terminal_sessions = command_may_close_terminal_session(&request.method);
 
-    let api = state.api.clone();
+    let api = target.api.clone();
     let response = tokio::task::spawn_blocking(move || {
         fill_clear_rename_labels(&api, &mut request.method)?;
         Ok::<_, BridgeError>(api.request(request)?)
     })
     .await
     .map_err(|err| BridgeError::Protocol(err.to_string()))??;
-    if let ResponseResult::PaneMove { move_result } = &response.result {
-        if move_result.changed {
-            let notes = state.notes.clone();
-            let previous_pane_id = move_result.previous_pane_id.clone();
-            let moved_pane = (*move_result.pane).clone();
-            match tokio::task::spawn_blocking(move || {
-                notes.update_for_pane_move(&previous_pane_id, &moved_pane)
-            })
-            .await
-            .map_err(|err| BridgeError::Protocol(err.to_string()))?
-            {
-                Ok(true) => broadcast_notes_changed(&state, None, None),
-                Ok(false) => {}
-                Err(err) => warn!(error = %err, "failed to update note attachment after pane move"),
+    if is_local {
+        if let ResponseResult::PaneMove { move_result } = &response.result {
+            if move_result.changed {
+                let notes = state.notes.clone();
+                let previous_pane_id = move_result.previous_pane_id.clone();
+                let moved_pane = (*move_result.pane).clone();
+                match tokio::task::spawn_blocking(move || {
+                    notes.update_for_pane_move(&previous_pane_id, &moved_pane)
+                })
+                .await
+                .map_err(|err| BridgeError::Protocol(err.to_string()))?
+                {
+                    Ok(true) => broadcast_notes_changed(state, None, None),
+                    Ok(false) => {}
+                    Err(err) => {
+                        warn!(error = %err, "failed to update note attachment after pane move")
+                    }
+                }
             }
         }
     }
     let value = serde_json::to_value(response.result)
         .map_err(|err| BridgeError::Protocol(err.to_string()))?;
     if should_prune_terminal_sessions {
-        let prune_state = state.clone();
-        tokio::task::spawn_blocking(move || prune_detached_terminal_sessions(&prune_state));
+        let prune_api = target.api.clone();
+        let prune_sessions = Arc::clone(&target.terminal_sessions);
+        tokio::task::spawn_blocking(move || {
+            prune_terminal_sessions_for(&prune_api, &prune_sessions)
+        });
     }
     Ok(Json(value))
 }
@@ -2823,11 +2950,34 @@ async fn selection_handler(
     Json(body): Json<SelectionRequest>,
 ) -> Result<Json<serde_json::Value>, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
+    web_selection(&state, state.local_route_target(), None, body).await
+}
+
+async fn machine_selection_handler(
+    State(state): State<BridgeState>,
+    AxumPath(machine_id): AxumPath<String>,
+    headers: HeaderMap,
+    Json(body): Json<SelectionRequest>,
+) -> Result<Json<serde_json::Value>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    let (target, _is_local) = state.machine_route_target(&machine_id).await?;
+    web_selection(&state, target, Some(machine_id), body).await
+}
+
+/// Applies a web pane selection to exactly one machine's overlay. The pane
+/// must exist on that machine; a remote machine's overlay never influences
+/// the local machine's snapshot and vice versa.
+async fn web_selection(
+    state: &BridgeState,
+    target: MachineRouteTarget,
+    machine_id: Option<String>,
+    body: SelectionRequest,
+) -> Result<Json<serde_json::Value>, BridgeError> {
     let pane_id = body.pane_id.trim();
     if pane_id.is_empty() {
         return Err(BridgeError::BadRequest("missing pane_id".to_string()));
     }
-    let api = state.api.clone();
+    let api = target.api.clone();
     let panes = tokio::task::spawn_blocking(move || current_panes(&api))
         .await
         .map_err(|err| BridgeError::Protocol(err.to_string()))??;
@@ -2835,19 +2985,20 @@ async fn selection_handler(
         return Err(BridgeError::Protocol(format!("pane not found: {pane_id}")));
     }
     {
-        let mut selected = state
+        let mut selected = target
             .selected_pane_id
             .lock()
             .map_err(|_| BridgeError::Protocol("selection lock poisoned".to_string()))?;
         *selected = Some(pane_id.to_string());
     }
-    let _ = state.ui_event_tx.send(
-        serde_json::json!({
+    let _ = state.ui_event_tx.send(match machine_id.as_deref() {
+        Some(machine_id) => machine_ui_event_json(machine_id, pane_id),
+        None => serde_json::json!({
             "type": "herdr_web.selection_changed",
             "pane_id": pane_id,
         })
         .to_string(),
-    );
+    });
     Ok(Json(serde_json::json!({ "selected_pane_id": pane_id })))
 }
 
@@ -2874,23 +3025,32 @@ async fn upload_handler(
         rename_conflicts = query.rename_conflicts,
         "herdr-web-bridge upload request"
     );
+    tokio::fs::create_dir_all(&state.upload_dir).await?;
+    let response = store_local_upload(&state.upload_dir, &query, mime.as_deref(), &body).await?;
+    info!(bytes = body.len(), "herdr-web-bridge upload saved");
+    Ok(Json(response))
+}
+
+/// Shared local-upload storage used by both `/api/uploads` and the
+/// machine-scoped upload route for the local machine: reserve-or-rename with
+/// `create_new`, or explicit overwrite through a temp file + rename after
+/// refusing to replace anything but a regular file.
+async fn store_local_upload(
+    upload_dir: &Path,
+    query: &UploadQuery,
+    mime: Option<&str>,
+    body: &Bytes,
+) -> Result<UploadResponse, UploadError> {
     let requested_name = match query.name.as_deref().and_then(sanitize_upload_file_name) {
         Some(name) => name,
-        None => generated_upload_name(mime.as_deref()),
+        None => generated_upload_name(mime),
     };
-    tokio::fs::create_dir_all(&state.upload_dir).await?;
     let (name, destination) = if !query.overwrite {
-        create_new_upload(
-            &state.upload_dir,
-            &requested_name,
-            &body,
-            query.rename_conflicts,
-        )
-        .await?
+        create_new_upload(upload_dir, &requested_name, body, query.rename_conflicts).await?
     } else {
         let name = requested_name;
-        let destination = state.upload_dir.join(&name);
-        if !is_direct_child(&state.upload_dir, &destination) {
+        let destination = upload_dir.join(&name);
+        if !is_direct_child(upload_dir, &destination) {
             return Err(UploadError::BadRequest("invalid file name".to_string()));
         }
         if let Ok(existing) = tokio::fs::symlink_metadata(&destination).await {
@@ -2900,12 +3060,12 @@ async fn upload_handler(
                 ));
             }
         }
-        let temp_path = state.upload_dir.join(format!(
+        let temp_path = upload_dir.join(format!(
             ".herdr-web-upload-{}-{}.tmp",
             std::process::id(),
             UPLOAD_TEMP_COUNTER.fetch_add(1, Ordering::AcqRel)
         ));
-        tokio::fs::write(&temp_path, &body).await?;
+        tokio::fs::write(&temp_path, body).await?;
         if destination.exists() {
             tokio::fs::remove_file(&destination).await?;
         }
@@ -2918,17 +3078,93 @@ async fn upload_handler(
         }
         (name, destination)
     };
-
-    let response = UploadResponse {
+    Ok(UploadResponse {
         file: UploadEntry {
             name,
             path: destination.display().to_string(),
             size: body.len(),
+            mime: mime.map(|value| value.to_string()),
+        },
+    })
+}
+
+/// Machine-scoped upload route. The local machine reuses the shared local
+/// upload flow; SSH machines stage the blob privately on the bridge host and
+/// then copy it with scp into the remote user's fixed uploads directory,
+/// committing atomically under the sanitized final name. Unknown or disabled
+/// machines are rejected before any staging file is written, and success is
+/// only reported once the remote transfer and commit have completed.
+async fn machine_upload_handler(
+    State(state): State<BridgeState>,
+    AxumPath(machine_id): AxumPath<String>,
+    Query(query): Query<UploadQuery>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<UploadResponse>, UploadError> {
+    ensure_allowed_request(&headers, &state.request_policy)
+        .map_err(|err| UploadError::Forbidden(err.to_string()))?;
+    if body.len() > MAX_UPLOAD_BYTES {
+        return Err(UploadError::TooLarge);
+    }
+    let mime = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string());
+    // Resolve the machine id against the saved enabled catalog first so
+    // unknown/disabled machines never cause staging writes.
+    let endpoint = match state.machines.catalog().resolve(&machine_id) {
+        Ok(crate::machines::ResolvedMachine::Local) => None,
+        Ok(crate::machines::ResolvedMachine::Ssh(endpoint)) => Some(endpoint),
+        Err(crate::machines::MachineError::Unknown(id)) => {
+            return Err(UploadError::NotFound(format!("unknown machine: {id}")));
+        }
+        Err(crate::machines::MachineError::Disabled(id)) => {
+            return Err(UploadError::NotFound(format!("machine is disabled: {id}")));
+        }
+    };
+    let Some(endpoint) = endpoint else {
+        tokio::fs::create_dir_all(&state.upload_dir).await?;
+        let response =
+            store_local_upload(&state.upload_dir, &query, mime.as_deref(), &body).await?;
+        info!(bytes = body.len(), "herdr-web-bridge upload saved");
+        return Ok(Json(response));
+    };
+    let requested_name = match query.name.as_deref().and_then(sanitize_upload_file_name) {
+        Some(name) => name,
+        None => generated_upload_name(mime.as_deref()),
+    };
+    debug!(
+        machine = %endpoint.id,
+        bytes = body.len(),
+        overwrite = query.overwrite,
+        rename_conflicts = query.rename_conflicts,
+        "herdr-web-bridge remote upload request"
+    );
+    let exec = crate::remote_uploads::default_exec();
+    let outcome = crate::remote_uploads::upload_to_machine(
+        &endpoint,
+        &state.upload_dir,
+        &requested_name,
+        &body,
+        query.overwrite,
+        query.rename_conflicts,
+        &exec,
+    )
+    .await?;
+    info!(
+        machine = %endpoint.id,
+        bytes = body.len(),
+        remote_path = %outcome.remote_path,
+        "herdr-web-bridge remote upload saved"
+    );
+    Ok(Json(UploadResponse {
+        file: UploadEntry {
+            name: outcome.name,
+            path: outcome.remote_path,
+            size: body.len(),
             mime,
         },
-    };
-    info!(bytes = body.len(), "herdr-web-bridge upload saved");
-    Ok(Json(response))
+    }))
 }
 
 async fn snapshot_handler(
@@ -2936,38 +3172,8 @@ async fn snapshot_handler(
     headers: HeaderMap,
 ) -> Result<Json<Snapshot>, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
-    let api_state = state.clone();
-    let session_snapshot = tokio::task::spawn_blocking(move || {
-        match api_request(
-            &api_state.api,
-            "herdr-web:session-snapshot",
-            Method::SessionSnapshot(EmptyParams::default()),
-        )? {
-            ResponseResult::SessionSnapshot { snapshot } => Ok(*snapshot),
-            other => Err(BridgeError::Protocol(format!(
-                "unexpected response: {other:?}"
-            ))),
-        }
-    })
-    .await
-    .map_err(|err| BridgeError::Protocol(err.to_string()))??;
-    observe_agent_activity_snapshot(&state, &session_snapshot.panes);
-    let notes = state.notes.clone();
-    let note_panes = session_snapshot.panes.clone();
-    match tokio::task::spawn_blocking(move || notes.observe_panes(&note_panes))
-        .await
-        .map_err(|err| BridgeError::Protocol(err.to_string()))?
-    {
-        Ok(true) => broadcast_notes_changed(&state, None, None),
-        Ok(false) => {}
-        Err(err) => warn!(error = %err, "failed to update pane note observations"),
-    }
-    let selected_pane_id = shared_selected_pane(&state, &session_snapshot.panes)?;
-
-    Ok(Json(web_snapshot_from_session_snapshot(
-        session_snapshot,
-        selected_pane_id,
-    )))
+    let snapshot = fetch_web_snapshot(&state, state.local_route_target(), true).await?;
+    Ok(Json(snapshot))
 }
 
 fn web_snapshot_from_session_snapshot(
@@ -3024,6 +3230,33 @@ fn is_default_tab_label(label: &str) -> bool {
     !label.is_empty() && label.chars().all(|ch| ch.is_ascii_digit())
 }
 
+async fn workspace_zones_get_handler(
+    State(state): State<BridgeState>,
+    headers: HeaderMap,
+) -> Result<Json<WorkspaceZonesResponse>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    let response = run_store_task(state, move |state| Ok(state.workspace_zones.get()?)).await?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, Deserialize)]
+struct SetWorkspaceZonesRequest {
+    mode: String,
+}
+
+async fn workspace_zones_set_handler(
+    State(state): State<BridgeState>,
+    headers: HeaderMap,
+    Json(body): Json<SetWorkspaceZonesRequest>,
+) -> Result<Json<WorkspaceZonesResponse>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    let response = run_store_task(state, move |state| {
+        Ok(state.workspace_zones.set(&body.mode)?)
+    })
+    .await?;
+    Ok(Json(response))
+}
+
 async fn capabilities_handler(
     State(state): State<BridgeState>,
     headers: HeaderMap,
@@ -3035,6 +3268,9 @@ async fn capabilities_handler(
         agent_pins: AgentPinsCapability { version: 1 },
         launcher_presets: LauncherPresetsCapability { version: 1 },
         notes: NotesCapability { version: 1 },
+        workspace_zones: WorkspaceZonesCapability { version: 1 },
+        machines: MachinesCapability { version: 1 },
+        uploads: UploadsCapability { version: 1 },
     }))
 }
 
@@ -3285,12 +3521,11 @@ fn current_panes(api: &ApiClient) -> Result<Vec<PaneInfo>, BridgeError> {
     }
 }
 
-fn shared_selected_pane(
-    state: &BridgeState,
+fn shared_selected_pane_on(
+    selected_pane_id: &Mutex<Option<String>>,
     panes: &[PaneInfo],
 ) -> Result<Option<String>, BridgeError> {
-    let mut selected = state
-        .selected_pane_id
+    let mut selected = selected_pane_id
         .lock()
         .map_err(|_| BridgeError::Protocol("selection lock poisoned".to_string()))?;
     if selected
@@ -3301,6 +3536,190 @@ fn shared_selected_pane(
     }
     *selected = None;
     Ok(None)
+}
+
+/// UI event JSON tagged for one machine's listeners; the shared broadcast
+/// channel stays single, and each events socket filters by scope.
+fn machine_ui_event_json(machine_id: &str, pane_id: &str) -> String {
+    serde_json::json!({
+        "type": "herdr_web.selection_changed",
+        "machine": machine_id,
+        "pane_id": pane_id,
+    })
+    .to_string()
+}
+
+/// Machine scope of a UI broadcast event; `None` for legacy bridge-local
+/// events that predate machine scoping.
+fn ui_event_machine_id(event: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(event)
+        .ok()?
+        .get("machine")?
+        .as_str()
+        .map(str::to_string)
+}
+
+#[derive(Debug, Serialize)]
+struct MachinesListResponse {
+    version: u32,
+    machines: Vec<crate::machines::MachineEntry>,
+}
+
+async fn machines_list_handler(
+    State(state): State<BridgeState>,
+    headers: HeaderMap,
+) -> Result<Json<MachinesListResponse>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    let machines = state.machines.catalog().machines();
+    Ok(Json(MachinesListResponse {
+        version: 1,
+        machines,
+    }))
+}
+
+async fn machine_snapshot_handler(
+    State(state): State<BridgeState>,
+    AxumPath(machine_id): AxumPath<String>,
+    headers: HeaderMap,
+) -> Result<Json<Snapshot>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    let (target, is_local) = state.machine_route_target(&machine_id).await?;
+    Ok(Json(fetch_web_snapshot(&state, target, is_local).await?))
+}
+
+async fn machine_capabilities_handler(
+    State(state): State<BridgeState>,
+    AxumPath(machine_id): AxumPath<String>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    // Resolving validates the machine id (and probes SSH machines) so a dead
+    // machine reports an error here instead of appearing connected.
+    let (_target, is_local) = state.machine_route_target(&machine_id).await?;
+    // SSH machines only advertise uploads when this bridge can run scp.
+    Ok(Json(machine_capabilities_body(
+        is_local || crate::remote_uploads::scp_available(),
+    )))
+}
+
+/// Capability body served by machine-scoped capability routes. SSH machines
+/// only advertise uploads when this bridge can actually run scp; the local
+/// machine always supports the local upload route.
+fn machine_capabilities_body(uploads_supported: bool) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "commands": ALLOWED_COMMANDS,
+        "machines": { "version": 1 },
+    });
+    if uploads_supported {
+        body["uploads"] = serde_json::json!({ "version": 1 });
+    }
+    body
+}
+
+/// The per-machine API/client/terminal/selection bundle a machine-scoped
+/// route operates on. The local machine reuses the bridge's own state; SSH
+/// machines get per-machine sockets and per-machine session maps so colliding
+/// Herdr ids on different machines can never cross-contaminate.
+#[derive(Clone)]
+struct MachineRouteTarget {
+    api: ApiClient,
+    client_socket_path: PathBuf,
+    terminal_sessions: Arc<Mutex<TerminalSessions>>,
+    selected_pane_id: Arc<Mutex<Option<String>>>,
+}
+
+impl BridgeState {
+    fn local_route_target(&self) -> MachineRouteTarget {
+        MachineRouteTarget {
+            api: self.api.clone(),
+            client_socket_path: self.client_socket_path.clone(),
+            terminal_sessions: Arc::clone(&self.terminal_sessions),
+            selected_pane_id: Arc::clone(&self.selected_pane_id),
+        }
+    }
+
+    /// Resolves a machine route. SSH machines may run a blocking remote
+    /// capability probe (up to the ssh connect timeout) and start bridges,
+    /// so that work runs on the tokio blocking pool: an unreachable remote
+    /// machine can never stall the async workers serving unrelated or local
+    /// routes.
+    async fn machine_route_target(
+        &self,
+        machine_id: &str,
+    ) -> Result<(MachineRouteTarget, bool), BridgeError> {
+        match self.machines.catalog().resolve(machine_id) {
+            Ok(crate::machines::ResolvedMachine::Local) => Ok((self.local_route_target(), true)),
+            Ok(crate::machines::ResolvedMachine::Ssh(endpoint)) => {
+                let machines = Arc::clone(&self.machines);
+                let state = tokio::task::spawn_blocking(move || machines.ssh_state(&endpoint))
+                    .await
+                    .map_err(|err| {
+                        BridgeError::Protocol(format!("machine bridge task failed: {err}"))
+                    })?
+                    .map_err(BridgeError::Protocol)?;
+                Ok((
+                    MachineRouteTarget {
+                        api: state.api.clone(),
+                        client_socket_path: state.client_socket_path.clone(),
+                        terminal_sessions: Arc::clone(&state.terminal_sessions),
+                        selected_pane_id: Arc::clone(&state.selected_pane_id),
+                    },
+                    false,
+                ))
+            }
+            Err(crate::machines::MachineError::Unknown(id)) => {
+                Err(BridgeError::NotFound(format!("unknown machine: {id}")))
+            }
+            Err(crate::machines::MachineError::Disabled(id)) => {
+                Err(BridgeError::NotFound(format!("machine is disabled: {id}")))
+            }
+        }
+    }
+}
+
+/// Snapshot for any machine. Bridge-local observers (agent activity, notes)
+/// only run for the local machine; remote machines return the remote
+/// snapshot with the machine-scoped selected pane overlay.
+async fn fetch_web_snapshot(
+    state: &BridgeState,
+    target: MachineRouteTarget,
+    is_local: bool,
+) -> Result<Snapshot, BridgeError> {
+    let api = target.api.clone();
+    let session_snapshot = tokio::task::spawn_blocking(move || {
+        match api_request(
+            &api,
+            "herdr-web:session-snapshot",
+            Method::SessionSnapshot(EmptyParams::default()),
+        )? {
+            ResponseResult::SessionSnapshot { snapshot } => Ok(*snapshot),
+            other => Err(BridgeError::Protocol(format!(
+                "unexpected response: {other:?}"
+            ))),
+        }
+    })
+    .await
+    .map_err(|err| BridgeError::Protocol(err.to_string()))??;
+    if is_local {
+        observe_agent_activity_snapshot(state, &session_snapshot.panes);
+        let notes = state.notes.clone();
+        let note_panes = session_snapshot.panes.clone();
+        match tokio::task::spawn_blocking(move || notes.observe_panes(&note_panes))
+            .await
+            .map_err(|err| BridgeError::Protocol(err.to_string()))?
+        {
+            Ok(true) => broadcast_notes_changed(state, None, None),
+            Ok(false) => {}
+            Err(err) => warn!(error = %err, "failed to update pane note observations"),
+        }
+    }
+    let selected_pane_id =
+        shared_selected_pane_on(&target.selected_pane_id, &session_snapshot.panes)?;
+
+    Ok(web_snapshot_from_session_snapshot(
+        session_snapshot,
+        selected_pane_id,
+    ))
 }
 
 fn api_request(api: &ApiClient, id: &str, method: Method) -> Result<ResponseResult, BridgeError> {
@@ -3321,7 +3740,26 @@ async fn terminal_ws_handler(
     if let Err(err) = ensure_allowed_request(&headers, &state.request_policy) {
         return err.into_response();
     }
-    ws.on_upgrade(move |socket| handle_terminal_socket(socket, state, query))
+    let target = state.local_route_target();
+    ws.on_upgrade(move |socket| handle_terminal_socket(socket, state, query, target))
+        .into_response()
+}
+
+async fn machine_terminal_ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<BridgeState>,
+    AxumPath(machine_id): AxumPath<String>,
+    Query(query): Query<TerminalQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(err) = ensure_allowed_request(&headers, &state.request_policy) {
+        return err.into_response();
+    }
+    let target = match state.machine_route_target(&machine_id).await {
+        Ok((target, _)) => target,
+        Err(err) => return err.into_response(),
+    };
+    ws.on_upgrade(move |socket| handle_terminal_socket(socket, state, query, target))
         .into_response()
 }
 
@@ -3453,7 +3891,39 @@ where
 }
 
 async fn handle_events_socket(socket: WebSocket, state: BridgeState) {
-    let api = state.api.clone();
+    let target = state.local_route_target();
+    handle_endpoint_events_socket(socket, state, target, None).await
+}
+
+async fn machine_events_ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<BridgeState>,
+    AxumPath(machine_id): AxumPath<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(err) = ensure_allowed_request(&headers, &state.request_policy) {
+        return err.into_response();
+    }
+    let target = match state.machine_route_target(&machine_id).await {
+        Ok((target, _)) => target,
+        Err(err) => return err.into_response(),
+    };
+    ws.on_upgrade(move |socket| {
+        handle_endpoint_events_socket(socket, state, target, Some(machine_id))
+    })
+    .into_response()
+}
+
+/// Events socket for one machine endpoint: remote Herdr events plus the
+/// bridge UI events scoped to that machine. The local (legacy) socket
+/// passes `machine_id: None` and skips machine-scoped UI events.
+async fn handle_endpoint_events_socket(
+    socket: WebSocket,
+    state: BridgeState,
+    target: MachineRouteTarget,
+    machine_id: Option<String>,
+) {
+    let api = target.api.clone();
     let mut ui_event_rx = state.ui_event_tx.subscribe();
     let subscribed = tokio::task::spawn_blocking(move || open_event_subscription(api)).await;
     let Ok(Ok(mut event_rx)) = subscribed else {
@@ -3477,8 +3947,11 @@ async fn handle_events_socket(socket: WebSocket, state: BridgeState) {
             }
             Some(event) = event_rx.recv() => {
                 if event_may_close_terminal_session(&event) {
-                    let prune_state = state.clone();
-                    tokio::task::spawn_blocking(move || prune_detached_terminal_sessions(&prune_state));
+                    let prune_api = target.api.clone();
+                    let prune_sessions = Arc::clone(&target.terminal_sessions);
+                    tokio::task::spawn_blocking(move || {
+                        prune_terminal_sessions_for(&prune_api, &prune_sessions)
+                    });
                 }
                 if send_websocket_message(
                     &mut ws_sender,
@@ -3494,6 +3967,15 @@ async fn handle_events_socket(socket: WebSocket, state: BridgeState) {
             event = ui_event_rx.recv() => {
                 match event {
                     Ok(event) => {
+                        let in_scope = match machine_id.as_deref() {
+                            Some(machine_id) => {
+                                ui_event_machine_id(&event).as_deref() == Some(machine_id)
+                            }
+                            None => ui_event_machine_id(&event).is_none(),
+                        };
+                        if !in_scope {
+                            continue;
+                        }
                         if send_websocket_message(
                             &mut ws_sender,
                             Message::Text(event.into()),
@@ -3635,7 +4117,12 @@ async fn handle_ui_events_socket(socket: WebSocket, state: BridgeState) {
     }
 }
 
-async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: TerminalQuery) {
+async fn handle_terminal_socket(
+    socket: WebSocket,
+    state: BridgeState,
+    query: TerminalQuery,
+    target: MachineRouteTarget,
+) {
     if query.terminal_id.trim().is_empty() {
         return;
     }
@@ -3649,7 +4136,7 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
         .unwrap_or(TerminalOutputWireEncoding::Identity);
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let session = match acquire_terminal_session(
-        state.clone(),
+        target.clone(),
         terminal_id.clone(),
         cols,
         rows,
@@ -3677,7 +4164,7 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
             .await
             .is_err()
         {
-            release_terminal_session(&state.terminal_sessions, &terminal_id, &session);
+            release_terminal_session(&target.terminal_sessions, &terminal_id, &session);
             return;
         }
     }
@@ -3874,7 +4361,7 @@ fn handle_terminal_client_message(
 }
 
 async fn acquire_terminal_session(
-    state: BridgeState,
+    target: MachineRouteTarget,
     terminal_id: String,
     cols: u16,
     rows: u16,
@@ -3900,7 +4387,7 @@ async fn acquire_terminal_session(
             // finish tearing down before a fresh attach, or the daemon rejects
             // it as a second concurrent client.
             let step = {
-                let mut sessions = state.terminal_sessions.lock().map_err(|_| {
+                let mut sessions = target.terminal_sessions.lock().map_err(|_| {
                     BridgeError::Protocol("terminal session lock poisoned".to_string())
                 })?;
                 if let Some(session) = sessions.active.get(&terminal_id) {
@@ -3957,7 +4444,7 @@ async fn acquire_terminal_session(
                             "timed out waiting for detached terminal connection to close"
                         );
                     }
-                    let mut sessions = state.terminal_sessions.lock().map_err(|_| {
+                    let mut sessions = target.terminal_sessions.lock().map_err(|_| {
                         BridgeError::Protocol("terminal session lock poisoned".to_string())
                     })?;
                     if sessions
@@ -3977,10 +4464,10 @@ async fn acquire_terminal_session(
             // gate keeps concurrent acquires for this terminal waiting; they
             // join the published session once it opens.
             let handshake = || -> Result<SharedTerminalSession, BridgeError> {
-                let protocol_version = terminal_attach_protocol(&state.api)?;
+                let protocol_version = terminal_attach_protocol(&target.api)?;
                 let (output_tx, _) = tokio::sync::broadcast::channel(256);
                 let attach = open_terminal_attach(
-                    state.client_socket_path.clone(),
+                    target.client_socket_path.clone(),
                     terminal_id.clone(),
                     cols,
                     rows,
@@ -3998,12 +4485,12 @@ async fn acquire_terminal_session(
             let session = match handshake() {
                 Ok(session) => session,
                 Err(err) => {
-                    release_attach_gate(&state.terminal_sessions, &terminal_id, &gate);
+                    release_attach_gate(&target.terminal_sessions, &terminal_id, &gate);
                     return Err(err);
                 }
             };
 
-            let Ok(mut sessions) = state.terminal_sessions.lock() else {
+            let Ok(mut sessions) = target.terminal_sessions.lock() else {
                 let _ = session.write_tx.send(ClientMessage::Detach);
                 gate.mark_closed();
                 return Err(BridgeError::Protocol(
@@ -4017,7 +4504,7 @@ async fn acquire_terminal_session(
                 let existing = existing.clone();
                 drop(sessions);
                 let _ = session.write_tx.send(ClientMessage::Detach);
-                release_attach_gate(&state.terminal_sessions, &terminal_id, &gate);
+                release_attach_gate(&target.terminal_sessions, &terminal_id, &gate);
                 return Ok(existing);
             }
             if sessions.draining.contains_key(&terminal_id) {
@@ -4029,7 +4516,7 @@ async fn acquire_terminal_session(
                 // the web client treats as retryable.
                 drop(sessions);
                 let _ = session.write_tx.send(ClientMessage::Detach);
-                release_attach_gate(&state.terminal_sessions, &terminal_id, &gate);
+                release_attach_gate(&target.terminal_sessions, &terminal_id, &gate);
                 if handshake_retries < MAX_ATTACH_HANDSHAKE_RETRIES {
                     handshake_retries += 1;
                     continue 'attach;
@@ -4045,7 +4532,7 @@ async fn acquire_terminal_session(
             session.client_count.fetch_add(1, Ordering::AcqRel);
             sessions.active.insert(terminal_id.clone(), session.clone());
             drop(sessions);
-            release_attach_gate(&state.terminal_sessions, &terminal_id, &gate);
+            release_attach_gate(&target.terminal_sessions, &terminal_id, &gate);
             return Ok(session);
         }
     })
@@ -4113,8 +4600,8 @@ fn remember_draining_connection(
         .insert(terminal_id.to_string(), session.connection_closed.clone());
 }
 
-fn prune_detached_terminal_sessions(state: &BridgeState) {
-    let Ok(panes) = current_panes(&state.api) else {
+fn prune_terminal_sessions_for(api: &ApiClient, sessions_arc: &Arc<Mutex<TerminalSessions>>) {
+    let Ok(panes) = current_panes(api) else {
         warn!("failed to prune herdr web terminal sessions");
         return;
     };
@@ -4123,7 +4610,7 @@ fn prune_detached_terminal_sessions(state: &BridgeState) {
         .map(|pane| pane.terminal_id.as_str())
         .collect::<HashSet<_>>();
     let stale_sessions = {
-        let Ok(mut sessions) = state.terminal_sessions.lock() else {
+        let Ok(mut sessions) = sessions_arc.lock() else {
             warn!("failed to lock herdr web terminal sessions for pruning");
             return;
         };
@@ -4140,7 +4627,7 @@ fn prune_detached_terminal_sessions(state: &BridgeState) {
 
     for (terminal_id, session) in stale_sessions {
         close_terminal_session(
-            &state.terminal_sessions,
+            sessions_arc,
             &terminal_id,
             &session,
             "terminal closed by Herdr",
@@ -4954,19 +5441,24 @@ mod tests {
         let previous_tls = std::env::var("HERDR_WEB_TLS_DIR").ok();
         let previous_pins = std::env::var("HERDR_WEB_AGENT_PINS_DIR").ok();
         let previous_notes = std::env::var("HERDR_WEB_NOTES_DIR").ok();
+        let previous_zones = std::env::var("HERDR_WEB_WORKSPACE_ZONES_DIR").ok();
         std::env::set_var("HERDR_WEB_TLS_DIR", &tls_dir);
         std::env::set_var("HERDR_WEB_AGENT_PINS_DIR", &pins_dir);
         std::env::set_var("HERDR_WEB_NOTES_DIR", &notes_dir);
+        let zones_dir = std::env::temp_dir().join(format!("{unique}-zones"));
+        std::env::set_var("HERDR_WEB_WORKSPACE_ZONES_DIR", &zones_dir);
 
         let result = integration_tls_https_and_wss_inner(&static_dir).await;
 
         restore_env("HERDR_WEB_TLS_DIR", previous_tls);
         restore_env("HERDR_WEB_AGENT_PINS_DIR", previous_pins);
         restore_env("HERDR_WEB_NOTES_DIR", previous_notes);
+        restore_env("HERDR_WEB_WORKSPACE_ZONES_DIR", previous_zones);
         std::fs::remove_dir_all(&tls_dir).ok();
         std::fs::remove_dir_all(&static_dir).ok();
         std::fs::remove_dir_all(&pins_dir).ok();
         std::fs::remove_dir_all(&notes_dir).ok();
+        std::fs::remove_dir_all(&zones_dir).ok();
         result.unwrap();
     }
 
@@ -4997,6 +5489,8 @@ mod tests {
             selected_pane_id: Arc::new(Mutex::new(None)),
             agent_activity: Arc::new(AgentActivityManager::new()),
             agent_pins: Arc::new(AgentPinsManager::new()?),
+            workspace_zones: Arc::new(WorkspaceZonesManager::new()?),
+            machines: Arc::new(crate::machines::MachineManager::new()?),
             launcher_presets: Arc::new(LauncherPresetStore::load(None).map_err(io::Error::other)?),
             notes: Arc::new(NotesManager::new()?),
             ui_event_tx: tokio::sync::broadcast::channel(256).0,
@@ -5074,6 +5568,720 @@ mod tests {
 
         server.abort();
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Saved machines: discovery and machine-scoped routing
+    // -----------------------------------------------------------------------
+
+    fn machine_test_env(endpoints_body: &str) -> (Vec<(&'static str, Option<String>)>, PathBuf) {
+        let unique = format!(
+            "herdr-web-machine-routes-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        // The machine socket dir must live under a non-world-writable root
+        // (the bridge fails closed on unsafe roots such as /tmp), so the
+        // whole test env is rooted under HOME; the socket dir itself is
+        // created atomically 0700 by the machine manager's validator.
+        let home = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let root = home.join(".hw-mt").join(&unique);
+        std::fs::create_dir_all(&root).unwrap();
+        let endpoints_path = root.join("endpoints.json");
+        std::fs::write(&endpoints_path, endpoints_body).unwrap();
+        let previous = vec![
+            (
+                "HERDR_WEB_MACHINES_ENDPOINTS",
+                std::env::var("HERDR_WEB_MACHINES_ENDPOINTS").ok(),
+            ),
+            (
+                "HERDR_WEB_MACHINE_SOCKET_DIR",
+                std::env::var("HERDR_WEB_MACHINE_SOCKET_DIR").ok(),
+            ),
+            (
+                "HERDR_WEB_AGENT_PINS_DIR",
+                std::env::var("HERDR_WEB_AGENT_PINS_DIR").ok(),
+            ),
+            (
+                "HERDR_WEB_NOTES_DIR",
+                std::env::var("HERDR_WEB_NOTES_DIR").ok(),
+            ),
+            (
+                "HERDR_WEB_WORKSPACE_ZONES_DIR",
+                std::env::var("HERDR_WEB_WORKSPACE_ZONES_DIR").ok(),
+            ),
+        ];
+        std::env::set_var("HERDR_WEB_MACHINES_ENDPOINTS", &endpoints_path);
+        std::env::set_var("HERDR_WEB_MACHINE_SOCKET_DIR", root.join("machine-sockets"));
+        std::env::set_var("HERDR_WEB_AGENT_PINS_DIR", root.join("pins"));
+        std::env::set_var("HERDR_WEB_NOTES_DIR", root.join("notes"));
+        std::env::set_var("HERDR_WEB_WORKSPACE_ZONES_DIR", root.join("zones"));
+        (previous, root)
+    }
+
+    fn restore_test_env(previous: Vec<(&'static str, Option<String>)>, root: PathBuf) {
+        for (name, value) in previous {
+            restore_env(name, value);
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn spawn_snapshot_daemon(socket_path: PathBuf) -> thread::JoinHandle<()> {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let result = serde_json::to_value(ResponseResult::SessionSnapshot {
+            snapshot: Box::new(test_session_snapshot()),
+        })
+        .unwrap();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut socket) = stream else { break };
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                let result = result.clone();
+                thread::spawn(move || {
+                    let mut reader = BufReader::new(socket.try_clone().unwrap());
+                    let mut line = String::new();
+                    while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                        let request: serde_json::Value = match serde_json::from_str(&line) {
+                            Ok(request) => request,
+                            Err(_) => break,
+                        };
+                        let _ = writeln!(
+                            socket,
+                            "{}",
+                            serde_json::json!({"id": request["id"], "result": result})
+                        );
+                        line.clear();
+                    }
+                });
+            }
+        })
+    }
+
+    async fn spawn_machine_test_app(
+        api_socket_path: PathBuf,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let request_policy = RequestPolicy {
+            bind_host: "127.0.0.1".to_string(),
+            bind_port: 0,
+            allowed_hosts: Vec::new(),
+            allowed_origins: Vec::new(),
+            allowed_connect_sources: Vec::new(),
+            default_scheme_port: 80,
+        };
+        let state = BridgeState {
+            api: ApiClient::for_socket_path(api_socket_path),
+            client_socket_path: PathBuf::from("/nonexistent-herdr-client.sock"),
+            request_policy: request_policy.clone(),
+            terminal_sessions: Arc::new(Mutex::new(TerminalSessions::default())),
+            selected_pane_id: Arc::new(Mutex::new(None)),
+            agent_activity: Arc::new(AgentActivityManager::new()),
+            agent_pins: Arc::new(AgentPinsManager::new().unwrap()),
+            workspace_zones: Arc::new(WorkspaceZonesManager::new().unwrap()),
+            machines: Arc::new(crate::machines::MachineManager::new().unwrap()),
+            launcher_presets: Arc::new(
+                LauncherPresetStore::load(None)
+                    .map_err(io::Error::other)
+                    .unwrap(),
+            ),
+            notes: Arc::new(NotesManager::new().unwrap()),
+            ui_event_tx: tokio::sync::broadcast::channel(256).0,
+            activity_tx: tokio::sync::broadcast::channel(512).0,
+            upload_dir: std::env::temp_dir(),
+        };
+        let app = build_app(state, request_policy, PathBuf::from("/nonexistent-static"));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (address, server)
+    }
+
+    async fn http_post_upload(
+        address: std::net::SocketAddr,
+        path: &str,
+        body: &[u8],
+        origin: Option<&str>,
+    ) -> (u16, String) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let origin_line = match origin {
+            Some(origin) => format!("Origin: {origin}\r\n"),
+            None => String::new(),
+        };
+        let request = format!(
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n{origin_line}Content-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            address.port(),
+            body.len()
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        stream.write_all(body).await.unwrap();
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).await.unwrap();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        let status = text
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse::<u16>().ok())
+            .unwrap_or_default();
+        let body_text = text
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body.to_string())
+            .unwrap_or_default();
+        (status, body_text)
+    }
+
+    async fn spawn_machine_upload_app(
+        upload_dir: PathBuf,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let request_policy = RequestPolicy {
+            bind_host: "127.0.0.1".to_string(),
+            bind_port: 0,
+            allowed_hosts: Vec::new(),
+            allowed_origins: Vec::new(),
+            allowed_connect_sources: Vec::new(),
+            default_scheme_port: 80,
+        };
+        let state = BridgeState {
+            api: ApiClient::for_socket_path(PathBuf::from("/nonexistent-herdr-api.sock")),
+            client_socket_path: PathBuf::from("/nonexistent-herdr-client.sock"),
+            request_policy: request_policy.clone(),
+            terminal_sessions: Arc::new(Mutex::new(TerminalSessions::default())),
+            selected_pane_id: Arc::new(Mutex::new(None)),
+            agent_activity: Arc::new(AgentActivityManager::new()),
+            agent_pins: Arc::new(AgentPinsManager::new().unwrap()),
+            workspace_zones: Arc::new(WorkspaceZonesManager::new().unwrap()),
+            machines: Arc::new(crate::machines::MachineManager::new().unwrap()),
+            launcher_presets: Arc::new(
+                LauncherPresetStore::load(None)
+                    .map_err(io::Error::other)
+                    .unwrap(),
+            ),
+            notes: Arc::new(NotesManager::new().unwrap()),
+            ui_event_tx: tokio::sync::broadcast::channel(256).0,
+            activity_tx: tokio::sync::broadcast::channel(512).0,
+            upload_dir,
+        };
+        let app = build_app(state, request_policy, PathBuf::from("/nonexistent-static"));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (address, server)
+    }
+
+    /// Restores machine-test env vars and scratch dirs even when a test
+    /// assertion fails mid-test (a plain tail cleanup would leak the mutated
+    /// env into other tests).
+    struct Stage2MachineEnv {
+        previous: Vec<(&'static str, Option<String>)>,
+        root: PathBuf,
+        upload_dir: PathBuf,
+        address: std::net::SocketAddr,
+        server: Option<tokio::task::JoinHandle<()>>,
+    }
+
+    impl Stage2MachineEnv {
+        async fn start(endpoints: &str) -> Self {
+            let (previous, root) = machine_test_env(endpoints);
+            let upload_dir = stage2_upload_dir();
+            let (address, server) = spawn_machine_upload_app(upload_dir.clone()).await;
+            Self {
+                previous,
+                root,
+                upload_dir,
+                address,
+                server: Some(server),
+            }
+        }
+    }
+
+    impl Drop for Stage2MachineEnv {
+        fn drop(&mut self) {
+            if let Some(server) = self.server.take() {
+                server.abort();
+            }
+            restore_test_env(self.previous.clone(), self.root.clone());
+            let _ = std::fs::remove_dir_all(&self.upload_dir);
+        }
+    }
+
+    const STAGE2_ENDPOINTS: &str = r#"{
+        "version": 1,
+        "ssh": [
+            {"id": "0123456789abcdef0123456789abcdef", "label": "farm", "target": "root@127.0.0.1:1", "session": "default", "enabled": true},
+            {"id": "11111111111111111111111111111111", "label": "offhost", "target": "root@127.0.0.1:2", "session": "default", "enabled": false}
+        ]
+    }"#;
+
+    fn stage2_upload_dir() -> PathBuf {
+        let unique = format!(
+            "herdr-web-stage2-uploads-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn staging_entries(upload_dir: &Path) -> Vec<std::fs::DirEntry> {
+        std::fs::read_dir(upload_dir.join(crate::remote_uploads::STAGING_DIR_NAME))
+            .map(|entries| entries.filter_map(|entry| entry.ok()).collect())
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn machine_uploads_route_denies_unknown_and_disabled_machines_before_staging() {
+        let _env_guard = crate::session::TEST_ENV_LOCK.lock().unwrap();
+        let env = Stage2MachineEnv::start(STAGE2_ENDPOINTS).await;
+        let address = env.address;
+        let upload_dir = env.upload_dir.clone();
+        let origin = format!("http://127.0.0.1:{}", address.port());
+
+        let (status, body) = http_post_upload(
+            address,
+            "/api/machines/22222222222222222222222222222222/uploads?name=x.txt",
+            b"payload",
+            Some(&origin),
+        )
+        .await;
+        assert_eq!(status, 404, "unknown machine status: {body}");
+        assert!(body.contains("unknown machine"), "unknown body: {body}");
+
+        let (status, body) = http_post_upload(
+            address,
+            "/api/machines/11111111111111111111111111111111/uploads?name=x.txt",
+            b"payload",
+            Some(&origin),
+        )
+        .await;
+        assert_eq!(status, 404, "disabled machine status: {body}");
+        assert!(body.contains("disabled"), "disabled body: {body}");
+
+        assert!(
+            staging_entries(&upload_dir).is_empty(),
+            "staging must not be created for denied machines"
+        );
+    }
+
+    #[tokio::test]
+    async fn machine_uploads_route_rejects_foreign_origins() {
+        let _env_guard = crate::session::TEST_ENV_LOCK.lock().unwrap();
+        let env = Stage2MachineEnv::start(STAGE2_ENDPOINTS).await;
+        let address = env.address;
+        let upload_dir = env.upload_dir.clone();
+
+        let (status, body) = http_post_upload(
+            address,
+            "/api/machines/0123456789abcdef0123456789abcdef/uploads?name=x.txt",
+            b"payload",
+            Some("http://evil.example"),
+        )
+        .await;
+        assert_eq!(status, 403, "foreign origin must be rejected: {body}");
+        assert!(
+            staging_entries(&upload_dir).is_empty(),
+            "staging must not be created for denied origins"
+        );
+    }
+
+    #[tokio::test]
+    async fn machine_uploads_route_enforces_size_limit() {
+        let _env_guard = crate::session::TEST_ENV_LOCK.lock().unwrap();
+        let env = Stage2MachineEnv::start(STAGE2_ENDPOINTS).await;
+        let address = env.address;
+        let upload_dir = env.upload_dir.clone();
+        let origin = format!("http://127.0.0.1:{}", address.port());
+
+        let oversized = vec![0u8; MAX_UPLOAD_BYTES + 1];
+        let (status, body) = http_post_upload(
+            address,
+            "/api/machines/0123456789abcdef0123456789abcdef/uploads?name=big.bin",
+            &oversized,
+            Some(&origin),
+        )
+        .await;
+        assert_eq!(status, 413, "oversized body must be rejected: {body}");
+        assert!(
+            staging_entries(&upload_dir).is_empty(),
+            "no staging for oversized bodies"
+        );
+    }
+
+    #[tokio::test]
+    async fn machine_uploads_route_serves_the_local_machine() {
+        let _env_guard = crate::session::TEST_ENV_LOCK.lock().unwrap();
+        let env = Stage2MachineEnv::start(STAGE2_ENDPOINTS).await;
+        let address = env.address;
+        let upload_dir = env.upload_dir.clone();
+        let origin = format!("http://127.0.0.1:{}", address.port());
+
+        let (status, body) = http_post_upload(
+            address,
+            "/api/machines/local/uploads?name=hello-local.txt",
+            b"local bytes",
+            Some(&origin),
+        )
+        .await;
+        assert_eq!(status, 200, "local machine upload failed: {body}");
+        assert!(body.contains("hello-local.txt"), "body: {body}");
+        assert_eq!(
+            std::fs::read(upload_dir.join("hello-local.txt")).unwrap(),
+            b"local bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn capabilities_advertise_local_uploads() {
+        let _env_guard = crate::session::TEST_ENV_LOCK.lock().unwrap();
+        let env = Stage2MachineEnv::start(r#"{ "version": 1, "ssh": [] }"#).await;
+        let address = env.address;
+
+        let (status, body) = http_get_response(address, "/api/capabilities").await;
+        assert_eq!(status, 200, "capabilities failed: {body}");
+        assert!(
+            body.contains("uploads"),
+            "capabilities must advertise uploads: {body}"
+        );
+    }
+
+    #[test]
+    fn machine_capabilities_advertise_uploads_only_when_scp_is_available() {
+        let with = machine_capabilities_body(true);
+        assert_eq!(with["uploads"]["version"], 1, "body: {with}");
+        let without = machine_capabilities_body(false);
+        assert!(
+            without.get("uploads").is_none(),
+            "uploads must not be advertised without scp: {without}"
+        );
+    }
+
+    #[tokio::test]
+    async fn machine_upload_ssh_failure_returns_error_and_cleans_staging() {
+        let _env_guard = crate::session::TEST_ENV_LOCK.lock().unwrap();
+        let env = Stage2MachineEnv::start(STAGE2_ENDPOINTS).await;
+        let address = env.address;
+        let upload_dir = env.upload_dir.clone();
+        let origin = format!("http://127.0.0.1:{}", address.port());
+
+        let (status, body) = http_post_upload(
+            address,
+            "/api/machines/0123456789abcdef0123456789abcdef/uploads?name=ssh-fail.txt",
+            b"payload",
+            Some(&origin),
+        )
+        .await;
+        assert_eq!(
+            status, 502,
+            "unreachable machine must fail honestly: {body}"
+        );
+        assert!(
+            staging_entries(&upload_dir).is_empty(),
+            "staging must be cleaned after ssh failure"
+        );
+    }
+
+    async fn http_get_response(address: std::net::SocketAddr, path: &str) -> (u16, String) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let request = format!(
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+            address.port()
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).await.unwrap();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        let status = text
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse::<u16>().ok())
+            .unwrap_or_default();
+        let body = text
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body.to_string())
+            .unwrap_or_default();
+        (status, body)
+    }
+
+    #[tokio::test]
+    async fn machines_routes_list_saved_machines_and_route_local_snapshots() {
+        let _env_guard = crate::session::TEST_ENV_LOCK.lock().unwrap();
+        let (previous, root) = machine_test_env(
+            r#"{
+                "version": 1,
+                "ssh": [
+                    {"id": "0123456789abcdef0123456789abcdef", "label": "farm", "target": "ssh://root@127.0.0.1:1", "session": "default", "enabled": true},
+                    {"id": "11111111111111111111111111111111", "label": "offhost", "target": "ssh://root@127.0.0.1:2", "session": "default", "enabled": false}
+                ]
+            }"#,
+        );
+
+        let unique = format!(
+            "herdr-web-machine-api-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let api_socket = std::env::temp_dir().join(format!("{unique}.sock"));
+        let daemon = spawn_snapshot_daemon(api_socket.clone());
+        let (address, server) = spawn_machine_test_app(api_socket.clone()).await;
+
+        // Discovery lists Local first, then only enabled saved machines.
+        let (status, body) = http_get_response(address, "/api/machines").await;
+        assert_eq!(status, 200, "machines list status, body: {body}");
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let machines = parsed["machines"].as_array().unwrap().clone();
+        assert_eq!(machines.len(), 2, "machines list: {machines:?}");
+        assert_eq!(machines[0]["id"], "local");
+        assert_eq!(machines[0]["label"], "Local");
+        assert_eq!(machines[0]["kind"], "local");
+        assert_eq!(machines[1]["id"], "0123456789abcdef0123456789abcdef");
+        assert_eq!(machines[1]["label"], "farm");
+        assert_eq!(machines[1]["kind"], "ssh");
+
+        // Capabilities advertise machine support.
+        let (status, body) = http_get_response(address, "/api/capabilities").await;
+        assert_eq!(status, 200);
+        assert!(body.contains("\"machines\""), "capabilities: {body}");
+
+        // The local machine id routes to the same local daemon snapshot.
+        let (status, body) = http_get_response(address, "/api/machines/local/snapshot").await;
+        assert_eq!(status, 200, "local machine snapshot: {body}");
+        assert!(body.contains("workspace-1"), "local snapshot body: {body}");
+
+        // Unknown and disabled machine ids fail closed with 404.
+        let (status, body) = http_get_response(
+            address,
+            "/api/machines/deadbeefdeadbeefdeadbeefdeadbeef/snapshot",
+        )
+        .await;
+        assert_eq!(status, 404, "unknown machine: {body}");
+        let (status, body) = http_get_response(
+            address,
+            "/api/machines/11111111111111111111111111111111/snapshot",
+        )
+        .await;
+        assert_eq!(status, 404, "disabled machine: {body}");
+
+        // An unreachable SSH machine must fail closed without leaking local data.
+        let (status, body) = http_get_response(
+            address,
+            "/api/machines/0123456789abcdef0123456789abcdef/snapshot",
+        )
+        .await;
+        assert_eq!(status, 502, "unreachable machine: {body}");
+        assert!(!body.contains("workspace-1"), "local data leaked: {body}");
+        assert!(body.contains("farm"), "error names the machine: {body}");
+
+        server.abort();
+        // The snapshot daemon loops on its listener until the test process
+        // exits; joining it would block forever.
+        drop(daemon);
+        let _ = std::fs::remove_file(api_socket);
+        restore_test_env(previous, root);
+    }
+
+    fn spawn_machine_api_daemon(socket_path: PathBuf) -> thread::JoinHandle<()> {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut socket) = stream else { break };
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                thread::spawn(move || {
+                    let mut reader = BufReader::new(socket.try_clone().unwrap());
+                    let mut line = String::new();
+                    while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                        let request: serde_json::Value = match serde_json::from_str(&line) {
+                            Ok(request) => request,
+                            Err(_) => break,
+                        };
+                        let result = match request["method"].as_str() {
+                            Some("pane.list") => serde_json::to_value(ResponseResult::PaneList {
+                                panes: vec![test_pane("pane-1"), test_pane("pane-2")],
+                            })
+                            .unwrap(),
+                            _ => serde_json::to_value(ResponseResult::SessionSnapshot {
+                                snapshot: Box::new(test_session_snapshot()),
+                            })
+                            .unwrap(),
+                        };
+                        let _ = writeln!(
+                            socket,
+                            "{}",
+                            serde_json::json!({"id": request["id"], "result": result})
+                        );
+                        line.clear();
+                    }
+                });
+            }
+        })
+    }
+
+    async fn http_post_json(
+        address: std::net::SocketAddr,
+        path: &str,
+        body: &str,
+    ) -> (u16, String) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let request = format!(
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            address.port(),
+            body.len()
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).await.unwrap();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        let status = text
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse::<u16>().ok())
+            .unwrap_or_default();
+        let body = text
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body.to_string())
+            .unwrap_or_default();
+        (status, body)
+    }
+
+    #[tokio::test]
+    async fn machine_command_and_selection_routes_validate_and_stay_machine_scoped() {
+        let _env_guard = crate::session::TEST_ENV_LOCK.lock().unwrap();
+        let (previous, root) = machine_test_env(
+            r#"{
+                "version": 1,
+                "ssh": [
+                    {"id": "0123456789abcdef0123456789abcdef", "label": "farm", "target": "ssh://root@127.0.0.1:1", "session": "default", "enabled": true}
+                ]
+            }"#,
+        );
+
+        let unique = format!(
+            "herdr-web-machine-api3-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let api_socket = std::env::temp_dir().join(format!("{unique}.sock"));
+        let daemon = spawn_machine_api_daemon(api_socket.clone());
+        let (address, server) = spawn_machine_test_app(api_socket.clone()).await;
+
+        // Local machine command keeps the browser allow-list.
+        let (status, body) = http_post_json(
+            address,
+            "/api/machines/local/command",
+            r#"{"method":"workspace.focus","params":{"workspace_id":"workspace-1"}}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "local machine command: {body}");
+
+        let (status, body) = http_post_json(
+            address,
+            "/api/machines/local/command",
+            r#"{"method":"server.shutdown","params":{}}"#,
+        )
+        .await;
+        assert_eq!(status, 403, "disallowed command must be rejected: {body}");
+
+        let (status, body) = http_post_json(
+            address,
+            "/api/machines/deadbeefdeadbeefdeadbeefdeadbeef/command",
+            r#"{"method":"workspace.focus","params":{"workspace_id":"workspace-1"}}"#,
+        )
+        .await;
+        assert_eq!(status, 404, "unknown machine command: {body}");
+
+        // Machine selection writes the machine overlay without touching the
+        // shared local selection used by the legacy /api/selection route.
+        let (status, body) = http_post_json(
+            address,
+            "/api/machines/local/selection",
+            r#"{"pane_id":"pane-2"}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "machine selection: {body}");
+        assert!(body.contains("\"pane-2\""), "selection echo: {body}");
+
+        let (status, body) = http_get_response(address, "/api/snapshot").await;
+        assert_eq!(status, 200);
+        assert!(
+            body.contains("\"selected_pane_id\":\"pane-2\""),
+            "local snapshot must reflect the machine overlay for the local machine: {body}"
+        );
+
+        let (status, body) = http_post_json(
+            address,
+            "/api/machines/deadbeefdeadbeefdeadbeefdeadbeef/selection",
+            r#"{"pane_id":"pane-2"}"#,
+        )
+        .await;
+        assert_eq!(status, 404, "unknown machine selection: {body}");
+
+        server.abort();
+        drop(daemon);
+        let _ = std::fs::remove_file(api_socket);
+        restore_test_env(previous, root);
+    }
+
+    #[test]
+    fn machine_ui_events_carry_machine_scope_and_legacy_events_stay_local() {
+        let event = machine_ui_event_json("0123456789abcdef0123456789abcdef", "pane-9");
+        assert_eq!(
+            ui_event_machine_id(&event).as_deref(),
+            Some("0123456789abcdef0123456789abcdef"),
+            "tagged event: {event}"
+        );
+        let local_event = serde_json::json!({
+            "type": "herdr_web.selection_changed",
+            "pane_id": "pane-1",
+        })
+        .to_string();
+        assert_eq!(ui_event_machine_id(&local_event), None);
+        assert!(ui_event_machine_id("not json").is_none());
+    }
+
+    #[test]
+    fn per_machine_selection_overlays_are_isolated() {
+        let panes = vec![test_pane("pane-1"), test_pane("pane-2")];
+        let machine_a: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let machine_b: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
+        *machine_a.lock().unwrap() = Some("pane-1".to_string());
+
+        assert_eq!(
+            shared_selected_pane_on(&machine_a, &panes).unwrap(),
+            Some("pane-1".to_string()),
+            "overlay A keeps its colliding pane id"
+        );
+        assert_eq!(
+            shared_selected_pane_on(&machine_b, &panes).unwrap(),
+            None,
+            "overlay B must not observe overlay A's colliding selection"
+        );
     }
 
     struct PendingWebSocketSink;

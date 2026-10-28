@@ -1,3 +1,5 @@
+import type { BridgeCapabilities } from "./bridge";
+
 export type UploadCandidate = {
   blob: Blob;
   name: string | null;
@@ -75,4 +77,25 @@ async function uploadFile(
     throw new Error(payload.error || `Upload failed (${response.status})`);
   }
   return payload.file;
+}
+
+/**
+ * Whether the runtime behind these capabilities supports file uploads.
+ *
+ * `machineScoped` selects the fallback for runtimes without an explicit
+ * `uploads` advertisement. Local, same-origin, and configured HTTP bridges
+ * have always served the local `/api/uploads` route, so uploads stay enabled
+ * for them — including older machines-aware (stage-1) bridges that predate
+ * the field. Machine-scoped runtimes only exist on capability-speaking
+ * bridges, so without an explicit `uploads` advertisement they have no upload
+ * path at all.
+ */
+export function supportsUploads(
+  capabilities: BridgeCapabilities | null | undefined,
+  machineScoped = false,
+): boolean {
+  if (capabilities?.uploads) {
+    return capabilities.uploads.version === 1;
+  }
+  return !machineScoped;
 }

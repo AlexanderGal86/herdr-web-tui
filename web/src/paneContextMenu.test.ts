@@ -11,18 +11,20 @@ const commands = ["pane.rename", "pane.split", "pane.zoom", "pane.swap", "pane.c
 
 describe("terminal pane context menu", () => {
   it("offers native actions for the clicked pane and preserves web extras", () => {
-    expect(terminalPaneMenuItems({ pane, source, commands, zoomed: false, passthrough: false,
+    const items = terminalPaneMenuItems({ pane, source, commands, zoomed: false, passthrough: false,
       extras: [{ key: "pin", label: "Pin pane" }, { key: "rename", label: "Rename" }, { key: "close", label: "Close pane" }],
-    }).map(item => item.label)).toEqual([
-      "Rename pane", "Clear pane name", "Swap with focused pane", "Split right", "Split down", "Zoom",
+    });
+    expect(items.map(item => item.label)).toEqual([
+      "Rename pane", "Clear pane name", "Swap with focused pane", "Split right", "Split down", "Paste",
       "Send right-clicks to pane", "Pin pane", "Close pane",
     ]);
+    expect(items.map(item => item.key)).not.toContain("zoom");
   });
   it("does not offer unsupported operations, nonexistent targets or cross-tab swaps", () => {
     expect(terminalPaneMenuItems({ pane: undefined, commands, zoomed: false, passthrough: false, extras: [] })).toEqual([]);
     const items = terminalPaneMenuItems({ pane: { ...pane, label: undefined }, source: { ...source, tab_id: "other-tab" },
       commands: ["pane.rename", "pane.swap"], zoomed: false, passthrough: false, extras: [] });
-    expect(items.map(item => item.key)).toEqual(["rename", "toggle_right_click"]);
+    expect(items.map(item => item.key)).toEqual(["rename", "paste", "toggle_right_click"]);
   });
   it("offers recovery from zoom and right-click passthrough without swapping with itself", () => {
     const items = terminalPaneMenuItems({ pane, source: pane, commands, zoomed: true, passthrough: true, extras: [] });

@@ -582,3 +582,30 @@ describe("TerminalView context menu capture", () => {
     expect(onContextMenu).not.toHaveBeenCalled();
   });
 });
+
+describe("TerminalView uploads gating", () => {
+  it("disables the upload button when uploads are not supported", async () => {
+    const drafts = createCommandDraftStore();
+    await renderTerminalView(testPane("terminal-uploads-off"), drafts, {
+      mobileControls: false,
+      uploadsEnabled: false,
+    });
+    const button = document.querySelector(
+      'button[aria-label="Upload file"]',
+    ) as HTMLButtonElement | null;
+    expect(button).not.toBeNull();
+    expect(button?.disabled).toBe(true);
+  });
+
+  it("keeps the upload button enabled by default", async () => {
+    const drafts = createCommandDraftStore();
+    await renderTerminalView(testPane("terminal-uploads-on"), drafts, {
+      mobileControls: false,
+    });
+    const button = document.querySelector(
+      'button[aria-label="Upload file"]',
+    ) as HTMLButtonElement | null;
+    expect(button).not.toBeNull();
+    expect(button?.disabled).toBe(false);
+  });
+});

@@ -11,6 +11,13 @@ import type { ReactNode } from "react";
 import { Capacitor } from "@capacitor/core";
 import { Preferences } from "@capacitor/preferences";
 import { fetchWithTimeout } from "./fetchWithTimeout";
+import {
+  buildMachineHttpPath,
+  buildMachineWsUrl,
+  machineRuntimeId,
+  parseMachinesList,
+  type MachineInfo,
+} from "./machines";
 import { addNativeResumeHandler } from "./native";
 
 export const SAME_ORIGIN_BRIDGE_ID = "same-origin";
@@ -32,7 +39,7 @@ export type BridgeBackendStore = {
   backends: BridgeBackendProfile[];
 };
 
-export type BridgeMode = "same-origin" | "configured";
+export type BridgeMode = "same-origin" | "configured" | "machine";
 
 export type BridgeCapabilities = {
   commands: string[];
@@ -46,6 +53,15 @@ export type BridgeCapabilities = {
     version: 1;
   };
   launcher_presets?: {
+    version: 1;
+  };
+  workspace_zones?: {
+    version: 1;
+  };
+  machines?: {
+    version: 1;
+  };
+  uploads?: {
     version: 1;
   };
   bridge_version?: string;
@@ -83,6 +99,9 @@ export type BridgeManager = {
   store: BridgeBackendStore;
   storeLoaded: boolean;
   sameOriginAvailable: boolean;
+  /** Saved machines served by the same-origin bridge; never browser state. */
+  machines: MachineInfo[];
+  machinesLoaded: boolean;
   availableRuntimes: BridgeRuntime[];
   enabledRuntimes: BridgeRuntime[];
   enabledBridgeIds: BridgeId[];
@@ -126,6 +145,9 @@ const BridgeContext = createContext<BridgeManager | null>(null);
 export function BridgeProvider({ children }: { children: ReactNode }) {
   const [store, setStore] = useState<BridgeBackendStore>(() => fallbackStore());
   const [storeLoaded, setStoreLoaded] = useState(false);
+  const [machines, setMachines] = useState<MachineInfo[]>([]);
+  const [machinesLoaded, setMachinesLoaded] = useState(false);
+  const [sessionSelectedBridgeId, setSessionSelectedBridgeId] = useState<BridgeId | null>(null);
   const [probeStates, setProbeStates] = useState<Record<string, BridgeProbeState>>({});
   const [probeRetryTokens, setProbeRetryTokens] = useState<Record<string, number>>({});
   const [resumeToken, setResumeToken] = useState(0);
@@ -162,25 +184,72 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
     () =>
       buildAvailableRuntimes({
         backends: store.backends,
+        machines,
         probeStates,
         resumeToken,
         sameOriginAvailable,
       }),
-    [probeStates, resumeToken, sameOriginAvailable, store.backends],
+    [machines, probeStates, resumeToken, sameOriginAvailable, store.backends],
   );
+
+  // Server-driven machine discovery: the saved-machine list belongs to the
+  // bridge operator (Herdr's saved endpoints), never to browser storage.
+  const sameOriginProbeState = probeStates[SAME_ORIGIN_BRIDGE_ID];
+  const sameOriginProbeKey = sameOriginProbeState
+    ? `${sameOriginProbeState.connectionKey}:${sameOriginProbeState.capabilityState}`
+    : "none";
+  const sameOriginCapabilities = sameOriginProbeState?.capabilities ?? null;
+  useEffect(() => {
+    if (!sameOriginAvailable || !sameOriginCapabilities?.machines) {
+      return;
+    }
+    let cancelled = false;
+    void fetchWithTimeout(buildHttpUrl(null, "/api/machines"))
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`machines request failed (${response.status})`);
+        }
+        return parseMachinesList(await response.json());
+      })
+      .then((list) => {
+        if (!cancelled && list) {
+          setMachines(list.machines);
+          setMachinesLoaded(true);
+        }
+      })
+      .catch(() => {
+        // Keep the previous list; the next probe retry re-fetches.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sameOriginAvailable, sameOriginCapabilities, sameOriginProbeKey, probeRetryTokens]);
 
   const availableRuntimeIds = useMemo(
     () => new Set(availableRuntimes.map((runtime) => runtime.id)),
     [availableRuntimes],
   );
 
+  // Public enabled ids must mirror enabledRuntimes: machine runtimes are
+  // enabled by the server machine list, never by the persisted store, so
+  // append them after the persisted (legacy) enabled order.
   const enabledBridgeIds = useMemo(
-    () => store.enabledBridgeIds.filter((bridgeId) => availableRuntimeIds.has(bridgeId)),
-    [availableRuntimeIds, store.enabledBridgeIds],
+    () => [
+      ...store.enabledBridgeIds.filter((bridgeId) => availableRuntimeIds.has(bridgeId)),
+      ...availableRuntimes
+        .filter(
+          (runtime) => runtime.mode === "machine" && !store.enabledBridgeIds.includes(runtime.id),
+        )
+        .map((runtime) => runtime.id),
+    ],
+    [availableRuntimeIds, availableRuntimes, store.enabledBridgeIds],
   );
 
   const enabledRuntimes = useMemo(
-    () => availableRuntimes.filter((runtime) => enabledBridgeIds.includes(runtime.id)),
+    () =>
+      availableRuntimes.filter(
+        (runtime) => runtime.mode === "machine" || enabledBridgeIds.includes(runtime.id),
+      ),
     [availableRuntimes, enabledBridgeIds],
   );
 
@@ -234,6 +303,13 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const setLastSelectedBridgeId = useCallback((bridgeId: BridgeId | null) => {
+    if (bridgeId !== null && bridgeId.startsWith("machine:")) {
+      // Machine selection is session state; the browser store must not learn
+      // new machine settings.
+      setSessionSelectedBridgeId(bridgeId);
+      return;
+    }
+    setSessionSelectedBridgeId(null);
     storeEditedRef.current = true;
     setStore((current) => {
       if (bridgeId === null) {
@@ -252,6 +328,11 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const markBridgeUsed = useCallback((bridgeId: BridgeId) => {
+    if (bridgeId.startsWith("machine:")) {
+      setSessionSelectedBridgeId(bridgeId);
+      return;
+    }
+    setSessionSelectedBridgeId(null);
     storeEditedRef.current = true;
     setStore((current) => {
       if (!current.enabledBridgeIds.includes(bridgeId) || current.lastSelectedBridgeId === bridgeId) {
@@ -373,18 +454,26 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
     [availableRuntimes],
   );
 
+  const effectiveLastSelectedBridgeId =
+    sessionSelectedBridgeId && availableRuntimeIds.has(sessionSelectedBridgeId)
+      ? sessionSelectedBridgeId
+      : null;
+
   const value = useMemo<BridgeManager>(
     () => ({
       store,
       storeLoaded,
       sameOriginAvailable,
+      machines,
+      machinesLoaded,
       availableRuntimes,
       enabledRuntimes,
       enabledBridgeIds,
       lastSelectedBridgeId:
-        store.lastSelectedBridgeId && enabledBridgeIds.includes(store.lastSelectedBridgeId)
-          ? store.lastSelectedBridgeId
-          : (enabledBridgeIds[0] ?? null),
+        effectiveLastSelectedBridgeId ??
+          (store.lastSelectedBridgeId && enabledBridgeIds.includes(store.lastSelectedBridgeId)
+            ? store.lastSelectedBridgeId
+            : (enabledBridgeIds[0] ?? null)),
       getRuntime,
       setBridgeEnabled,
       setLastSelectedBridgeId,
@@ -399,6 +488,9 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
       addBackend,
       availableRuntimes,
       deleteBackend,
+      effectiveLastSelectedBridgeId,
+      machines,
+      machinesLoaded,
       enabledBridgeIds,
       enabledRuntimes,
       getRuntime,
@@ -529,11 +621,13 @@ export function useBridge() {
 
 function buildAvailableRuntimes({
   backends,
+  machines,
   probeStates,
   resumeToken,
   sameOriginAvailable,
 }: {
   backends: BridgeBackendProfile[];
+  machines: readonly MachineInfo[];
   probeStates: Record<string, BridgeProbeState>;
   resumeToken: number;
   sameOriginAvailable: boolean;
@@ -565,6 +659,24 @@ function buildAvailableRuntimes({
       }),
     );
   }
+  for (const machine of machines) {
+    if (machine.kind !== "ssh") {
+      continue;
+    }
+    const id = machineRuntimeId(machine.id);
+    runtimes.push(
+      createBridgeRuntime({
+        id,
+        mode: "machine",
+        label: machine.label,
+        backend: null,
+        baseUrl: null,
+        machineId: machine.id,
+        probeState: probeStates[id],
+        resumeToken,
+      }),
+    );
+  }
   return runtimes;
 }
 
@@ -574,6 +686,7 @@ function createBridgeRuntime({
   label,
   backend,
   baseUrl,
+  machineId,
   probeState,
   resumeToken,
 }: {
@@ -582,16 +695,25 @@ function createBridgeRuntime({
   label: string;
   backend: BridgeBackendProfile | null;
   baseUrl: string | null;
+  machineId?: string;
   probeState: BridgeProbeState | undefined;
   resumeToken: number;
 }): BridgeRuntime {
   const connectionKey =
     mode === "same-origin"
       ? SAME_ORIGIN_BRIDGE_ID
-      : configuredBridgeConnectionKey(id, baseUrl ?? "");
+      : mode === "machine"
+        ? id
+        : configuredBridgeConnectionKey(id, baseUrl ?? "");
   const currentProbeState = probeState?.connectionKey === connectionKey ? probeState : undefined;
-  const httpUrl = (path: string, query?: URLSearchParams) => buildHttpUrl(baseUrl, path, query);
-  const wsUrl = (path: string, query?: URLSearchParams) => buildWsUrl(baseUrl, path, query);
+  const httpUrl = (path: string, query?: URLSearchParams) =>
+    mode === "machine" && machineId
+      ? buildMachineHttpPath(machineId, path, query)
+      : buildHttpUrl(baseUrl, path, query);
+  const wsUrl = (path: string, query?: URLSearchParams) =>
+    mode === "machine" && machineId
+      ? buildMachineWsUrl(machineId, path, query)
+      : buildWsUrl(baseUrl, path, query);
   const color =
     backend?.color ?? (mode === "same-origin" ? SAME_ORIGIN_BRIDGE_COLOR : fallbackBackendColor(id));
   return {
@@ -1094,6 +1216,18 @@ export function parseCapabilities(value: unknown): BridgeCapabilities {
         : undefined,
     launcher_presets:
       isRecord(value.launcher_presets) && value.launcher_presets.version === 1
+        ? { version: 1 }
+        : undefined,
+    workspace_zones:
+      isRecord(value.workspace_zones) && value.workspace_zones.version === 1
+        ? { version: 1 }
+        : undefined,
+    machines:
+      isRecord(value.machines) && value.machines.version === 1
+        ? { version: 1 }
+        : undefined,
+    uploads:
+      isRecord(value.uploads) && value.uploads.version === 1
         ? { version: 1 }
         : undefined,
   };

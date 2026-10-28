@@ -3,6 +3,21 @@
 `herdr-web` is a private, vendored web app release. Releases create Git tags and GitHub releases.
 They do not publish npm packages, and the package versions are not release versions.
 
+## Deployment vs tagged release
+
+Routine deployment of the live web service is not a release. To deploy an update: publish the
+bridge binary and `web/dist` built from the same commit, back up the previous deployment, and
+restart the web service only — native Herdr keeps running and is never restarted by this
+process. Do not run `scripts/release.mjs`, create tags, or bump versions for a plain
+deployment; a versioned release (Git tag, GitHub release, changelog promotion, Android version
+stamps) is cut only through the tagged-release process below.
+
+For saved SSH machines, the web service account needs `ssh` and `scp` in its service `PATH`.
+The target machine must already run compatible Herdr and expose the native `herdr` CLI to
+non-interactive SSH commands. The bridge talks to its local daemon through the socket; it
+does not spawn a local `herdr` CLI. No additional software is installed remotely. See
+[docs/native-machines-and-uploads.md](native-machines-and-uploads.md).
+
 ## Prerequisites
 
 - Clean `main` branch.

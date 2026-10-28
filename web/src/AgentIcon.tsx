@@ -1,6 +1,6 @@
 import type { PaneInfo } from "./types";
 
-export type AgentIconKind = "claude" | "codex" | "pi" | "grok" | "opencode";
+export type AgentIconKind = "claude" | "codex" | "pi" | "omp" | "grok" | "opencode";
 
 export function agentIconKind(pane: PaneInfo): AgentIconKind | null {
   // Best-effort cosmetic match: prefer structured agent fields before user labels.
@@ -27,6 +27,12 @@ export function agentIconKindFromValues(
     if (label.includes("grok")) {
       return "grok";
     }
+    if (label.includes("oh my pi")) {
+      return "omp";
+    }
+    if (/(^|[^a-z0-9])omp([^a-z0-9]|$)/u.test(label)) {
+      return "omp";
+    }
     if (/(^|[^a-z0-9])pi([^a-z0-9]|$)/u.test(label)) {
       return "pi";
     }
@@ -44,6 +50,9 @@ export function agentIconKindFromHint(agentHint: string | null | undefined): Age
   }
   if (hint === "codex") {
     return "codex";
+  }
+  if (hint === "omp") {
+    return "omp";
   }
   if (hint === "pi") {
     return "pi";
@@ -97,6 +106,14 @@ export function AgentIcon({ kind }: { kind: AgentIconKind }) {
       >
         <path d="M24 32H8V16H24V32Z" fill="currentColor" opacity="0.45" />
         <path d="M24 8H8V32H24V8ZM32 40H0V0H32V40Z" fill="currentColor" />
+      </svg>
+    );
+  }
+  if (kind === "omp") {
+    return (
+      <svg className="agent-icon agent-icon-omp" viewBox="0 0 800 800" aria-hidden="true">
+        <path d="M100 120H700V240H100ZM100 120H220V680H100ZM580 120H700V680H580Z" />
+        <circle cx="742" cy="50" r="44" />
       </svg>
     );
   }

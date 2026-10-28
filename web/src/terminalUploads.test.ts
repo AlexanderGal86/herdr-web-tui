@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { uploadWithOverwritePrompt } from "./terminalUploads";
+import { supportsUploads, uploadWithOverwritePrompt } from "./terminalUploads";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -96,3 +96,34 @@ function requestQuery(fetchMock: ReturnType<typeof vi.fn>, call = 0) {
   const url = new URL(String(fetchMock.mock.calls[call]?.[0]));
   return Object.fromEntries(url.searchParams.entries());
 }
+
+describe("supportsUploads", () => {
+  it("keeps uploads available for legacy local bridges without capability fields", () => {
+    expect(supportsUploads(null)).toBe(true);
+    expect(supportsUploads(undefined)).toBe(true);
+    expect(supportsUploads({ commands: ["command"] })).toBe(true);
+  });
+
+  it("keeps uploads for machines-aware local and configured bridges that do not advertise uploads", () => {
+    expect(supportsUploads({ commands: [], machines: { version: 1 } })).toBe(true);
+    expect(supportsUploads({ commands: [], machines: { version: 1 } }, false)).toBe(true);
+  });
+
+  it("hides uploads on machine-scoped runtimes that do not advertise them", () => {
+    expect(supportsUploads({ commands: [], machines: { version: 1 } }, true)).toBe(false);
+    expect(supportsUploads(null, true)).toBe(false);
+  });
+
+  it("honors an explicit uploads capability in every runtime mode", () => {
+    expect(supportsUploads({ commands: [], uploads: { version: 1 } })).toBe(true);
+    expect(
+      supportsUploads({ commands: [], machines: { version: 1 }, uploads: { version: 1 } }, true),
+    ).toBe(true);
+  });
+
+  it("rejects unknown uploads capability versions", () => {
+    expect(
+      supportsUploads({ commands: [], uploads: { version: 2 } as unknown as { version: 1 } }),
+    ).toBe(false);
+  });
+});

@@ -18,7 +18,32 @@ npm run build
 HOST=127.0.0.1 PORT=8787 bash scripts/run-bridge.sh
 ```
 
-The existing wrapper selects `${XDG_CONFIG_HOME:-$HOME/.config}/herdr/herdr.sock`, respects an explicit `HERDR_SOCKET_PATH`, and serves the production assets at `http://127.0.0.1:8787`. For a remote Linux host, use SSH forwarding as documented in the [README](../README.md). These commands follow the upstream Linux launcher; this fork's Linux runtime has not yet been verified.
+The existing wrapper selects `${XDG_CONFIG_HOME:-$HOME/.config}/herdr/herdr.sock`, respects an explicit `HERDR_SOCKET_PATH`, and serves the production assets at `http://127.0.0.1:8787`. For a remote Linux host, use SSH forwarding as documented in the [README](../README.md). This fork's Linux runtime is verified as of 2026-10-28; see
+[Linux verification (2026-10-28)](#linux-verification-2026-10-28) below.
+
+## Linux verification (2026-10-28)
+
+Verified on Linux with the bridge and web UI built from the same commit, exercised against a
+live bridge serving the production `web/dist` over TLS:
+
+- Frontend: ESLint clean; **506 tests across 56 files** passed; `tsc -b` clean; debug build
+  succeeded; an isolated Vite production build completed with zero errors and warnings.
+- Bridge: **237 passed / 1 ignored**; vendored compatibility crate: **146 tests passed**;
+  Rust formatting clean.
+- Machine-runtime selection regression (before/after in a real browser): with the previously
+  deployed bundle the machine selector reset to the local bridge; with the new bundle,
+  Local → saved machine → Local → saved machine switches keep the selected runtime sticky.
+- Real upload through the GUI file input to a selected machine's
+  `/api/machines/{id}/uploads`: HTTP 200; the 73-byte payload was verified byte-identical by
+  SHA-256 directly on the target host; the committed file had mode `600` inside a `700`
+  uploads directory; the fixture was removed on both hosts afterwards. During the upload the
+  queued remote path was captured for the terminal instead of being typed into the user's live
+  PTY, and Input/Resize broadcasts stayed blocked with takeover false.
+- The temporary test stand and tunnel were stopped afterwards; the native binary, its
+  configuration files, the live `web/dist`, and native Herdr focus were left unchanged.
+
+Machine routing and remote-upload details: [native-machines-and-uploads.md](native-machines-and-uploads.md).
+The dated Windows results below are retained as history.
 
 ## Windows startup
 
@@ -62,7 +87,7 @@ The website scales a fixed illustration with its width. This app uses readable t
 - `web/src/appearance.ts`, `AppearanceSetting.tsx`: persistent preference and accessible selector.
 - `web/src/App.tsx`: TUI default layout, workspaces in All scope and split captions.
 - `web/src/terminalRenderer.ts`, `TerminalView.tsx`: font selection and remeasurement without reconnecting.
-- `web/src/paneContextMenu.ts`, `TerminalView.tsx`, `App.tsx`: terminal context menus in both appearances, capability filtering, captured pane identity and local right-click passthrough. Shift+right-click, Shift+F10 and the ContextMenu key recover the menu. Passthrough resets on reload and does not alter native Herdr preferences.
+- `web/src/paneContextMenu.ts`, `TerminalView.tsx`, `App.tsx`: terminal context menus in both appearances, capability filtering, captured pane identity and local right-click passthrough. Shift+right-click, Shift+F10 and the ContextMenu key recover the menu. Passthrough resets on reload and does not alter native Herdr preferences. The current menu offers rename/clear name, swap, split, clipboard paste, `Restore split layout` only while a tab is already zoomed (the separate `Zoom` entry was removed), the right-click passthrough toggle, and close.
 - `bridge/src/web_bridge.rs`: the allow-list now exposes `pane.zoom` with an explicit pane ID and `pane.swap` with two distinct explicit IDs; implicit/directional swap requests are rejected. The protocol and compatibility crate are unchanged. Upgrade the bridge together with the frontend to enable these two menu actions.
 
 ## Terminal menu verification (Windows, 2026-10-01)

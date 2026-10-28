@@ -14,6 +14,7 @@ const BUILTIN_SHELL_ID: &str = "builtin:shell";
 const BUILTIN_CODEX_ID: &str = "builtin:codex";
 const BUILTIN_CLAUDE_ID: &str = "builtin:claude";
 const BUILTIN_PI_ID: &str = "builtin:pi";
+const BUILTIN_OMP_ID: &str = "builtin:omp";
 const BUILTIN_GROK_ID: &str = "builtin:grok";
 const BUILTIN_OPENCODE_ID: &str = "builtin:opencode";
 
@@ -85,6 +86,7 @@ pub enum ManagedAgentKind {
     Codex,
     Claude,
     Pi,
+    Omp,
     Grok,
     OpenCode,
 }
@@ -275,6 +277,7 @@ impl ManagedAgentKind {
             Self::Codex => "codex",
             Self::Claude => "claude",
             Self::Pi => "pi",
+            Self::Omp => "omp",
             Self::Grok => "grok",
             Self::OpenCode => "opencode",
         }
@@ -371,6 +374,7 @@ fn builtin_presets() -> Vec<ResolvedLauncherPreset> {
         builtin_managed_agent(BUILTIN_CODEX_ID, "Codex", ManagedAgentKind::Codex),
         builtin_managed_agent(BUILTIN_CLAUDE_ID, "Claude", ManagedAgentKind::Claude),
         builtin_managed_agent(BUILTIN_PI_ID, "pi", ManagedAgentKind::Pi),
+        builtin_managed_agent(BUILTIN_OMP_ID, "omp", ManagedAgentKind::Omp),
         builtin_managed_agent(BUILTIN_GROK_ID, "Grok", ManagedAgentKind::Grok),
         builtin_managed_agent(BUILTIN_OPENCODE_ID, "OpenCode", ManagedAgentKind::OpenCode),
     ]
@@ -403,7 +407,7 @@ fn select_builtin_presets(
         }
         let Some(preset) = by_key.get(&key).copied() else {
             warnings.push(format!(
-                "unknown builtin launcher entry {entry:?}; expected shell, codex, claude, pi, grok, opencode, or builtin:<name>"
+                "unknown builtin launcher entry {entry:?}; expected shell, codex, claude, pi, omp, grok, opencode, or builtin:<name>"
             ));
             continue;
         };
@@ -585,7 +589,7 @@ mod tests {
         let store =
             LauncherPresetStore::load_from_path(Path::new("/definitely/missing.json")).unwrap();
         let response = store.response();
-        assert_eq!(response.presets.len(), 6);
+        assert_eq!(response.presets.len(), 7);
         assert_eq!(
             response
                 .presets
@@ -597,6 +601,7 @@ mod tests {
                 "builtin:codex",
                 "builtin:claude",
                 "builtin:pi",
+                "builtin:omp",
                 "builtin:grok",
                 "builtin:opencode",
             ]
@@ -611,7 +616,7 @@ mod tests {
         )
         .unwrap();
         let response = store.response();
-        assert_eq!(response.presets.len(), 6);
+        assert_eq!(response.presets.len(), 7);
         assert_eq!(response.warnings.len(), 1);
         assert!(response.warnings[0].contains("file not found"));
     }
@@ -626,7 +631,7 @@ mod tests {
         let store = LauncherPresetStore::load_from_path(&path).unwrap();
         let response = store.response();
 
-        assert_eq!(response.presets.len(), 6);
+        assert_eq!(response.presets.len(), 7);
         assert_eq!(response.presets[0].id, "builtin:shell");
         assert_eq!(response.warnings.len(), 1);
         assert!(response.warnings[0].contains("parse error"));

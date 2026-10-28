@@ -34,8 +34,9 @@ export function terminalPaneMenuItems({ pane, source, commands, zoomed, passthro
   if (commands.includes("pane.split")) {
     items.push({ key: "split_right", label: "Split right" }, { key: "split_down", label: "Split down" });
   }
-  if (commands.includes("pane.zoom")) {
-    items.push({ key: "zoom", label: zoomed ? "Restore split layout" : "Zoom" });
+  items.push({ key: "paste", label: "Paste" });
+  if (commands.includes("pane.zoom") && zoomed) {
+    items.push({ key: "zoom", label: "Restore split layout" });
   }
   items.push({ key: "toggle_right_click", label: passthrough ? "Use Herdr right-click menu" : "Send right-clicks to pane" });
   items.push(...extras.filter(item => item.key !== "rename" && item.key !== "close"));
