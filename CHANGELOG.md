@@ -5,7 +5,7 @@
 ### Added
 
 - Bottom-right **Open TTT** button: opens the TTT Editor in the active workspace as a new tab through the official Herdr plugin pane mechanism (`ttt.editor`/`editor`, `plugin.pane.open` over the daemon socket — no browser-supplied argv). The preset (`builtin:ttt`) is offered only while Herdr reports the plugin installed and enabled on the serving host, and machine runtimes never show it, so a click always launches on the bridge host the user is looking at. The button sits above the stage bar and, on touch layouts, above the mobile terminal controls strip, so it covers no bar controls or quick keys.
-- Pane-app mouse forwarding for the web terminal: the bridge now forwards the daemon's `MouseCapture` state over the terminal socket (`{"type":"mouse_mode","enabled":…}`, seeded from the shared session so a joining client learns the current flag) and translates browser mouse gestures into `AttachMouse` structured events the daemon encodes for the pane app's real tracking mode. While a pane app captures the mouse (TTT, vim, htop, …), clicks, drags, wheel, and right-click go to the app — right-click opens the app's own menu, and Shift+right-click keeps the Herdr pane menu; middle-click paste and text selection behave as before in plain shells. Mouse reports respect the same detach/takeover gating as keyboard input and are rejected unless they match a strict kind/button allowlist.
+- Pane-app mouse forwarding for the web terminal: the bridge now forwards the daemon's `MouseCapture` state over the terminal socket (`{"type":"mouse_mode","enabled":…}`, seeded from the shared session so a joining client learns the current flag) and translates browser mouse gestures into `AttachMouse` structured events the daemon encodes for the pane app's real tracking mode. While a pane app captures the mouse (TTT, vim, htop, …), clicks, drags, and wheel go to the app; right/middle clicks keep the browser-like Herdr gestures (pane menu, selection copy, middle-click paste), with Shift always forcing the Herdr menu. Mouse reports respect the same detach/takeover gating as keyboard input and are rejected unless they match a strict kind/button allowlist.
 - Fixed the browser terminal ignoring pane-app mouse reporting entirely: ghostty-web has no mouse→PTY path, so clicks in TTT-style panes previously did nothing.
 - Two-stage SCP uploads for saved SSH machines: uploading from a machine runtime now stages the file privately on the bridge host and copies it with `scp -s` into the remote user's `~/.local/share/herdr-web/uploads` directory, committing atomically with no-clobber semantics, conflict renaming, and explicit overwrite. The uploads UI is gated on a new `uploads` capability so runtimes without the route no longer advertise it, while older local bridges keep their existing upload behavior.
 
@@ -113,6 +113,8 @@
 - Allow configured bridge URLs to include a reverse-proxy path prefix for same-origin multi-bridge
   deployments. [PR #94](https://github.com/kcosr/herdr-web/pull/94), contributed by
   [Will Hampson (@Whamp)](https://github.com/Whamp).
+- Shift+Insert pastes the clipboard into the focused terminal (also while a pane app tracks the
+  mouse), matching desktop-terminal muscle memory alongside middle-click paste.
 
 ### Changed
 
@@ -154,6 +156,12 @@
 
 ### Fixed
 
+- Right-click copy/menu and middle-click paste work again in panes whose app tracks the mouse
+  (agent TUIs, TTT): pane-app mouse forwarding no longer swallows those browser gestures.
+  Right/middle clicks still go to the app in panes opted into right-click passthrough — TTT
+  panes launched from the web are seeded into it automatically (and the preference now persists
+  across reloads, like manual toggles) so their context menus keep working, and the explicit
+  pane-menu toggle still overrides (TTT panes launched outside the web need the toggle once).
 - Fixed the machine host selector resetting to the local bridge: ephemeral SSH machine runtimes are now included in the enabled bridge id list the web app validates selections against, so picking a saved machine stays selected (machine selection remains session-only and is never written to browser storage).
 
 - Terminal selections no longer copy to the clipboard by themselves.

@@ -15,6 +15,32 @@ export function terminalPreferenceKey(bridgeId: string, connectionKey: string, t
   return JSON.stringify([bridgeId, connectionKey, terminalId]);
 }
 
+export const RIGHT_CLICK_PASSTHROUGH_STORAGE_KEY = "herdr.web.rightClickPassthrough.v1";
+
+export function parseRightClickPassthroughKeys(raw: string | null): ReadonlySet<string> {
+  try {
+    const parsed = raw === null ? undefined : JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((entry): entry is string => typeof entry === "string"));
+  } catch {
+    return new Set();
+  }
+}
+
+export function seedRightClickPassthrough(
+  current: ReadonlySet<string>,
+  panes: readonly PaneInfo[],
+  bridgeId: string,
+  connectionKey: string,
+  paneId: string | undefined,
+): ReadonlySet<string> {
+  const terminalId = paneId === undefined ? undefined : panes.find(pane => pane.pane_id === paneId)?.terminal_id;
+  if (!terminalId) return current;
+  const key = terminalPreferenceKey(bridgeId, connectionKey, terminalId);
+  if (current.has(key)) return current;
+  return new Set(current).add(key);
+}
+
 export function terminalMenuTarget(target: TerminalMenuTarget, connectionKey: string, panes: readonly PaneInfo[]): PaneInfo | undefined {
   if (target.connectionKey !== connectionKey) return undefined;
   return panes.find(pane => pane.pane_id === target.id && pane.terminal_id === target.terminalId);

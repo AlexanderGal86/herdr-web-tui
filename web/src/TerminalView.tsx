@@ -216,9 +216,13 @@ export function TerminalView({
   rightClickPassthrough = false,
   createTerminalRenderer = createGhosttyTerminalRenderer,
 }: Props) {
-  const contextKeyRef = useRef<string | null>(null);
-  const middlePointerDownRef = useRef(false);
+  const contextKeyRef = useRef<string | null>(null);  const middlePointerDownRef = useRef(false);
   const contextGestureRef = useRef({ pointerDown: false, blocked: false, opened: false });
+  // Set when a right/middle press was handed to the pane app's mouse
+  // tracking; the app then owns the whole gesture even if Shift or the
+  // tracking flag changes before release.
+  const paneAppGestureRef = useRef({ active: false });
+  const insertPasteArmedRef = useRef(false);
   const hostRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -1485,13 +1489,33 @@ export function TerminalView({
 
 
   const captureTerminalMouse = (event: ReactMouseEvent<HTMLDivElement>) => {
-    // Pane app owns the mouse while it requested tracking (Shift keeps the
-    // Herdr menu/native overrides); let the renderer report the gesture.
+    // Panes opted into right-click passthrough (e.g. TTT, seeded at launch)
+    // let the tracked pane app own the mouse while it requested tracking;
+    // Shift keeps the Herdr menu/native overrides. Every other pane keeps
+    // the browser-like gestures below even while an app tracks the mouse.
+    const paneAppGatePasses =
+      event.button !== 0 &&
+      rightClickPassthrough &&
+      Boolean(rendererRef.current?.hasActiveMouseTracking()) &&
+      !event.shiftKey;
+    if (event.button !== 0 && (event.type === "pointerdown" || event.type === "mousedown")) {
+      // A new press decides gesture ownership; this also heals a stale
+      // latch left by a gesture that ended outside the terminal.
+      paneAppGestureRef.current.active = paneAppGatePasses;
+    }
+    if (paneAppGatePasses) {
+      return;
+    }
     if (
       event.button !== 0 &&
-      rendererRef.current?.hasActiveMouseTracking() &&
-      !event.shiftKey
+      paneAppGestureRef.current.active &&
+      (event.type === "pointerup" || event.type === "mouseup" || event.type === "auxclick")
     ) {
+      // The pane app owned this gesture from its press: consume the rest of
+      // it so neither Herdr actions nor the browser menu fire mid-gesture.
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.type !== "pointerup") paneAppGestureRef.current.active = false;
       return;
     }
     if (event.button === 1) {
@@ -1549,8 +1573,20 @@ export function TerminalView({
   const captureTerminalContextMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
     if (!onContextMenu) return;
     if ("pointerType" in event.nativeEvent && event.nativeEvent.pointerType === "touch") return;
-    if (rendererRef.current?.hasActiveMouseTracking() && !event.shiftKey) {
-      // The pane app handles right-click (context menus); no Herdr menu.
+    if (paneAppGestureRef.current.active) {
+      // The pane app owned this right-click from its press; keep the whole
+      // gesture out of the browser/Herdr menus even if Shift appeared late.
+      paneAppGestureRef.current.active = false;
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (
+      rightClickPassthrough &&
+      rendererRef.current?.hasActiveMouseTracking() &&
+      !event.shiftKey
+    ) {
+      // The opted-in pane app handles right-click (context menus); no Herdr menu.
       event.preventDefault();
       event.stopPropagation();
       return;
@@ -1561,7 +1597,39 @@ export function TerminalView({
     openTerminalContextMenu(event.clientX, event.clientY);
   };
 
+  // Shift+Insert pastes like a desktop terminal instead of sending the key
+  // to the pane app (which would only receive an escape sequence).
+  const captureTerminalPasteKey = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "Insert") return;
+    if (event.type === "keyup") {
+      // Consume the release even if Shift was already lifted so the app
+      // never sees a lone Insert release after a pasted Shift+Insert.
+      if (insertPasteArmedRef.current) {
+        insertPasteArmedRef.current = false;
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
+    if (
+      !event.shiftKey ||
+      event.ctrlKey ||
+      event.altKey ||
+      event.metaKey ||
+      event.nativeEvent.isComposing ||
+      event.keyCode === 229
+    ) {
+      insertPasteArmedRef.current = false;
+      return;
+    }
+    insertPasteArmedRef.current = true;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!event.repeat) void pasteClipboardRef.current();
+  };
+
   const captureTerminalContextKey = (event: KeyboardEvent<HTMLDivElement>) => {
+    captureTerminalPasteKey(event);
     const capturedRelease = event.type === "keyup" && contextKeyRef.current === event.key;
     if (!onContextMenu || !(capturedRelease || event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey))) return;
     contextKeyRef.current = event.type === "keydown" ? event.key : null;

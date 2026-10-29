@@ -595,6 +595,173 @@ describe("TerminalView context menu capture", () => {
     expect(renderer.childEvents).toHaveBeenCalledTimes(1);
     expect(onContextMenu).not.toHaveBeenCalled();
   });
+
+  // Panes whose app tracks the mouse (agent TUIs, TTT) keep the Herdr
+  // right-click gestures unless the pane opted into passthrough (seeded for
+  // TTT panes at launch; the explicit menu toggle still wins).
+  it("opens the Herdr menu on right-click while the pane app tracks the mouse", async () => {
+    const { renderer, onContextMenu } = await mountMenu();
+    renderer.setMouseCapture(true);
+    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "contextmenu"]) {
+      expect(mouse(renderer.input, type).defaultPrevented).toBe(true);
+    }
+    expect(renderer.childEvents).not.toHaveBeenCalled();
+    expect(onContextMenu).toHaveBeenCalledExactlyOnceWith(91, 72);
+  });
+
+  it("copies the selection on right-click while the pane app tracks the mouse", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    const { renderer, onContextMenu } = await mountMenu();
+    renderer.setMouseCapture(true);
+    renderer.clearSelection.mockClear();
+    renderer.selection = "tracked output";
+    await act(async () => {
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "contextmenu"]) {
+        expect(mouse(renderer.input, type).defaultPrevented).toBe(true);
+      }
+    });
+    expect(writeText).toHaveBeenCalledExactlyOnceWith("tracked output");
+    expect(renderer.clearSelection).toHaveBeenCalledOnce();
+    expect(renderer.childEvents).not.toHaveBeenCalled();
+    expect(onContextMenu).not.toHaveBeenCalled();
+  });
+
+  it("pastes middle-click clipboard while the pane app tracks the mouse", async () => {
+    const readText = vi.fn().mockResolvedValue("middle text");
+    vi.stubGlobal("navigator", { clipboard: { readText } });
+    const { renderer } = await mountMenu();
+    renderer.setMouseCapture(true);
+    await act(async () => {
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "auxclick"]) {
+        expect(mouse(renderer.input, type, { button: 1 }).defaultPrevented).toBe(true);
+      }
+    });
+    expect(readText).toHaveBeenCalledOnce();
+    expect(renderer.paste).toHaveBeenCalledExactlyOnceWith("middle text");
+    expect(renderer.childEvents).not.toHaveBeenCalled();
+  });
+
+  it("forwards right and middle clicks to the tracked pane app in passthrough mode", async () => {
+    const readText = vi.fn();
+    vi.stubGlobal("navigator", { clipboard: { readText } });
+    const { renderer, onContextMenu } = await mountMenu(true);
+    renderer.setMouseCapture(true);
+    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup"]) {
+      expect(mouse(renderer.input, type).defaultPrevented).toBe(false);
+    }
+    expect(mouse(renderer.input, "contextmenu").defaultPrevented).toBe(true);
+    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "auxclick"]) {
+      expect(mouse(renderer.input, type, { button: 1 }).defaultPrevented).toBe(false);
+    }
+    expect(renderer.childEvents).toHaveBeenCalledTimes(8);
+    expect(onContextMenu).not.toHaveBeenCalled();
+    expect(readText).not.toHaveBeenCalled();
+    expect(renderer.paste).not.toHaveBeenCalled();
+  });
+
+  it("keeps the whole gesture owned by the pane app when Shift appears mid-gesture", async () => {
+    const readText = vi.fn();
+    vi.stubGlobal("navigator", { clipboard: { readText } });
+    const { renderer, onContextMenu } = await mountMenu(true);
+    renderer.setMouseCapture(true);
+    await act(async () => {
+      // Right press starts in the pane app's hands...
+      expect(mouse(renderer.input, "pointerdown").defaultPrevented).toBe(false);
+      // ...Shift appears before release: the release and context menu stay consumed,
+      // the Herdr menu must not pop over the app's gesture.
+      expect(mouse(renderer.input, "pointerup", { shiftKey: true }).defaultPrevented).toBe(true);
+      expect(mouse(renderer.input, "contextmenu", { shiftKey: true }).defaultPrevented).toBe(true);
+      // Same for a middle-click gesture whose release loses Shift.
+      expect(mouse(renderer.input, "pointerdown", { button: 1 }).defaultPrevented).toBe(false);
+      expect(mouse(renderer.input, "mouseup", { button: 1, shiftKey: true }).defaultPrevented).toBe(true);
+    });
+    expect(onContextMenu).not.toHaveBeenCalled();
+    expect(readText).not.toHaveBeenCalled();
+    expect(renderer.paste).not.toHaveBeenCalled();
+  });
+
+  it("releases a stale pane-app gesture latch on the next press", async () => {
+    const readText = vi.fn().mockResolvedValue("later paste");
+    vi.stubGlobal("navigator", { clipboard: { readText } });
+    const { renderer } = await mountMenu(true);
+    renderer.setMouseCapture(true);
+    await act(async () => {
+      expect(mouse(renderer.input, "pointerdown").defaultPrevented).toBe(false);
+    });
+    renderer.setMouseCapture(false);
+    await act(async () => {
+      expect(mouse(renderer.input, "mousedown", { button: 1 }).defaultPrevented).toBe(true);
+    });
+    expect(readText).toHaveBeenCalledExactlyOnceWith();
+    expect(renderer.paste).toHaveBeenCalledExactlyOnceWith("later paste");
+  });
+
+  function insertKey(input: HTMLElement, type: string, init: KeyboardEventInit = {}) {
+    const event = new KeyboardEvent(type, {
+      key: "Insert",
+      bubbles: true,
+      cancelable: true,
+      shiftKey: true,
+      ...init,
+    });
+    input.dispatchEvent(event);
+    return event;
+  }
+
+  it("pastes on Shift+Insert without leaking the key to the pane app", async () => {
+    const readText = vi.fn().mockResolvedValue("insert paste");
+    vi.stubGlobal("navigator", { clipboard: { readText } });
+    const { renderer } = await mountMenu();
+    renderer.setMouseCapture(true);
+    await act(async () => {
+      expect(insertKey(renderer.input, "keydown").defaultPrevented).toBe(true);
+      expect(insertKey(renderer.input, "keyup").defaultPrevented).toBe(true);
+    });
+    expect(readText).toHaveBeenCalledOnce();
+    expect(renderer.paste).toHaveBeenCalledExactlyOnceWith("insert paste");
+    expect(renderer.childEvents).not.toHaveBeenCalled();
+  });
+
+  it("intercepts but does not repeat-paste on held Shift+Insert", async () => {
+    const readText = vi.fn().mockResolvedValue("once");
+    vi.stubGlobal("navigator", { clipboard: { readText } });
+    const { renderer } = await mountMenu();
+    await act(async () => {
+      expect(insertKey(renderer.input, "keydown").defaultPrevented).toBe(true);
+      expect(insertKey(renderer.input, "keydown", { repeat: true }).defaultPrevented).toBe(true);
+    });
+    expect(readText).toHaveBeenCalledOnce();
+    expect(renderer.paste).toHaveBeenCalledExactlyOnceWith("once");
+  });
+
+  it("consumes the Insert release even when Shift was released first", async () => {
+    const readText = vi.fn().mockResolvedValue("insert paste");
+    vi.stubGlobal("navigator", { clipboard: { readText } });
+    const { renderer } = await mountMenu();
+    await act(async () => {
+      expect(insertKey(renderer.input, "keydown").defaultPrevented).toBe(true);
+      expect(insertKey(renderer.input, "keyup", { shiftKey: false }).defaultPrevented).toBe(true);
+    });
+    expect(readText).toHaveBeenCalledOnce();
+    expect(renderer.paste).toHaveBeenCalledExactlyOnceWith("insert paste");
+    expect(renderer.childEvents).not.toHaveBeenCalled();
+  });
+
+  it("ignores Shift+Insert variants so they keep flowing to the pane app", async () => {
+    const readText = vi.fn();
+    vi.stubGlobal("navigator", { clipboard: { readText } });
+    const { renderer } = await mountMenu();
+    await act(async () => {
+      expect(insertKey(renderer.input, "keydown", { ctrlKey: true }).defaultPrevented).toBe(false);
+      expect(insertKey(renderer.input, "keydown", { altKey: true }).defaultPrevented).toBe(false);
+      expect(insertKey(renderer.input, "keydown", { metaKey: true }).defaultPrevented).toBe(false);
+      expect(insertKey(renderer.input, "keydown", { key: "Delete" }).defaultPrevented).toBe(false);
+    });
+    expect(readText).not.toHaveBeenCalled();
+    expect(renderer.paste).not.toHaveBeenCalled();
+    expect(renderer.childEvents).toHaveBeenCalledTimes(4);
+  });
 });
 
 describe("TerminalView uploads gating", () => {

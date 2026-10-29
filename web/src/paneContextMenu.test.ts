@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { terminalPaneMenuItems, terminalPreferenceKey, terminalMenuTarget } from "./paneContextMenu";
+import { terminalPaneMenuItems, terminalPreferenceKey, terminalMenuTarget, seedRightClickPassthrough, parseRightClickPassthroughKeys } from "./paneContextMenu";
 import type { PaneInfo } from "./types";
 
 const pane: PaneInfo = {
@@ -45,5 +45,23 @@ describe("terminal pane context menu", () => {
     expect(key).not.toBe(terminalPreferenceKey("bridge", "reconnected", "terminal"));
     expect(key).not.toBe(terminalPreferenceKey("bridge", "connection", "new-terminal"));
     expect(terminalPreferenceKey("a:b", "c", "d")).not.toBe(terminalPreferenceKey("a", "b:c", "d"));
+  });
+  it("seeds the right-click passthrough preference for a launched pane's terminal", () => {
+    expect(seedRightClickPassthrough(new Set(), [pane], "bridge", "connection-1", "pane-clicked"))
+      .toEqual(new Set([terminalPreferenceKey("bridge", "connection-1", "terminal-2")]));
+    const seeded = new Set([terminalPreferenceKey("bridge", "connection-1", "terminal-2")]);
+    expect(seedRightClickPassthrough(seeded, [pane], "bridge", "connection-1", "pane-clicked")).toBe(seeded);
+    expect(seedRightClickPassthrough(new Set(), [], "bridge", "connection-1", "pane-clicked")).toEqual(new Set());
+    expect(seedRightClickPassthrough(new Set(), [pane], "bridge", "connection-1", "pane-missing")).toEqual(new Set());
+    expect(seedRightClickPassthrough(new Set(), [pane], "bridge", "connection-1", undefined)).toEqual(new Set());
+  });
+  it("parses persisted passthrough keys defensively", () => {
+    expect(parseRightClickPassthroughKeys(null)).toEqual(new Set());
+    expect(parseRightClickPassthroughKeys("")).toEqual(new Set());
+    expect(parseRightClickPassthroughKeys("[\"bridge|connection|terminal\"]"))
+      .toEqual(new Set(["bridge|connection|terminal"]));
+    expect(parseRightClickPassthroughKeys("[1, null, \"ok\"]")).toEqual(new Set(["ok"]));
+    expect(parseRightClickPassthroughKeys("{\"not\":\"an array\"}")).toEqual(new Set());
+    expect(parseRightClickPassthroughKeys("not json")).toEqual(new Set());
   });
 });

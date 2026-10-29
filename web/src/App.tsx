@@ -1,6 +1,6 @@
 import { CommandDraftContext, createCommandDraftStore } from "./commandDrafts";
 import { linkedWorkspaceLabels } from "./workspaceClose";
-import { terminalMenuTarget, terminalPaneMenuItems, terminalPreferenceKey } from "./paneContextMenu";
+import { terminalMenuTarget, terminalPaneMenuItems, terminalPreferenceKey, seedRightClickPassthrough, parseRightClickPassthroughKeys, RIGHT_CLICK_PASSTHROUGH_STORAGE_KEY } from "./paneContextMenu";
 import type { TerminalMenuTarget } from "./paneContextMenu";
 import {
   MachineDisableFlow,
@@ -1106,7 +1106,13 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
   const [sidebarOpen, setSidebarOpen] = useState(initialPrefs.sidebarOpen);
   const [showDetail, setShowDetail] = useState(false);
   const [menu, setMenu] = useState<MenuState | null>(null);
-  const [rightClickTerminals, setRightClickTerminals] = useState<ReadonlySet<string>>(() => new Set());
+  const [rightClickTerminals, setRightClickTerminals] = useState<ReadonlySet<string>>(() => {
+    try {
+      return parseRightClickPassthroughKeys(window.localStorage.getItem(RIGHT_CLICK_PASSTHROUGH_STORAGE_KEY));
+    } catch {
+      return new Set();
+    }
+  });
   const [spaceReorderMode, setSpaceReorderMode] = useState<SpaceReorderMode | null>(null);
   const [spaceReorderAnnouncement, setSpaceReorderAnnouncement] = useState("");
   const spaceReorderAnnouncementFrameRef = useRef<number | null>(null);
@@ -3664,7 +3670,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
     runtime: BridgeRuntime | null,
     action: () => Promise<{ [key: string]: unknown }>,
     selectCreated = false,
-  ) {
+  ): Promise<{ [key: string]: unknown } | false> {
     if (
       !runtime ||
       runtime.capabilityState !== "ready" ||
@@ -3714,7 +3720,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
         }
       }
       setError(null);
-      return true;
+      return result;
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Command failed");
       return false;
@@ -3722,6 +3728,32 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
       setBusy(false);
     }
   }
+
+  // TTT uses right-click context menus, so panes it owns keep receiving
+  // right/middle clicks: seed the terminal's right-click passthrough
+  // preference at launch (the explicit menu toggle still overrides it).
+
+  // Persist the per-terminal right-click preference so seeded TTT panes and
+  // manual toggles survive reloads; best-effort for locked-down storage.
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(RIGHT_CLICK_PASSTHROUGH_STORAGE_KEY, JSON.stringify([...rightClickTerminals]));
+    } catch {
+      // Storage can be unavailable in private or locked-down contexts.
+    }
+  }, [rightClickTerminals]);
+
+  const seedTttRightClickPassthrough = (runtime: BridgeRuntime, paneId: string) => {
+    setRightClickTerminals((current) =>
+      seedRightClickPassthrough(
+        current,
+        connectionRefs.current[runtime.id]?.snapshot?.panes ?? [],
+        runtime.id,
+        runtime.connectionKey,
+        paneId,
+      ),
+    );
+  };
 
   async function reorderSpace(
     bridgeId: BridgeId,
@@ -3756,7 +3788,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
     if (!keepMode || !moved) {
       closeSpaceReorder();
     }
-    return moved;
+    return Boolean(moved);
   }
 
   async function toggleAgentPin(bridgeId: BridgeId, paneId: string, pinned: boolean) {
@@ -3997,7 +4029,13 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
               launchTarget.direction,
               resolvedSpec,
             );
-    void exec(runtime, action, true).then((ok) => ok && setLaunchTarget(null));
+    void exec(runtime, action, true).then((result) => {
+      if (!result) return;
+      setLaunchTarget(null);
+      if (spec.presetId === TTT_PRESET_ID && typeof result.pane_id === "string") {
+        seedTttRightClickPassthrough(runtime, result.pane_id);
+      }
+    });
   };
 
   // Bottom-right shortcut: opens TTT through the official plugin preset in the
@@ -4016,7 +4054,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
     );
   })();
 
-  const openTttEditor = () => {
+  const openTttEditor = async () => {
     const runtime = selectedRuntime;
     const workspaceId = activeSpace?.workspace_id;
     if (!runtime || !selectedCommands || !workspaceId) {
@@ -4039,7 +4077,11 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
       { presetId: TTT_PRESET_ID, label: TTT_PRESET_LABEL, title: TTT_PRESET_LABEL },
       snapshot?.panes ?? [],
     );
-    void exec(runtime, () => selectedCommands.launchPresetTab(workspaceId, resolvedSpec), true);
+    const launched = await exec(runtime, () => selectedCommands.launchPresetTab(workspaceId, resolvedSpec), true);
+    const paneId = launched && typeof launched.pane_id === "string" ? launched.pane_id : null;
+    if (paneId) {
+      seedTttRightClickPassthrough(runtime, paneId);
+    }
   };
 
   const renderTerminal = !isCompactLayout || showDetail;
