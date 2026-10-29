@@ -548,6 +548,7 @@ export function TerminalView({
     host.replaceChildren();
     let disposed = false;
     let disposeInput: (() => void) | null = null;
+    let disposeMouseReports: (() => void) | null = null;
     let disposeScroll: (() => void) | null = null;
     let resizeObserver: ResizeObserver | null = null;
     const generation = rendererGenerationRef.current + 1;
@@ -596,6 +597,18 @@ export function TerminalView({
 
         disposeInput = renderer.onInput((data) => {
           sendTerminalInputData(data);
+        });
+        disposeMouseReports = renderer.onMouse((report) => {
+          // Same detach/takeover gating as keyboard input: a blocked terminal
+          // never forwards pane input, structured mouse reports included.
+          if (terminalInputBlockedRef.current) {
+            return;
+          }
+          const socket = socketRef.current;
+          if (socket?.readyState !== WebSocket.OPEN) {
+            return;
+          }
+          socket.send(JSON.stringify({ type: "mouse", ...report }));
         });
         disposeScroll = renderer.onScroll((lines) => {
           const socket = socketRef.current;
@@ -653,6 +666,7 @@ export function TerminalView({
       batchedInputRef.current = emptyTerminalInputBatch();
       clearQueuedTerminalInput();
       disposeInput?.();
+      disposeMouseReports?.();
       disposeScroll?.();
       resizeObserver?.disconnect();
       if (rendererReadyRef.current?.generation === generation) {
@@ -875,6 +889,11 @@ export function TerminalView({
         if (typeof event.data === "string") {
           if (isTerminalOutputGzipAcknowledgement(event.data)) {
             gzipOutputAcknowledged = true;
+            return;
+          }
+          const mouseMode = parseTerminalMouseMode(event.data);
+          if (mouseMode !== null) {
+            ready.renderer.setMouseCapture(mouseMode);
             return;
           }
           lastCloseReason = parseTerminalCloseReason(event.data) ?? lastCloseReason;
@@ -1466,6 +1485,15 @@ export function TerminalView({
 
 
   const captureTerminalMouse = (event: ReactMouseEvent<HTMLDivElement>) => {
+    // Pane app owns the mouse while it requested tracking (Shift keeps the
+    // Herdr menu/native overrides); let the renderer report the gesture.
+    if (
+      event.button !== 0 &&
+      rendererRef.current?.hasActiveMouseTracking() &&
+      !event.shiftKey
+    ) {
+      return;
+    }
     if (event.button === 1) {
       event.preventDefault();
       event.stopPropagation();
@@ -1521,6 +1549,12 @@ export function TerminalView({
   const captureTerminalContextMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
     if (!onContextMenu) return;
     if ("pointerType" in event.nativeEvent && event.nativeEvent.pointerType === "touch") return;
+    if (rendererRef.current?.hasActiveMouseTracking() && !event.shiftKey) {
+      // The pane app handles right-click (context menus); no Herdr menu.
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     event.preventDefault();
     event.stopPropagation();
     if (contextGestureRef.current.opened || (rightClickPassthrough && !event.shiftKey)) return;
@@ -2231,6 +2265,22 @@ const QUICK_TERMINAL_KEYS: {
     key: mobileTerminalPrintableKey(value), modifiers: [], label: value,
   })),
 ];
+
+/**
+ * Parses the bridge's `{"type":"mouse_mode","enabled":b}` control frame;
+ * null for any other text frame (close reasons, gzip ack, unknown).
+ */
+function parseTerminalMouseMode(text: string): boolean | null {
+  try {
+    const value = JSON.parse(text) as { type?: unknown; enabled?: unknown };
+    if (value?.type === "mouse_mode") {
+      return value.enabled === true;
+    }
+  } catch {
+    // Not JSON: fall through to close-reason handling.
+  }
+  return null;
+}
 
 function terminalSocketUrl(
   wsUrl: (path: string, query?: URLSearchParams) => string,

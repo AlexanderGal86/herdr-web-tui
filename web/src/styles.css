@@ -3537,3 +3537,42 @@ button {
 .app[data-touch="true"] .terminal-stage:has(.terminal-command-controls) .terminal-selection-sheet {
   bottom: calc(var(--terminal-command-controls-height) + 8px * var(--mobile-controls-scale));
 }
+
+/* Bottom-right shortcut opening the TTT editor pane via the bridge's
+   builtin:ttt plugin preset. Hidden unless the bridge offers it. Sits above
+   the stage bar (56px, 60px touch) and, on touch, above the mobile terminal
+   controls strip so no bar control or quick key is covered. */
+.ttt-launch-button {
+  position: fixed;
+  right: 16px;
+  bottom: calc(56px + 10px);
+  z-index: 90;
+  padding: 8px 14px;
+  border: 1px solid var(--surface1);
+  border-radius: 999px;
+  background: var(--mantle);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.2;
+  box-shadow: 0 4px 14px rgb(0 0 0 / 0.35);
+  cursor: pointer;
+}
+
+.ttt-launch-button:hover {
+  border-color: var(--lavender);
+}
+
+.ttt-launch-button:focus-visible {
+  outline: 2px solid var(--lavender);
+  outline-offset: 2px;
+}
+
+.ttt-launch-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.app[data-touch="true"] .ttt-launch-button {
+  bottom: calc(60px + 82px * var(--mobile-controls-scale, 1) + 10px);
+}

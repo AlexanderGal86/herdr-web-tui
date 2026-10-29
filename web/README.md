@@ -52,6 +52,8 @@ The app expects these bridge routes:
 - `/api/uploads`
 - `/api/workspace-zones` (GET/PUT)
 - `/api/machines` (GET)
+- `/api/machines/add` (POST)
+- `/api/machines/{machine_id}/disable` (POST)
 - `/api/machines/{machine_id}/snapshot`
 - `/api/machines/{machine_id}/capabilities`
 - `/api/machines/{machine_id}/command`

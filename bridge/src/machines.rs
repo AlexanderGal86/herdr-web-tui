@@ -197,11 +197,45 @@ pub fn is_valid_ssh_target(target: &str) -> bool {
         && !target.chars().any(|ch| ch.is_ascii_control())
 }
 
+/// Validation for operator-supplied machine-add fields (label, session).
+/// They travel as separate argv entries, but a value beginning with `-` would
+/// still parse as a CLI/ssh option and control characters have no business in
+/// either field.
+pub fn is_valid_machine_arg(value: &str) -> bool {
+    !value.is_empty() && !value.starts_with('-') && !value.chars().any(|ch| ch.is_ascii_control())
+}
+
+/// Argument vector for the native `herdr machine add` registration (the
+/// caller supplies the `herdr` binary itself). Built as separate argv entries
+/// (never a shell string); optional fields are passed only when provided so
+/// the CLI keeps applying its own defaults.
+pub fn machine_add_args(target: &str, label: Option<&str>, session: Option<&str>) -> Vec<String> {
+    let mut args = vec!["machine".to_string(), "add".to_string(), target.to_string()];
+    if let Some(label) = label {
+        args.push("--label".to_string());
+        args.push(label.to_string());
+    }
+    if let Some(session) = session {
+        args.push("--remote-session".to_string());
+        args.push(session.to_string());
+    }
+    args
+}
+
 pub fn default_endpoints_path() -> PathBuf {
     if let Some(path) = crate::store_util::non_empty_env_path(MACHINES_ENDPOINTS_ENV_VAR) {
         return path;
     }
     client_state_dir().join("endpoints.json")
+}
+
+/// True when the machine catalog is read through the `HERDR_WEB_MACHINES_ENDPOINTS`
+/// override (tests, sandboxes). The native `herdr machine add` CLI never honors
+/// that override — it always writes the operator's real Herdr client state — so
+/// registration must be refused instead of silently modifying a different
+/// catalog than the one this bridge serves.
+pub fn catalog_override_active() -> bool {
+    crate::store_util::non_empty_env_path(MACHINES_ENDPOINTS_ENV_VAR).is_some()
 }
 
 fn client_state_dir() -> PathBuf {
@@ -255,6 +289,18 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const PROBE_TIMEOUT_SECONDS: u64 = 25;
+/// How long `herdr machine add` may prepare the remote server before the
+/// bridge kills the child (first-contact preparation can take a while).
+const MACHINE_ADD_TIMEOUT_SECONDS: u64 = 300;
+/// Latest stderr kept for the operator-facing error; older bytes are still
+/// drained, just discarded.
+const MACHINE_ADD_STDERR_CAP_BYTES: usize = 64 * 1024;
+const STDERR_DRAIN_CHUNK_BYTES: usize = 8 * 1024;
+/// Grace granted to the stderr reader after the CLI exits, so its final
+/// diagnostics still land even when a descendant holds the pipe open.
+const STDERR_DRAIN_GRACE: Duration = Duration::from_millis(500);
+/// Hard ceiling on how long the handler waits for captured stderr.
+const STDERR_WAIT: Duration = Duration::from_secs(3);
 const PROBE_POLL: Duration = Duration::from_millis(50);
 const ACCEPT_POLL: Duration = Duration::from_millis(20);
 /// How long a failed remote probe is remembered before another attempt.
@@ -852,6 +898,258 @@ pub fn probe_remote_support(endpoint: &SavedEndpoint) -> Result<(), String> {
     }
 }
 
+/// Runs the native `herdr machine add` registration on the bridge host.
+/// Stdin is closed so a CLI that would prompt for credentials fails instead
+/// of hanging the request; on failure the trimmed CLI stderr (capped) becomes
+/// the operator-facing message. Success is picked up by the next
+/// `MachineCatalog::load`, which the bridge performs per request.
+pub fn run_machine_add(
+    target: &str,
+    label: Option<&str>,
+    session: Option<&str>,
+) -> Result<(), String> {
+    run_machine_add_program(
+        "herdr",
+        Duration::from_secs(MACHINE_ADD_TIMEOUT_SECONDS),
+        target,
+        label,
+        session,
+    )
+}
+
+/// `run_machine_add` with an explicit program path and timeout so tests can
+/// exercise child/descendant teardown against stubs instead of mutating
+/// `PATH` (which would race sibling tests that spawn `ssh`).
+fn run_machine_add_program(
+    program: &str,
+    timeout: Duration,
+    target: &str,
+    label: Option<&str>,
+    session: Option<&str>,
+) -> Result<(), String> {
+    if !is_valid_ssh_target(target) {
+        return Err("invalid ssh target".to_string());
+    }
+    // Boundary check: the web handler validates user input too, but this
+    // runner is the transport edge and rejects option-like values itself.
+    if let Some(label) = label {
+        if !is_valid_machine_arg(label) {
+            return Err("invalid machine label".to_string());
+        }
+    }
+    if let Some(session) = session {
+        if !is_valid_machine_arg(session) {
+            return Err("invalid remote session".to_string());
+        }
+    }
+    run_machine_argv(
+        program,
+        timeout,
+        "machine add",
+        &machine_add_args(target, label, session),
+    )
+}
+
+/// Runs the native `herdr machine disable <PROFILE_ID>` CLI on the bridge
+/// host. Stdin is closed so a CLI that would prompt for anything fails
+/// instead of hanging the request; the saved profile stays in Herdr's own
+/// client state (the CLI only flips its enabled flag), and on failure the
+/// trimmed CLI stderr (capped) becomes the operator-facing message.
+pub fn run_machine_disable(profile_id: &str) -> Result<(), String> {
+    run_machine_disable_program(
+        "herdr",
+        Duration::from_secs(MACHINE_ADD_TIMEOUT_SECONDS),
+        profile_id,
+    )
+}
+
+/// `run_machine_disable` with an explicit program path and timeout so tests
+/// can exercise child/descendant teardown against stubs instead of mutating
+/// `PATH` (which would race sibling tests that spawn `ssh`).
+fn run_machine_disable_program(
+    program: &str,
+    timeout: Duration,
+    profile_id: &str,
+) -> Result<(), String> {
+    // Boundary check: the web handler resolves the id against the saved
+    // catalog too, but this runner is the transport edge and rejects
+    // option-like or control-bearing values itself.
+    if !is_valid_machine_id(profile_id) {
+        return Err("invalid machine id".to_string());
+    }
+    run_machine_argv(
+        program,
+        timeout,
+        "machine disable",
+        &[
+            "machine".to_string(),
+            "disable".to_string(),
+            profile_id.to_string(),
+        ],
+    )
+}
+
+/// Spawns the native machine CLI as its own process-group leader and kills
+/// the whole group on timeout, so an `ssh` descendant can neither keep a
+/// killed registration running nor hold the stderr pipe open past the
+/// deadline. `action` (for example "machine add") names the subcommand in
+/// operator-facing error messages.
+fn run_machine_argv(
+    program: &str,
+    timeout: Duration,
+    action: &str,
+    args: &[String],
+) -> Result<(), String> {
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        // stdout is unused: nulled so the child can never fill an undrained
+        // pipe and stall before exiting; stderr drains on a thread for the
+        // same reason.
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child: Child = command
+        .spawn()
+        .map_err(|err| format!("failed to start herdr: {err}"))?;
+    let stderr = take_captured_stderr(&mut child);
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(PROBE_POLL),
+            Ok(None) => {
+                kill_machine_add_group(child.id());
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stderr.finish();
+                return Err(format!("{action} timed out"));
+            }
+            Err(err) => {
+                kill_machine_add_group(child.id());
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stderr.finish();
+                return Err(format!("{action} failed: {err}"));
+            }
+        }
+    };
+    let stderr = stderr.finish();
+    if status.success() {
+        return Ok(());
+    }
+    Err(if stderr.is_empty() {
+        format!("{action} failed ({status})")
+    } else {
+        // The CLI's actionable reason sits at the end of its diagnostics.
+        let skip = stderr.chars().count().saturating_sub(500);
+        stderr.chars().skip(skip).take(500).collect()
+    })
+}
+
+/// SIGKILLs the process group the machine-add CLI was spawned as leader of;
+/// the group is app-owned (process_group(0)), so the signal can never reach
+/// this process, other sessions, or unrelated user processes.
+#[cfg(unix)]
+fn kill_machine_add_group(pid: u32) {
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_machine_add_group(_pid: u32) {}
+
+/// Bounds stderr collection: capture keeps only the latest bytes (the CLI's
+/// diagnostics put the reason last) but draining never stops while the CLI
+/// runs — a chatty child must never block on a full pipe. Once the CLI has
+/// exited, a short grace collects its final output; an ssh descendant that
+/// still holds the pipe open then stops delaying the handler.
+struct CapturedStderr {
+    cli_exited: Arc<AtomicBool>,
+    receiver: std::sync::mpsc::Receiver<String>,
+}
+
+impl CapturedStderr {
+    fn finish(self) -> String {
+        self.cli_exited.store(true, Ordering::Relaxed);
+        self.receiver
+            .recv_timeout(STDERR_WAIT)
+            .map(|stderr| stderr.trim().to_string())
+            .unwrap_or_default()
+    }
+}
+
+fn take_captured_stderr(child: &mut Child) -> CapturedStderr {
+    let Some(stderr_pipe) = child.stderr.take() else {
+        return CapturedStderr {
+            cli_exited: Arc::new(AtomicBool::new(true)),
+            receiver: std::sync::mpsc::channel().1,
+        };
+    };
+    // A std File owns the same pipe fd and closes it on drop; ChildStderr
+    // cannot be switched to nonblocking reads directly.
+    #[cfg(unix)]
+    let mut pipe = {
+        use std::os::unix::io::{FromRawFd, IntoRawFd};
+        // Safe: the ChildStderr is consumed, so the fd is owned exactly once.
+        let fd = stderr_pipe.into_raw_fd();
+        unsafe { std::fs::File::from_raw_fd(fd) }
+    };
+    #[cfg(not(unix))]
+    let mut pipe = stderr_pipe;
+    let cli_exited = Arc::new(AtomicBool::new(false));
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let flag = Arc::clone(&cli_exited);
+    std::thread::spawn(move || {
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let fd = pipe.as_raw_fd();
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL, 0) };
+            if flags >= 0 {
+                unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+            }
+        }
+        let mut captured: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; STDERR_DRAIN_CHUNK_BYTES];
+        let mut drained_since: Option<Instant> = None;
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if captured.len() + n > MACHINE_ADD_STDERR_CAP_BYTES {
+                        let excess = captured.len() + n - MACHINE_ADD_STDERR_CAP_BYTES;
+                        captured.drain(..excess.min(captured.len()));
+                    }
+                    captured.extend_from_slice(&chunk[..n]);
+                    drained_since = None;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    if flag.load(Ordering::Relaxed) {
+                        let since = *drained_since.get_or_insert(Instant::now());
+                        if since.elapsed() >= STDERR_DRAIN_GRACE {
+                            break;
+                        }
+                    }
+                    std::thread::sleep(PROBE_POLL);
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = sender.send(String::from_utf8_lossy(&captured).into_owned());
+    });
+    CapturedStderr {
+        cli_exited,
+        receiver,
+    }
+}
+
 /// Default machine socket root: the app-owned state root
 /// (`$XDG_STATE_HOME/herdr-web/machines`, else
 /// `$HOME/.local/state/herdr-web/machines`). Never a shared world-writable
@@ -1157,6 +1455,300 @@ mod tests {
                 .map(|workspace| workspace.label.clone())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn machine_add_args_build_plain_argv_with_optional_flags() {
+        assert_eq!(
+            machine_add_args("root@198.51.100.20", Some("farm"), Some("gpu")),
+            vec![
+                "machine".to_string(),
+                "add".to_string(),
+                "root@198.51.100.20".to_string(),
+                "--label".to_string(),
+                "farm".to_string(),
+                "--remote-session".to_string(),
+                "gpu".to_string(),
+            ]
+        );
+        assert_eq!(
+            machine_add_args("root@host", None, None),
+            vec![
+                "machine".to_string(),
+                "add".to_string(),
+                "root@host".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn machine_arg_validation_rejects_option_like_and_control_values() {
+        assert!(is_valid_machine_arg("farm"));
+        assert!(is_valid_machine_arg("gpu-session"));
+        assert!(!is_valid_machine_arg(""));
+        assert!(!is_valid_machine_arg("-oProxyCommand=x"));
+        assert!(!is_valid_machine_arg("farm\n"));
+    }
+
+    #[test]
+    fn machine_add_runner_rejects_bad_values_without_spawning() {
+        assert_eq!(
+            run_machine_add("-oProxyCommand=x", None, None),
+            Err("invalid ssh target".to_string())
+        );
+        assert_eq!(
+            run_machine_add("root@host", Some("-label"), None),
+            Err("invalid machine label".to_string())
+        );
+        assert_eq!(
+            run_machine_add("root@host", None, Some("bad\nsession")),
+            Err("invalid remote session".to_string())
+        );
+        assert_eq!(
+            run_machine_disable("-oProxyCommand=x"),
+            Err("invalid machine id".to_string())
+        );
+        assert_eq!(
+            run_machine_disable("bad id"),
+            Err("invalid machine id".to_string())
+        );
+    }
+
+    /// Spawns a stub CLI via an explicit program path so the runner's argv,
+    /// success path, and failure stderr handling are checked against a real
+    /// child process without touching the real CLI, network, PATH, or
+    /// saved-machine state.
+    #[cfg(unix)]
+    #[test]
+    fn machine_add_runner_uses_native_cli_argv_and_reports_cli_stderr() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("herdr-web-machine-add-{unique}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let args_log = root.join("args.log");
+        let script = root.join("herdr-stub.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> {args_log:?}\n\
+                 case \"$3\" in\n  \
+                 *@fail*)\n    \
+                 ( sleep 30 ) >&2 &\n    \
+                 head -c 200000 /dev/zero | tr '\\0' x >&2\n    \
+                 echo boom >&2\n    \
+                 exit 3\nesac\n\
+                 exit 0\n"
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+        let program = script.to_str().unwrap();
+
+        // Success: the CLI receives exactly the constructed argv.
+        assert_eq!(
+            run_machine_add_program(
+                program,
+                Duration::from_secs(MACHINE_ADD_TIMEOUT_SECONDS),
+                "root@198.51.100.20",
+                Some("farm"),
+                Some("gpu")
+            ),
+            Ok(())
+        );
+        let recorded = std::fs::read_to_string(&args_log).unwrap();
+        assert_eq!(
+            recorded,
+            "machine\nadd\nroot@198.51.100.20\n--label\nfarm\n--remote-session\ngpu\n"
+        );
+
+        // Failure with a descendant holding stderr open: the operator-facing
+        // message keeps the CLI's own tail, stays capped, and the runner does
+        // NOT wait for the 30 s descendant. The stub keys its failure off the
+        // target argv (no environment mutation: setenv races sibling threads
+        // that read process env concurrently).
+        let started = Instant::now();
+        let error = run_machine_add_program(
+            program,
+            Duration::from_secs(MACHINE_ADD_TIMEOUT_SECONDS),
+            "root@fail.test",
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "runner waited on the descendant: {:?}",
+            started.elapsed()
+        );
+        assert!(error.contains("boom"), "stderr tail missing: {error}");
+        assert!(error.len() < 200_000, "stderr was not capped: {error}");
+    }
+
+    /// The disable runner invokes the native CLI as a plain argv vector
+    /// (`machine disable <PROFILE_ID>`), keeps the CLI's own stderr tail as
+    /// the operator-facing message, and does not wait on a descendant that
+    /// holds stderr open — all against a stub program, never the real CLI
+    /// or a saved profile.
+    #[cfg(unix)]
+    #[test]
+    fn machine_disable_runner_uses_native_cli_argv_and_reports_cli_stderr() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("herdr-web-machine-disable-{unique}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let args_log = root.join("args.log");
+        let script = root.join("herdr-stub.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> {args_log:?}\n\
+                 case \"$3\" in\n  \
+                 bad0*)\n    \
+                 ( sleep 30 ) >&2 &\n    \
+                 echo boom >&2\n    \
+                 exit 3\nesac\n\
+                 exit 0\n"
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+        let program = script.to_str().unwrap();
+
+        // Warm-up: exec'ing a just-written script can transiently fail with
+        // ETXTBSY on overlayfs while sibling stub tests run in parallel;
+        // retry briefly before the assertions care about the result.
+        for _ in 0..40 {
+            match run_machine_disable_program(
+                program,
+                Duration::from_secs(MACHINE_ADD_TIMEOUT_SECONDS),
+                "cafe1234",
+            ) {
+                Ok(()) => break,
+                Err(message) if message.contains("Text file busy") => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(message) => panic!("unexpected stub failure: {message}"),
+            }
+        }
+        let _ = std::fs::remove_file(&args_log);
+
+        // Success: the CLI receives exactly `machine disable <PROFILE_ID>`.
+        assert_eq!(
+            run_machine_disable_program(
+                program,
+                Duration::from_secs(MACHINE_ADD_TIMEOUT_SECONDS),
+                "cafe1234"
+            ),
+            Ok(())
+        );
+        let recorded = std::fs::read_to_string(&args_log).unwrap();
+        assert_eq!(recorded, "machine\ndisable\ncafe1234\n");
+
+        // Failure: the operator-facing message keeps the CLI's tail and the
+        // runner does NOT wait for the 30 s descendant. The stub keys its
+        // failure off the profile id argv (no environment mutation).
+        let started = Instant::now();
+        let error = loop {
+            match run_machine_disable_program(
+                program,
+                Duration::from_secs(MACHINE_ADD_TIMEOUT_SECONDS),
+                "bad0face",
+            ) {
+                Err(error) if error.contains("Text file busy") => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(error) => break error,
+                Ok(()) => panic!("stub reported success for the failure profile"),
+            }
+        };
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "runner waited on the descendant: {:?}",
+            started.elapsed()
+        );
+        assert!(error.contains("boom"), "stderr tail missing: {error}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A wedged CLI must be torn down together with any descendants it
+    /// spawned (same app-owned process group), so a killed registration
+    /// cannot keep running in the background.
+    #[cfg(unix)]
+    #[test]
+    fn machine_add_timeout_kills_the_cli_process_group() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("herdr-web-machine-add-timeout-{unique}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let bg_pid_log = root.join("bg.pid");
+        let script = root.join("herdr-stub.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n( sleep 30 ) &\necho $! > {bg_pid_log:?}\n\
+                 echo holding stderr >&2\nsleep 60\n"
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        let started = Instant::now();
+        let error = run_machine_add_program(
+            script.to_str().unwrap(),
+            Duration::from_secs(1),
+            "root@host",
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error, "machine add timed out");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "timeout path was slow: {:?}",
+            started.elapsed()
+        );
+
+        // The background descendant shared the app-owned process group and
+        // must be gone (or a zombie awaiting reaping) shortly after.
+        let bg_pid: i32 = std::fs::read_to_string(&bg_pid_log)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let alive = unsafe { libc::kill(bg_pid, 0) } == 0
+                && !std::fs::read_to_string(format!("/proc/{bg_pid}/stat"))
+                    .map(|stat| stat.contains('Z'))
+                    .unwrap_or(true);
+            if !alive || Instant::now() > deadline {
+                assert!(
+                    !alive,
+                    "descendant survived the process-group kill: {bg_pid}"
+                );
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     #[test]

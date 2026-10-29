@@ -46,6 +46,20 @@ class FakeTerminalRenderer implements TerminalRenderer {
 
   setAccessibleScreenListener() {}
 
+  setMouseCapture(enabled: boolean) {
+    this.mouseCapture = enabled;
+  }
+
+  mouseCapture = false;
+
+  hasActiveMouseTracking() {
+    return this.mouseCapture;
+  }
+
+  onMouse() {
+    return () => {};
+  }
+
   onInput() {
     return () => {};
   }

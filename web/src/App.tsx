@@ -3,6 +3,11 @@ import { linkedWorkspaceLabels } from "./workspaceClose";
 import { terminalMenuTarget, terminalPaneMenuItems, terminalPreferenceKey } from "./paneContextMenu";
 import type { TerminalMenuTarget } from "./paneContextMenu";
 import {
+  MachineDisableFlow,
+  machineDisableTarget,
+  type MachineDisableMenuTarget,
+} from "./machineDisable";
+import {
   Activity,
   Archive,
   ChevronDown,
@@ -42,6 +47,7 @@ import type {
   Dispatch,
   FormEvent as ReactFormEvent,
   KeyboardEvent as ReactKeyboardEvent,
+  MouseEvent as ReactMouseEvent,
   MutableRefObject,
   PointerEvent as ReactPointerEvent,
   ReactNode,
@@ -69,6 +75,7 @@ import type { AgentPinsListResponse } from "./agentPins";
 import { applyActivityMessage, parseActivityEventData, replayActivityMessages } from "./activity";
 import type { ActivityLogEntry } from "./activity";
 import { BackendSettingsDialog } from "./BackendSettingsDialog";
+import { MachineAddDialog, type MachineAddSubmit } from "./MachineAddDialog";
 import { defaultDisplayScope, defaultSidebarWidth, useAppearance } from "./appearance";
 import { spaceScrollContainer } from "./sidebarScroll";
 import { SAME_ORIGIN_BRIDGE_ID, useBridge } from "./bridge";
@@ -135,6 +142,7 @@ import {
   buildMachineGroups,
   entriesForGroup,
   machinesGroupingActive,
+  supportsMachines,
   type MachineGroupStatus,
   type MachineInfo,
 } from "./machines";
@@ -475,6 +483,8 @@ type LegacyDisplaySelectionPrefs = {
 };
 const COMPACT_LAYOUT_QUERY = "(max-width: 820px)";
 const TOUCH_INPUT_QUERY = "(hover: none) and (pointer: coarse)";
+const TTT_PRESET_LABEL = "TTT Editor";
+const TTT_PRESET_ID = "builtin:ttt";
 const DISPLAY_PREFS_KEY = "herdr.mobileWeb.displayPrefs.v2";
 const SHARED_NAVIGATION_PREFS_KEY = "herdr.mobileWeb.sharedNavigation.v1";
 const LEGACY_DISPLAY_PREFS_KEY = "herdr.mobileWeb.displayPrefs.v1";
@@ -1119,6 +1129,9 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
   const [noteDeleteTarget, setNoteDeleteTarget] = useState<ScopedNoteEntry | null>(null);
   const [deletingNote, setDeletingNote] = useState(false);
   const [backendSettingsOpen, setBackendSettingsOpen] = useState(false);
+  const [machineAddOpen, setMachineAddOpen] = useState(false);
+  const [machineAddBusy, setMachineAddBusy] = useState(false);
+  const [machineAddError, setMachineAddError] = useState<string | null>(null);
   const [terminalFontSizePx, setTerminalFontSizePx] = useState(
     initialPrefs.terminalFontSizePx,
   );
@@ -1318,6 +1331,10 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
         setBackendSettingsOpen(false);
         return true;
       }
+      if (machineAddOpen) {
+        setMachineAddOpen(false);
+        return true;
+      }
       if (spaceReorderMode) {
         cancelSpaceReorder();
         return true;
@@ -1334,11 +1351,32 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
     deletingNote,
     dialog,
     launchTarget,
+    machineAddOpen,
     menu,
     noteDeleteTarget,
     notesPanelOpen,
     spaceReorderMode,
   ]);
+
+  const submitMachineAdd = (input: MachineAddSubmit) => {
+    setMachineAddBusy(true);
+    setMachineAddError(null);
+    bridge
+      .addMachine(input)
+      .then(() => {
+        setMachineAddOpen(false);
+      })
+      .catch((error: unknown) => {
+        setMachineAddError(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => {
+        setMachineAddBusy(false);
+      });
+  };
+
+  // Gated on the serving bridge's machines capability, not on an existing
+  // SSH machine: the first connection must be addable from an empty tree.
+  const canAddMachine = supportsMachines(bridge.getRuntime(SAME_ORIGIN_BRIDGE_ID)?.capabilities);
 
   useEffect(() => {
     if (!spaceReorderMode) {
@@ -1471,17 +1509,20 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
   }, [launcherPresetStates]);
 
   useEffect(() => {
-    if (!launchRuntime || !supportsLauncherPresets(launchRuntime.capabilities)) {
+    // Presets are fetched for the launcher dialog target and for the selected
+    // runtime, so availability (e.g. the TTT plugin button) is known upfront.
+    const presetRuntime = launchRuntime ?? selectedRuntime;
+    if (!presetRuntime || !supportsLauncherPresets(presetRuntime.capabilities)) {
       return;
     }
-    const current = launcherPresetStatesRef.current[launchRuntime.id];
+    const current = launcherPresetStatesRef.current[presetRuntime.id];
     if (
-      current?.connectionKey === launchRuntime.connectionKey &&
+      current?.connectionKey === presetRuntime.connectionKey &&
       current.loadState === "loading"
     ) {
       return;
     }
-    const runtime = launchRuntime;
+    const runtime = presetRuntime;
     setLauncherPresetStates((states) => ({
       ...states,
       [runtime.id]: {
@@ -1531,6 +1572,9 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
     launchRuntime?.connectionKey,
     launchRuntime?.id,
     launchRuntime?.capabilities,
+    selectedRuntime?.connectionKey,
+    selectedRuntime?.id,
+    selectedRuntime?.capabilities,
   ]);
   const menuRuntime = menu ? bridge.getRuntime(menu.bridgeId) : null;
   const menuConnectionState =
@@ -3956,6 +4000,48 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
     void exec(runtime, action, true).then((ok) => ok && setLaunchTarget(null));
   };
 
+  // Bottom-right shortcut: opens TTT through the official plugin preset in the
+  // active workspace as a new tab. Hidden unless the bridge offers the preset
+  // (installed+enabled TTT plugin), so machines without it never show a button
+  // that would silently launch on another host.
+  const tttPresetAvailable = (() => {
+    const runtime = selectedRuntime;
+    if (!runtime) {
+      return false;
+    }
+    const presets = launcherPresetStates[runtime.id];
+    return (
+      presets?.connectionKey === runtime.connectionKey &&
+      !!presets.response?.presets.some((preset) => preset.id === TTT_PRESET_ID)
+    );
+  })();
+
+  const openTttEditor = () => {
+    const runtime = selectedRuntime;
+    const workspaceId = activeSpace?.workspace_id;
+    if (!runtime || !selectedCommands || !workspaceId) {
+      setError("Select a workspace to open TTT");
+      return;
+    }
+    if (!supportsLauncherPresets(runtime.capabilities)) {
+      setError("Launching is unavailable on this bridge. Update the bridge and reconnect.");
+      return;
+    }
+    const presets = launcherPresetStates[runtime.id];
+    if (
+      presets?.connectionKey !== runtime.connectionKey ||
+      !presets.response?.presets.some((preset) => preset.id === TTT_PRESET_ID)
+    ) {
+      setError("TTT is not available on this bridge");
+      return;
+    }
+    const resolvedSpec = resolveLaunchSpec(
+      { presetId: TTT_PRESET_ID, label: TTT_PRESET_LABEL, title: TTT_PRESET_LABEL },
+      snapshot?.panes ?? [],
+    );
+    void exec(runtime, () => selectedCommands.launchPresetTab(workspaceId, resolvedSpec), true);
+  };
+
   const renderTerminal = !isCompactLayout || showDetail;
   const appStyle = {
     "--sidebar-w": `${sidebarWidth}px`,
@@ -4116,6 +4202,9 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
             }
           }}
           onBackendSettings={() => setBackendSettingsOpen(true)}
+          onAddMachine={() => setMachineAddOpen(true)}
+          onDisableMachine={(machineId) => bridge.disableMachine(machineId)}
+          canAddMachine={canAddMachine}
           onCreateSpace={() =>
             selectedRuntime && selectedCommands
               ? void exec(
@@ -4609,6 +4698,27 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
           emptyMessage={launchEmptyMessage}
           onCancel={() => setLaunchTarget(null)}
           onSubmit={submitLaunch}
+        />
+      ) : null}
+      {tttPresetAvailable ? (
+        <button
+          type="button"
+          className="ttt-launch-button"
+          aria-label="Open TTT"
+          title="Open TTT"
+          disabled={busy}
+          onClick={openTttEditor}
+        >
+          Open TTT
+        </button>
+      ) : null}
+
+      {machineAddOpen ? (
+        <MachineAddDialog
+          busy={machineAddBusy}
+          error={machineAddError}
+          onCancel={() => setMachineAddOpen(false)}
+          onSubmit={submitMachineAdd}
         />
       ) : null}
 
@@ -6382,6 +6492,9 @@ function Switcher({
   onRefresh,
   onRefreshBridge,
   onBackendSettings,
+  onAddMachine,
+  onDisableMachine,
+  canAddMachine,
   onCreateSpace,
   onCreateTab,
   onScopedMenu,
@@ -6449,6 +6562,9 @@ function Switcher({
   onRefresh: () => void;
   onRefreshBridge: (bridgeId: BridgeId) => void;
   onBackendSettings: () => void;
+  onAddMachine: () => void;
+  onDisableMachine: (machineId: string) => Promise<void>;
+  canAddMachine: boolean;
   onCreateSpace: () => void;
   onCreateTab: (bridgeId: BridgeId, workspaceId: string) => void;
   onScopedMenu: (
@@ -6464,6 +6580,9 @@ function Switcher({
 }) {
   const [optionsMenu, setOptionsMenu] = useState<{ x: number; y: number } | null>(null);
   const [spaceOptionsMenu, setSpaceOptionsMenu] = useState<{ x: number; y: number } | null>(null);
+  const [machineDisableMenu, setMachineDisableMenu] = useState<MachineDisableMenuTarget | null>(
+    null,
+  );
   const [spaceDragTarget, setSpaceDragTarget] = useState<string | null | undefined>(undefined);
   const spaceDragRef = useRef<SpaceDragState | null>(null);
   const appearance = useAppearance();
@@ -7724,7 +7843,7 @@ function Switcher({
             {(scope === "space" || appearance === "tui") && hostBridgeViews.some((view) => view.snapshot) ? (
             <section className="sec" data-sidebar-section="spaces">
               <div className="sec-head">
-                <span className="sec-label">{machinesActive ? "machines" : "spaces"}</span>
+                <span className="sec-label">{machinesActive ? "workspaces" : "spaces"}</span>
                 <span className="sec-rule" />
                 <span className="sec-count mono">{spaceCount}</span>
                 {hostScope === "selected" ? (
@@ -7734,6 +7853,17 @@ function Switcher({
                     aria-label="New space"
                     title="New space"
                     onClick={onCreateSpace}
+                  >
+                    <Plus size={14} />
+                  </button>
+                ) : null}
+                {canAddMachine ? (
+                  <button
+                    className="sec-add"
+                    type="button"
+                    aria-label="Add machine"
+                    title="Add machine"
+                    onClick={onAddMachine}
                   >
                     <Plus size={14} />
                   </button>
@@ -7757,13 +7887,13 @@ function Switcher({
                   </button>
                 ) : null}
               </div>
-              {spaceCount === 0 ? (
-                <div className="empty">
-                  <strong>No spaces yet</strong>
-                  <span>{hostScope === "selected" ? "Tap + to create one." : "No enabled host has spaces."}</span>
-                </div>
-              ) : machinesActive ? (
+              {machinesActive ? (
                 <>
+                  {spaceCount === 0 ? (
+                    <div className="empty">
+                      <span>No workspaces on any machine.</span>
+                    </div>
+                  ) : null}
                   {machineGroups.map((group) => {
                     const entries = entriesForGroup(machineSpaceEntries, group);
                     const groupCollapseKey = sidebarGroupCollapseKey(
@@ -7773,6 +7903,7 @@ function Switcher({
                       group.key,
                     );
                     const collapsed = collapsedSidebarGroupKeys.has(groupCollapseKey);
+                    const disableTarget = machineDisableTarget(group);
                     return (
                       <Fragment key={group.key}>
                         <GroupHeader
@@ -7785,6 +7916,12 @@ function Switcher({
                           count={entries.length}
                           collapsed={collapsed}
                           onToggle={() => onToggleCollapsedGroup(groupCollapseKey)}
+                          onMenu={
+                            disableTarget
+                              ? (x, y) =>
+                                  setMachineDisableMenu({ ...disableTarget, x, y })
+                              : undefined
+                          }
                         />
                         {!collapsed
                           ? entries.map((entry, index) => renderSpaceEntry(entry, index, false))
@@ -7793,6 +7930,11 @@ function Switcher({
                     );
                   })}
                 </>
+              ) : spaceCount === 0 ? (
+                <div className="empty">
+                  <strong>No spaces yet</strong>
+                  <span>{hostScope === "selected" ? "Tap + to create one." : "No enabled host has spaces."}</span>
+                </div>
               ) : zonesActive ? (
                 <>
                   {zoneSplit.local.length > 0 ? (
@@ -8091,6 +8233,11 @@ function Switcher({
           onClose={() => setSpaceOptionsMenu(null)}
         />
       ) : null}
+      <MachineDisableFlow
+        menu={machineDisableMenu}
+        onDisable={onDisableMachine}
+        onCloseMenu={() => setMachineDisableMenu(null)}
+      />
     </>
   );
 }
@@ -9239,6 +9386,7 @@ function GroupHeader({
   collapsed,
   nested = false,
   onToggle,
+  onMenu,
 }: {
   label: string;
   bridgeColor?: string;
@@ -9248,6 +9396,8 @@ function GroupHeader({
   collapsed: boolean;
   nested?: boolean;
   onToggle: () => void;
+  /** Optional context menu (e.g. machine disable); leaves left-click collapse untouched. */
+  onMenu?: (x: number, y: number) => void;
 }) {
   return (
     <button
@@ -9256,9 +9406,28 @@ function GroupHeader({
       data-group-header="true"
       data-nested={nested ? "true" : undefined}
       aria-expanded={!collapsed}
+      aria-haspopup={onMenu ? "menu" : undefined}
       aria-label={`${collapsed ? "Expand" : "Collapse"} ${label} group`}
       title={`${collapsed ? "Expand" : "Collapse"} ${label}`}
       onClick={onToggle}
+      {...(onMenu
+        ? {
+            onContextMenu: (event: ReactMouseEvent<HTMLButtonElement>) => {
+              event.preventDefault();
+              focusOverlayTrigger(event.currentTarget);
+              onMenu(event.clientX, event.clientY);
+            },
+            onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+              if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) {
+                return;
+              }
+              event.preventDefault();
+              focusOverlayTrigger(event.currentTarget);
+              const bounds = event.currentTarget.getBoundingClientRect();
+              onMenu(bounds.left + 12, bounds.top + 12);
+            },
+          }
+        : undefined)}
     >
       {collapsed ? (
         <ChevronRight className="grp-space-chevron" size={13} aria-hidden="true" />

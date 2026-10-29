@@ -18,6 +18,14 @@ const BUILTIN_OMP_ID: &str = "builtin:omp";
 const BUILTIN_GROK_ID: &str = "builtin:grok";
 const BUILTIN_OPENCODE_ID: &str = "builtin:opencode";
 
+/// TTT opens through the installed official Herdr plugin, never a plain argv
+/// spawn: the plugin pane keeps Herdr's right-click routing and directory
+/// resolution (checkout_path -> focused_pane_cwd -> workspace_cwd -> '.').
+pub const BUILTIN_TTT_ID: &str = "builtin:ttt";
+pub const TTT_PLUGIN_ID: &str = "ttt.editor";
+pub const TTT_PLUGIN_ENTRYPOINT: &str = "editor";
+pub const TTT_PRESET_LABEL: &str = "TTT Editor";
+
 const KNOWN_AGENT_HINTS: &[&str] = &[
     "amp",
     "amp-local",
@@ -79,6 +87,10 @@ pub enum LauncherPresetLaunch {
         args: Vec<String>,
     },
     CustomCommand(CustomCommandPreset),
+    PluginPane {
+        plugin_id: String,
+        entrypoint: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -267,6 +279,7 @@ impl ResolvedLauncherPreset {
             LauncherPresetLaunch::Shell => None,
             LauncherPresetLaunch::ManagedAgent { kind, .. } => Some(kind.as_str()),
             LauncherPresetLaunch::CustomCommand(command) => command.agent_hint.as_deref(),
+            LauncherPresetLaunch::PluginPane { .. } => None,
         }
     }
 }

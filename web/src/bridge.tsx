@@ -11,11 +11,13 @@ import type { ReactNode } from "react";
 import { Capacitor } from "@capacitor/core";
 import { Preferences } from "@capacitor/preferences";
 import { fetchWithTimeout } from "./fetchWithTimeout";
+import { apiErrorMessage } from "./bridgeApi";
 import {
   buildMachineHttpPath,
   buildMachineWsUrl,
   machineRuntimeId,
   parseMachinesList,
+  type MachineAddInput,
   type MachineInfo,
 } from "./machines";
 import { addNativeResumeHandler } from "./native";
@@ -112,6 +114,8 @@ export type BridgeManager = {
   markBridgeUsed: (bridgeId: BridgeId) => void;
   retryBridgeProbe: (bridgeId: BridgeId) => void;
   addBackend: (input: BackendInput, enable?: boolean) => Promise<BridgeBackendProfile>;
+  addMachine: (input: MachineAddInput) => Promise<void>;
+  disableMachine: (machineId: string) => Promise<void>;
   updateBackend: (id: string, input: BackendInput) => Promise<BridgeBackendProfile>;
   deleteBackend: (id: string) => void;
   probeBackend: (baseUrl: string) => Promise<BridgeCapabilities>;
@@ -128,6 +132,9 @@ const LEGACY_STORE_KEY = "herdrWeb.bridgeBackends.v1";
 const NOTE_DRAFT_STORAGE_PREFIX = "herdr-web:note-draft:v1:";
 const STORE_VERSION = 2;
 const APP_MIN_WEB_COMPAT = 1;
+/** Matches the bridge's `herdr machine add` child timeout (remote preparation
+ * can take minutes on first contact). */
+const MACHINE_ADD_TIMEOUT_MS = 300_000;
 export const SAME_ORIGIN_BRIDGE_COLOR = "#b4befe";
 const BACKEND_COLOR_PALETTE = [
   "#89b4fa",
@@ -448,6 +455,47 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
 
   const probeBackend = useCallback((baseUrl: string) => probeBridgeBaseUrl(baseUrl), []);
 
+  // Registers a saved SSH machine through the bridge's native `herdr machine
+  // add` route; the browser never talks to SSH itself. Registration can take
+  // a while on first contact, so the request timeout matches the bridge's.
+  const addMachine = useCallback(
+    async (input: MachineAddInput) => {
+      const response = await fetchWithTimeout(buildHttpUrl(null, "/api/machines/add"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input),
+        timeoutMs: MACHINE_ADD_TIMEOUT_MS,
+      });
+      if (!response.ok) {
+        const message = (await apiErrorMessage(response)) ?? `machine add failed (${response.status})`;
+        throw new Error(message);
+      }
+      // Discovery is server-driven: re-running the same-origin probe makes
+      // the existing machines effect refetch the updated list.
+      retryBridgeProbe(SAME_ORIGIN_BRIDGE_ID);
+    },
+    [retryBridgeProbe],
+  );
+
+  // Disables a saved SSH machine through the bridge's native `herdr machine
+  // disable` route; the profile is retained by the CLI, only the connection
+  // is dropped, and discovery refetches the list without the machine.
+  const disableMachine = useCallback(
+    async (machineId: string) => {
+      const response = await fetchWithTimeout(
+        buildHttpUrl(null, `/api/machines/${encodeURIComponent(machineId)}/disable`),
+        { method: "POST" },
+      );
+      if (!response.ok) {
+        const message =
+          (await apiErrorMessage(response)) ?? `machine disable failed (${response.status})`;
+        throw new Error(message);
+      }
+      retryBridgeProbe(SAME_ORIGIN_BRIDGE_ID);
+    },
+    [retryBridgeProbe],
+  );
+
   const getRuntime = useCallback(
     (bridgeId: BridgeId | null | undefined) =>
       bridgeId ? (availableRuntimes.find((runtime) => runtime.id === bridgeId) ?? null) : null,
@@ -480,12 +528,16 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
       markBridgeUsed,
       retryBridgeProbe,
       addBackend,
+      addMachine,
+      disableMachine,
       updateBackend,
       deleteBackend,
       probeBackend,
     }),
     [
       addBackend,
+      addMachine,
+      disableMachine,
       availableRuntimes,
       deleteBackend,
       effectiveLastSelectedBridgeId,

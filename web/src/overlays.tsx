@@ -350,6 +350,7 @@ export function ConfirmDialog({
   message,
   confirmLabel,
   busy,
+  error,
   onCancel,
   onConfirm,
 }: {
@@ -357,6 +358,8 @@ export function ConfirmDialog({
   message?: string;
   confirmLabel: string;
   busy?: boolean;
+  /** Failure text shown with the dialog still open, e.g. a failed request. */
+  error?: string;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
@@ -407,6 +410,11 @@ export function ConfirmDialog({
         {message ? (
           <div id={messageId} className="modal-message">
             {message}
+          </div>
+        ) : null}
+        {error ? (
+          <div className="modal-message" role="alert" data-error="true">
+            {error}
           </div>
         ) : null}
         <div className="modal-actions">

@@ -4,7 +4,7 @@ use std::fmt;
 use std::io::{self, ErrorKind, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -36,21 +36,24 @@ use herdr_compat::api::client::{ApiClient, ApiClientError};
 use herdr_compat::api::schema::{
     AgentStartParams, AgentStatus, EmptyParams, EventsSubscribeParams, LayoutApplyParams,
     LayoutExportParams, Method, PaneInfo, PaneLayoutSnapshot, PaneListParams, PaneMoveDestination,
-    PaneSplitParams, PaneTarget, Request, ResponseResult, SessionSnapshot, SplitDirection,
-    Subscription, SubscriptionEventData, SubscriptionEventEnvelope, SubscriptionEventKind,
-    TabCreateParams, TabInfo, TabListParams, TabTarget, WorkspaceInfo,
+    PaneSplitParams, PaneTarget, PluginListParams, PluginPaneOpenParams, PluginPanePlacement,
+    Request, ResponseResult, SessionSnapshot, SplitDirection, Subscription, SubscriptionEventData,
+    SubscriptionEventEnvelope, SubscriptionEventKind, TabCreateParams, TabInfo, TabListParams,
+    TabTarget, WorkspaceInfo,
 };
 use herdr_compat::protocol::{
-    self, AttachScrollDirection, AttachScrollSource, ClientMessage, RenderEncoding, ServerMessage,
-    MAX_FRAME_SIZE, MAX_GRAPHICS_FRAME_SIZE, PROTOCOL_VERSION,
+    self, AttachScrollDirection, AttachScrollSource, ClientMessage, ClientMouseButton,
+    ClientMouseKind, ClientMousePosition, RenderEncoding, ServerMessage, MAX_FRAME_SIZE,
+    MAX_GRAPHICS_FRAME_SIZE, PROTOCOL_VERSION,
 };
 
 use crate::agent_activity::{AgentActivityListResponse, AgentActivityManager};
 use crate::agent_pins::{AgentPinsError, AgentPinsListResponse, AgentPinsManager};
 use crate::launcher_presets::{
     layout_leaf_for_preset, split_layout_with_command_preset, CustomCommandPreset,
-    LauncherPresetLaunch, LauncherPresetStore, ManagedAgentKind, ResolvedLauncherPreset,
-    MAX_LABEL_BYTES,
+    LauncherPresetDisplay, LauncherPresetLaunch, LauncherPresetStore, ManagedAgentKind,
+    ResolvedLauncherPreset, BUILTIN_TTT_ID, MAX_LABEL_BYTES, TTT_PLUGIN_ENTRYPOINT, TTT_PLUGIN_ID,
+    TTT_PRESET_LABEL,
 };
 use crate::notes::{
     AttachNoteRequest, CreateNoteRequest, NoteResponse, NotesError, NotesListQuery,
@@ -251,6 +254,35 @@ enum TerminalClientFrame {
         #[serde(default = "default_scroll_lines")]
         lines: u16,
     },
+    Mouse {
+        kind: TerminalMouseKind,
+        button: Option<TerminalMouseButton>,
+        column: u16,
+        row: u16,
+        #[serde(default)]
+        modifiers: u8,
+        #[serde(default = "default_scroll_lines")]
+        lines: u16,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum TerminalMouseKind {
+    Down,
+    Up,
+    Drag,
+    Moved,
+    ScrollUp,
+    ScrollDown,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum TerminalMouseButton {
+    Left,
+    Middle,
+    Right,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -268,6 +300,8 @@ fn default_scroll_lines() -> u16 {
 enum TerminalOutput {
     Bytes(Bytes),
     Close(String),
+    /// Daemon-reported pane mouse state (`ServerMessage::MouseCapture`).
+    MouseCapture(bool),
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -681,6 +715,9 @@ struct SharedTerminalSession {
     output_tx: tokio::sync::broadcast::Sender<TerminalOutput>,
     client_count: Arc<AtomicUsize>,
     connection_closed: Arc<ConnectionClosed>,
+    /// Latest daemon-reported mouse state, so a joining client learns the
+    /// current flag even when the last MouseCapture broadcast predates it.
+    mouse_capture: Arc<AtomicBool>,
 }
 
 /// Sender for daemon-bound terminal messages that bounds how many input
@@ -723,6 +760,7 @@ enum BridgeError {
     Forbidden(String),
     NotFound(String),
     Protocol(String),
+    ServiceUnavailable(String),
 }
 
 #[derive(Debug)]
@@ -747,6 +785,7 @@ impl fmt::Display for BridgeError {
             Self::Forbidden(message) => write!(f, "{message}"),
             Self::NotFound(message) => write!(f, "{message}"),
             Self::Protocol(message) => write!(f, "{message}"),
+            Self::ServiceUnavailable(message) => write!(f, "{message}"),
         }
     }
 }
@@ -758,6 +797,7 @@ impl IntoResponse for BridgeError {
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
+            Self::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::Api(_) | Self::Io(_) | Self::Protocol(_) => StatusCode::BAD_GATEWAY,
         };
         let body = Json(serde_json::json!({
@@ -1214,6 +1254,14 @@ fn build_app(state: BridgeState, request_policy: RequestPolicy, static_dir: Path
         .route(
             "/api/machines",
             get(machines_list_handler).options(preflight_handler),
+        )
+        .route(
+            "/api/machines/add",
+            post(machine_add_handler).options(preflight_handler),
+        )
+        .route(
+            "/api/machines/{machine_id}/disable",
+            post(machine_disable_handler).options(preflight_handler),
         )
         .route(
             "/api/machines/{machine_id}/snapshot",
@@ -2293,7 +2341,50 @@ async fn launcher_presets_handler(
     headers: HeaderMap,
 ) -> Result<Json<crate::launcher_presets::LauncherPresetsResponse>, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
-    Ok(Json(state.launcher_presets.response()))
+    let mut response = state.launcher_presets.response();
+    // The official TTT plugin pane launch is offered only while Herdr reports
+    // the plugin enabled on the serving host; anything unusual fails closed.
+    let api = state.api.clone();
+    let ttt_available = tokio::task::spawn_blocking(move || ttt_plugin_enabled(&api))
+        .await
+        .unwrap_or(false);
+    if ttt_available {
+        response.presets.insert(
+            0,
+            LauncherPresetDisplay {
+                id: BUILTIN_TTT_ID.to_string(),
+                label: TTT_PRESET_LABEL.to_string(),
+                agent_hint: None,
+                built_in: true,
+            },
+        );
+    }
+    Ok(Json(response))
+}
+
+/// Checks the installed plugin registry over the daemon socket. `plugin.list`
+/// with a specific id is a cheap local call; the short timeout keeps a wedged
+/// daemon from hanging preset listing.
+fn ttt_plugin_enabled(api: &ApiClient) -> bool {
+    let request = Request {
+        id: "herdr-web:launcher:ttt-plugin-check".to_string(),
+        method: Method::PluginList(PluginListParams {
+            plugin_id: Some(TTT_PLUGIN_ID.to_string()),
+        }),
+    };
+    let response = api
+        .request_value_with_timeout(&request, Duration::from_secs(2))
+        .ok()
+        .and_then(|value| herdr_compat::api::client::parse_response_value(value).ok());
+    match response {
+        Some(success) => match success.result {
+            ResponseResult::PluginList { plugins } => plugins
+                .iter()
+                .any(|plugin| plugin.plugin_id == TTT_PLUGIN_ID && plugin.enabled),
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 async fn launcher_preset_launch_handler(
@@ -2304,11 +2395,25 @@ async fn launcher_preset_launch_handler(
     ensure_allowed_request(&headers, &state.request_policy)
         .map_err(LauncherPresetError::from_request_policy_error)?;
     let body = parse_launcher_preset_launch_request(&body)?;
-    let preset = state
-        .launcher_presets
-        .preset(&body.preset_id)
-        .cloned()
-        .ok_or_else(|| LauncherPresetError::not_found("launcher preset not found"))?;
+    // builtin:ttt is not part of the configured store: it launches through the
+    // installed TTT plugin with hard-coded ids, never browser-supplied argv.
+    let preset = if body.preset_id == BUILTIN_TTT_ID {
+        ResolvedLauncherPreset {
+            id: body.preset_id.clone(),
+            label: TTT_PRESET_LABEL.to_string(),
+            launch: LauncherPresetLaunch::PluginPane {
+                plugin_id: TTT_PLUGIN_ID.to_string(),
+                entrypoint: TTT_PLUGIN_ENTRYPOINT.to_string(),
+            },
+            built_in: true,
+        }
+    } else {
+        state
+            .launcher_presets
+            .preset(&body.preset_id)
+            .cloned()
+            .ok_or_else(|| LauncherPresetError::not_found("launcher preset not found"))?
+    };
     let title = resolve_launch_title(body.title.as_deref(), &preset.label)?;
     info!(
         preset_id = %preset.id,
@@ -2405,6 +2510,19 @@ fn launch_preset_with(
                 LauncherPresetLaunch::CustomCommand(command) => {
                     launch_layout_tab(api, preset, title, workspace_id, command)
                 }
+                LauncherPresetLaunch::PluginPane {
+                    plugin_id,
+                    entrypoint,
+                } => launch_plugin_pane(
+                    api,
+                    preset,
+                    title,
+                    Some(workspace_id),
+                    None,
+                    None,
+                    plugin_id,
+                    entrypoint,
+                ),
             }
         }
         LauncherPresetLaunchTarget::Split {
@@ -2438,6 +2556,19 @@ fn launch_preset_with(
                     target_pane_id,
                     direction,
                     command,
+                ),
+                LauncherPresetLaunch::PluginPane {
+                    plugin_id,
+                    entrypoint,
+                } => launch_plugin_pane(
+                    api,
+                    preset,
+                    title,
+                    None,
+                    Some(target_pane_id),
+                    Some(direction),
+                    plugin_id,
+                    entrypoint,
                 ),
             }
         }
@@ -2522,6 +2653,54 @@ fn launch_builtin_shell_split(
         workspace_id: pane.workspace_id,
         tab_id: pane.tab_id,
         pane_id: pane.pane_id,
+    })
+}
+
+/// Opens a plugin-owned pane through Herdr's official `plugin.pane.open`.
+/// Plugin entrypoints carry their own pane metadata (right-click routing and
+/// directory resolution), so no rename or cwd override is applied.
+#[allow(clippy::too_many_arguments)]
+fn launch_plugin_pane(
+    api: &mut impl LauncherApiRequest,
+    preset: &ResolvedLauncherPreset,
+    title: &str,
+    workspace_id: Option<String>,
+    target_pane_id: Option<String>,
+    direction: Option<SplitDirection>,
+    plugin_id: &str,
+    entrypoint: &str,
+) -> Result<LauncherPresetLaunchResponse, LauncherPresetError> {
+    let result = api.request(
+        "herdr-web:launcher:plugin-pane",
+        Method::PluginPaneOpen(PluginPaneOpenParams {
+            plugin_id: plugin_id.to_string(),
+            entrypoint: entrypoint.to_string(),
+            placement: Some(if target_pane_id.is_some() {
+                PluginPanePlacement::Split
+            } else {
+                PluginPanePlacement::Tab
+            }),
+            width: None,
+            height: None,
+            workspace_id,
+            target_pane_id,
+            direction,
+            cwd: None,
+            focus: true,
+            env: HashMap::new(),
+        }),
+    )?;
+    let ResponseResult::PluginPaneOpened { plugin_pane } = result else {
+        return Err(LauncherPresetError::launch_failed(
+            "unexpected response for plugin pane launch",
+        ));
+    };
+    Ok(LauncherPresetLaunchResponse {
+        preset_id: preset.id.clone(),
+        title: title.into(),
+        workspace_id: plugin_pane.pane.workspace_id,
+        tab_id: plugin_pane.pane.tab_id,
+        pane_id: plugin_pane.pane.pane_id,
     })
 }
 
@@ -3577,6 +3756,124 @@ async fn machines_list_handler(
     }))
 }
 
+#[derive(Debug, Deserialize)]
+struct MachineAddRequest {
+    target: String,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    session: Option<String>,
+}
+
+/// Optional machine-add field: blank means "let the CLI apply its default",
+/// anything option-like or control-bearing is rejected before it can reach
+/// an argv slot.
+fn optional_machine_arg(value: Option<&str>, field: &str) -> Result<Option<String>, BridgeError> {
+    match value.map(str::trim) {
+        None | Some("") => Ok(None),
+        Some(value) if crate::machines::is_valid_machine_arg(value) => Ok(Some(value.to_string())),
+        Some(_) => Err(BridgeError::BadRequest(format!("invalid {field}"))),
+    }
+}
+
+/// Registers a saved SSH machine through the native `herdr machine add` CLI
+/// on the bridge host. This is the browser-exposed equivalent of the operator
+/// running the command themselves: the bridge only forwards validated argv
+/// entries and never touches SSH trust, keys, or endpoints.json directly.
+async fn machine_add_handler(
+    State(state): State<BridgeState>,
+    headers: HeaderMap,
+    Json(request): Json<MachineAddRequest>,
+) -> Result<Json<MachinesListResponse>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    // Fail closed BEFORE invoking the CLI: `herdr machine add` always writes
+    // the operator's real Herdr client state, so with a relocated catalog the
+    // registration would modify a different file than the one being served.
+    if crate::machines::catalog_override_active() {
+        return Err(BridgeError::ServiceUnavailable(
+            "machine add is unavailable: HERDR_WEB_MACHINES_ENDPOINTS relocates the machine \
+             catalog, which the native CLI does not write; register machines through the CLI \
+             directly"
+                .to_string(),
+        ));
+    }
+    let target = request.target.trim().to_string();
+    if !crate::machines::is_valid_ssh_target(&target) {
+        return Err(BridgeError::BadRequest("invalid ssh target".to_string()));
+    }
+    let label = optional_machine_arg(request.label.as_deref(), "machine label")?;
+    let session = optional_machine_arg(request.session.as_deref(), "remote session")?;
+    let add_label = label.clone();
+    let add_session = session.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::machines::run_machine_add(&target, add_label.as_deref(), add_session.as_deref())
+    })
+    .await
+    .map_err(|err| BridgeError::Protocol(format!("machine add task failed: {err}")))?
+    .map_err(|message| BridgeError::Protocol(format!("machine add failed: {message}")))?;
+    // The catalog reloads from Herdr's client state per request, so a
+    // successful registration is visible immediately.
+    let machines = state.machines.catalog().machines();
+    Ok(Json(MachinesListResponse {
+        version: 1,
+        machines,
+    }))
+}
+
+/// Disables a saved SSH machine through the native `herdr machine disable`
+/// CLI on the bridge host — the browser-exposed equivalent of the operator
+/// running the command themselves. The saved profile is retained in Herdr's
+/// own client state; the bridge never edits endpoints.json directly.
+async fn machine_disable_handler(
+    State(state): State<BridgeState>,
+    AxumPath(machine_id): AxumPath<String>,
+    headers: HeaderMap,
+) -> Result<Json<MachinesListResponse>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    // Fail closed BEFORE invoking the CLI, exactly as machine add does: with
+    // a relocated catalog the CLI would modify a different file than the one
+    // being served.
+    if crate::machines::catalog_override_active() {
+        return Err(BridgeError::ServiceUnavailable(
+            "machine disable is unavailable: HERDR_WEB_MACHINES_ENDPOINTS relocates the machine \
+             catalog, which the native CLI does not write; disable machines through the CLI \
+             directly"
+                .to_string(),
+        ));
+    }
+    // Resolving rejects invalid ids, the local machine, unknown machines,
+    // and already-disabled entries before anything can be spawned.
+    match state.machines.catalog().resolve(&machine_id) {
+        Ok(crate::machines::ResolvedMachine::Local) => Err(BridgeError::BadRequest(
+            "cannot disable the local machine".to_string(),
+        )),
+        Ok(crate::machines::ResolvedMachine::Ssh(endpoint)) => {
+            let profile_id = endpoint.id;
+            tokio::task::spawn_blocking(move || crate::machines::run_machine_disable(&profile_id))
+                .await
+                .map_err(|err| {
+                    BridgeError::Protocol(format!("machine disable task failed: {err}"))
+                })?
+                .map_err(|message| {
+                    BridgeError::Protocol(format!("machine disable failed: {message}"))
+                })?;
+            // The catalog reloads from Herdr's client state per request, so
+            // the disabled machine leaves the list immediately.
+            let machines = state.machines.catalog().machines();
+            Ok(Json(MachinesListResponse {
+                version: 1,
+                machines,
+            }))
+        }
+        Err(crate::machines::MachineError::Unknown(id)) => {
+            Err(BridgeError::NotFound(format!("unknown machine: {id}")))
+        }
+        Err(crate::machines::MachineError::Disabled(id)) => Err(BridgeError::BadRequest(format!(
+            "machine is disabled: {id}"
+        ))),
+    }
+}
+
 async fn machine_snapshot_handler(
     State(state): State<BridgeState>,
     AxumPath(machine_id): AxumPath<String>,
@@ -3741,7 +4038,7 @@ async fn terminal_ws_handler(
         return err.into_response();
     }
     let target = state.local_route_target();
-    ws.on_upgrade(move |socket| handle_terminal_socket(socket, state, query, target))
+    ws.on_upgrade(move |socket| handle_terminal_socket(socket, query, target))
         .into_response()
 }
 
@@ -3759,7 +4056,7 @@ async fn machine_terminal_ws_handler(
         Ok((target, _)) => target,
         Err(err) => return err.into_response(),
     };
-    ws.on_upgrade(move |socket| handle_terminal_socket(socket, state, query, target))
+    ws.on_upgrade(move |socket| handle_terminal_socket(socket, query, target))
         .into_response()
 }
 
@@ -4119,7 +4416,6 @@ async fn handle_ui_events_socket(socket: WebSocket, state: BridgeState) {
 
 async fn handle_terminal_socket(
     socket: WebSocket,
-    state: BridgeState,
     query: TerminalQuery,
     target: MachineRouteTarget,
 ) {
@@ -4135,7 +4431,7 @@ async fn handle_terminal_socket(
         .output_encoding
         .unwrap_or(TerminalOutputWireEncoding::Identity);
     let (mut ws_sender, mut ws_receiver) = socket.split();
-    let session = match acquire_terminal_session(
+    let (session, reserved_rx) = match acquire_terminal_session(
         target.clone(),
         terminal_id.clone(),
         cols,
@@ -4144,7 +4440,7 @@ async fn handle_terminal_socket(
     )
     .await
     {
-        Ok(session) => session,
+        Ok((session, reserved_rx)) => (session, reserved_rx),
         Err(err) => {
             let _ = send_websocket_message(
                 &mut ws_sender,
@@ -4157,7 +4453,10 @@ async fn handle_terminal_socket(
     };
 
     let write_tx = session.write_tx.clone();
-    let mut terminal_rx = session.output_tx.subscribe();
+    // acquire reserved this receiver before the daemon reader started (fresh
+    // attach) or created it under the map lock (join): the initial attach frame
+    // cannot broadcast with zero receivers.
+    let mut terminal_rx = reserved_rx;
     if output_encoding == TerminalOutputWireEncoding::Gzip {
         let ack = Message::Text(TERMINAL_OUTPUT_GZIP_ACKNOWLEDGEMENT.into());
         if send_websocket_message(&mut ws_sender, ack, "terminal")
@@ -4167,6 +4466,25 @@ async fn handle_terminal_socket(
             release_terminal_session(&target.terminal_sessions, &terminal_id, &session);
             return;
         }
+    }
+    // Seed the joining client with the latest known pane mouse state; the
+    // daemon only rebroadcasts MouseCapture on focus changes, so a client
+    // attaching to an already-captured pane would otherwise stay un-gated
+    // until the next focus event.
+    let mouse_seed = serde_json::json!({
+        "type": "mouse_mode",
+        "enabled": session.mouse_capture.load(Ordering::Acquire),
+    });
+    if send_websocket_message(
+        &mut ws_sender,
+        Message::Text(mouse_seed.to_string().into()),
+        "terminal",
+    )
+    .await
+    .is_err()
+    {
+        release_terminal_session(&target.terminal_sessions, &terminal_id, &session);
+        return;
     }
 
     let mut output_coalescer = TerminalOutputCoalescer::new(coalesce_window);
@@ -4217,6 +4535,7 @@ async fn handle_terminal_socket(
                         &mut ws_sender,
                         &mut output_coalescer,
                         output_encoding,
+                        &session.mouse_capture,
                     )
                     .await
                     {
@@ -4244,6 +4563,7 @@ async fn handle_terminal_socket(
                         &mut ws_sender,
                         &mut output_coalescer,
                         output_encoding,
+                        &session.mouse_capture,
                     )
                     .await
                     {
@@ -4261,7 +4581,10 @@ async fn handle_terminal_socket(
         }
     }
 
-    release_terminal_session(&state.terminal_sessions, &terminal_id, &session);
+    // Machine routes keep per-machine session maps; releasing into the local
+    // map left the machine session "active" but Detached, so every re-attach
+    // joined a dead session.
+    release_terminal_session(&target.terminal_sessions, &terminal_id, &session);
 }
 
 async fn handle_terminal_output_deadline(
@@ -4297,6 +4620,7 @@ async fn handle_terminal_output_message(
     ws_sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     output_coalescer: &mut TerminalOutputCoalescer,
     output_encoding: TerminalOutputWireEncoding,
+    mouse_capture: &AtomicBool,
 ) -> bool {
     match output {
         Ok(TerminalOutput::Bytes(bytes)) => {
@@ -4335,6 +4659,17 @@ async fn handle_terminal_output_message(
             .await;
             false
         }
+        Ok(TerminalOutput::MouseCapture(enabled)) => {
+            mouse_capture.store(enabled, Ordering::Release);
+            let payload = serde_json::json!({ "type": "mouse_mode", "enabled": enabled });
+            let _ = send_websocket_message(
+                ws_sender,
+                Message::Text(payload.to_string().into()),
+                "terminal",
+            )
+            .await;
+            true
+        }
         Err(tokio::sync::broadcast::error::RecvError::Lagged(frames)) => {
             // Dropped frames would silently corrupt the stateful ANSI stream.
             // Close the socket without a "closed" frame so the client
@@ -4360,13 +4695,18 @@ fn handle_terminal_client_message(
     }
 }
 
+/// Receiver reserved before a daemon reader starts (fresh attach) or created
+/// under the map lock (join) so the first client cannot miss initial attach
+/// frames such as reset and DECSET/mouse mode sequences.
+type ReservedTerminalRx = tokio::sync::broadcast::Receiver<TerminalOutput>;
+
 async fn acquire_terminal_session(
     target: MachineRouteTarget,
     terminal_id: String,
     cols: u16,
     rows: u16,
     takeover: bool,
-) -> Result<SharedTerminalSession, BridgeError> {
+) -> Result<(SharedTerminalSession, ReservedTerminalRx), BridgeError> {
     tokio::task::spawn_blocking(move || {
         // What to do after inspecting the maps under one lock hold.
         enum AttachStep {
@@ -4392,7 +4732,10 @@ async fn acquire_terminal_session(
                 })?;
                 if let Some(session) = sessions.active.get(&terminal_id) {
                     session.client_count.fetch_add(1, Ordering::AcqRel);
-                    return Ok(session.clone());
+                    // Subscribe under the map lock so a frame broadcast after the
+                    // join decision is buffered for this client, not lost.
+                    let rx = session.output_tx.subscribe();
+                    return Ok((session.clone(), rx));
                 }
                 if let Some(gate) = sessions.attaching.get(&terminal_id) {
                     if gate_waits < MAX_TERMINAL_DETACH_DRAIN_WAITS {
@@ -4463,27 +4806,36 @@ async fn acquire_terminal_session(
             // stalled daemon cannot wedge every other terminal client. The
             // gate keeps concurrent acquires for this terminal waiting; they
             // join the published session once it opens.
-            let handshake = || -> Result<SharedTerminalSession, BridgeError> {
-                let protocol_version = terminal_attach_protocol(&target.api)?;
-                let (output_tx, _) = tokio::sync::broadcast::channel(256);
-                let attach = open_terminal_attach(
-                    target.client_socket_path.clone(),
-                    terminal_id.clone(),
-                    cols,
-                    rows,
-                    takeover,
-                    protocol_version,
-                    output_tx.clone(),
-                )?;
-                Ok(SharedTerminalSession {
-                    write_tx: attach.write_tx,
-                    output_tx,
-                    client_count: Arc::new(AtomicUsize::new(0)),
-                    connection_closed: attach.connection_closed,
-                })
-            };
-            let session = match handshake() {
-                Ok(session) => session,
+            let handshake =
+                || -> Result<(SharedTerminalSession, ReservedTerminalRx), BridgeError> {
+                    // The receiver exists before open_terminal_attach starts its
+                    // reader thread, so the daemon's initial attach frame (reset,
+                    // DECSET/mouse modes) is buffered for the first client instead
+                    // of broadcasting with zero receivers.
+                    let protocol_version = terminal_attach_protocol(&target.api)?;
+                    let (output_tx, first_rx) = tokio::sync::broadcast::channel(256);
+                    let attach = open_terminal_attach(
+                        target.client_socket_path.clone(),
+                        terminal_id.clone(),
+                        cols,
+                        rows,
+                        takeover,
+                        protocol_version,
+                        output_tx.clone(),
+                    )?;
+                    Ok((
+                        SharedTerminalSession {
+                            write_tx: attach.write_tx,
+                            output_tx,
+                            client_count: Arc::new(AtomicUsize::new(0)),
+                            connection_closed: attach.connection_closed,
+                            mouse_capture: Arc::new(AtomicBool::new(false)),
+                        },
+                        first_rx,
+                    ))
+                };
+            let (session, first_rx) = match handshake() {
+                Ok((session, first_rx)) => (session, first_rx),
                 Err(err) => {
                     release_attach_gate(&target.terminal_sessions, &terminal_id, &gate);
                     return Err(err);
@@ -4501,11 +4853,12 @@ async fn acquire_terminal_session(
                 // Safety net: only reachable via the stuck-gate fallback.
                 // Keep the established session and detach the redundant one.
                 existing.client_count.fetch_add(1, Ordering::AcqRel);
+                let rx = existing.output_tx.subscribe();
                 let existing = existing.clone();
                 drop(sessions);
                 let _ = session.write_tx.send(ClientMessage::Detach);
                 release_attach_gate(&target.terminal_sessions, &terminal_id, &gate);
-                return Ok(existing);
+                return Ok((existing, rx));
             }
             if sessions.draining.contains_key(&terminal_id) {
                 // A connection attached and began detaching while we were
@@ -4533,7 +4886,7 @@ async fn acquire_terminal_session(
             sessions.active.insert(terminal_id.clone(), session.clone());
             drop(sessions);
             release_attach_gate(&target.terminal_sessions, &terminal_id, &gate);
-            return Ok(session);
+            return Ok((session, first_rx));
         }
     })
     .await
@@ -5064,6 +5417,57 @@ fn handle_terminal_text_frame(write_tx: &TerminalWriter, text: &str) -> Result<(
             })
             .map(|_| ())
             .map_err(|_| "terminal writer closed".to_string()),
+        TerminalClientFrame::Mouse {
+            kind,
+            button,
+            column,
+            row,
+            modifiers,
+            lines,
+        } => {
+            // Strict allowlist: button-carrying kinds reject a missing/absent
+            // button, button-less kinds reject one, so browser input can never
+            // smuggle arbitrary native messages through.
+            let mouse_kind = match (kind, button) {
+                (TerminalMouseKind::Down, Some(button)) => ClientMouseKind::Down(match button {
+                    TerminalMouseButton::Left => ClientMouseButton::Left,
+                    TerminalMouseButton::Middle => ClientMouseButton::Middle,
+                    TerminalMouseButton::Right => ClientMouseButton::Right,
+                }),
+                (TerminalMouseKind::Up, Some(button)) => ClientMouseKind::Up(match button {
+                    TerminalMouseButton::Left => ClientMouseButton::Left,
+                    TerminalMouseButton::Middle => ClientMouseButton::Middle,
+                    TerminalMouseButton::Right => ClientMouseButton::Right,
+                }),
+                (TerminalMouseKind::Drag, Some(button)) => ClientMouseKind::Drag(match button {
+                    TerminalMouseButton::Left => ClientMouseButton::Left,
+                    TerminalMouseButton::Middle => ClientMouseButton::Middle,
+                    TerminalMouseButton::Right => ClientMouseButton::Right,
+                }),
+                (TerminalMouseKind::Moved, None) => ClientMouseKind::Moved,
+                (TerminalMouseKind::ScrollUp, None) => ClientMouseKind::ScrollUp,
+                (TerminalMouseKind::ScrollDown, None) => ClientMouseKind::ScrollDown,
+                (kind, button) => {
+                    return Err(format!(
+                        "mouse kind {:?} requires no button or a specific button (got {button:?})",
+                        kind
+                    ));
+                }
+            };
+            write_tx
+                .send(ClientMessage::AttachMouse {
+                    kind: mouse_kind,
+                    position: ClientMousePosition::Cell { column, row },
+                    geometry: None,
+                    modifiers,
+                    lines: match mouse_kind {
+                        ClientMouseKind::ScrollUp | ClientMouseKind::ScrollDown => lines.max(1),
+                        _ => 0,
+                    },
+                })
+                .map(|_| ())
+                .map_err(|_| "terminal writer closed".to_string())
+        }
     }
 }
 
@@ -5188,12 +5592,14 @@ fn open_terminal_attach(
                     let _ = output_tx.send(TerminalOutput::Close(reason));
                     break;
                 }
-                ServerMessage::Welcome { .. } => {}
-                ServerMessage::Notify { .. }
+                ServerMessage::MouseCapture { enabled, .. } => {
+                    let _ = output_tx.send(TerminalOutput::MouseCapture(enabled));
+                }
+                ServerMessage::Welcome { .. }
+                | ServerMessage::Notify { .. }
                 | ServerMessage::Clipboard { .. }
                 | ServerMessage::WindowTitle { .. }
                 | ServerMessage::ReloadSoundConfig
-                | ServerMessage::MouseCapture { .. }
                 | ServerMessage::DirectTerminalKeyboardProtocol { .. }
                 | ServerMessage::ClientShellKeyboardReportAll { .. }
                 | ServerMessage::ClientShellSnapshot(_)
@@ -6752,6 +7158,7 @@ mod tests {
                 output_tx,
                 client_count: Arc::new(AtomicUsize::new(1)),
                 connection_closed: Arc::new(ConnectionClosed::default()),
+                mouse_capture: Arc::new(AtomicBool::new(false)),
             },
             rx,
         )
@@ -6985,6 +7392,71 @@ mod tests {
                 lines: 3
             }
         );
+    }
+
+    #[test]
+    fn mouse_frames_map_to_allowed_attach_mouse_kinds() {
+        let (tx, rx) = test_terminal_writer();
+        handle_terminal_text_frame(
+            &tx,
+            r#"{"type":"mouse","kind":"down","button":"right","column":11,"row":2,"modifiers":1}"#,
+        )
+        .unwrap();
+        handle_terminal_text_frame(&tx, r#"{"type":"mouse","kind":"moved","column":0,"row":0}"#)
+            .unwrap();
+        handle_terminal_text_frame(
+            &tx,
+            r#"{"type":"mouse","kind":"scroll_up","column":7,"row":9,"lines":2}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            [rx.recv().unwrap(), rx.recv().unwrap(), rx.recv().unwrap()],
+            [
+                ClientMessage::AttachMouse {
+                    kind: ClientMouseKind::Down(ClientMouseButton::Right),
+                    position: ClientMousePosition::Cell { column: 11, row: 2 },
+                    geometry: None,
+                    modifiers: 1,
+                    lines: 0,
+                },
+                ClientMessage::AttachMouse {
+                    kind: ClientMouseKind::Moved,
+                    position: ClientMousePosition::Cell { column: 0, row: 0 },
+                    geometry: None,
+                    modifiers: 0,
+                    lines: 0,
+                },
+                ClientMessage::AttachMouse {
+                    kind: ClientMouseKind::ScrollUp,
+                    position: ClientMousePosition::Cell { column: 7, row: 9 },
+                    geometry: None,
+                    modifiers: 0,
+                    lines: 2,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn mouse_frames_reject_button_kind_mismatch_and_unknown_kind() {
+        let (tx, _rx) = test_terminal_writer();
+        // Button kinds need a button; button-less kinds reject one.
+        assert!(handle_terminal_text_frame(
+            &tx,
+            r#"{"type":"mouse","kind":"down","column":1,"row":1}"#
+        )
+        .is_err());
+        assert!(handle_terminal_text_frame(
+            &tx,
+            r#"{"type":"mouse","kind":"moved","button":"left","column":1,"row":1}"#
+        )
+        .is_err());
+        // Unknown/missing fields fail parsing, never reach the daemon.
+        assert!(parse_terminal_client_frame(
+            r#"{"type":"mouse","kind":"teleport","column":1,"row":1}"#
+        )
+        .is_err());
+        assert!(parse_terminal_client_frame(r#"{"type":"mouse","kind":"down"}"#).is_err());
     }
 
     #[test]

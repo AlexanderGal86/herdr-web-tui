@@ -228,4 +228,181 @@ describe("BridgeProvider machine runtime selection", () => {
       ),
     ).toBe(false);
   });
+
+  it("registers a machine through the bridge route and refreshes the machine tree", async () => {
+    const initialList = {
+      version: 1,
+      machines: [
+        { id: "local", label: "Local", kind: "local" },
+        { id: "farm1", label: "farm1", kind: "ssh" },
+      ],
+    };
+    const addedList = {
+      version: 1,
+      machines: [
+        { id: "local", label: "Local", kind: "local" },
+        { id: "farm1", label: "farm1", kind: "ssh" },
+        { id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", label: "gpu2", kind: "ssh" },
+      ],
+    };
+    let machinesSeen = 0;
+    const addBodies: unknown[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = requestPath(input);
+      if (path === "/api/machines/add") {
+        addBodies.push(JSON.parse(String(init?.body)));
+        return jsonResponse(addedList);
+      }
+      if (path === "/api/machines") {
+        machinesSeen += 1;
+        return jsonResponse(machinesSeen === 1 ? initialList : addedList);
+      }
+      if (path === "/api/machines/farm1/api/capabilities") {
+        return jsonResponse({ commands: [] });
+      }
+      return jsonResponse(SSH_CAPABLE_CAPABILITIES);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await renderProvider();
+
+    const manager = await waitForManager(
+      (current) =>
+        current.machinesLoaded &&
+        current.availableRuntimes.some((runtime) => runtime.id === FARM_MACHINE_RUNTIME_ID),
+    );
+
+    await act(async () => {
+      await manager.addMachine({ target: "root@10.0.0.250", label: "gpu2" });
+    });
+
+    expect(addBodies).toEqual([{ target: "root@10.0.0.250", label: "gpu2" }]);
+    const addedRuntimeId = "machine:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const updated = await waitForManager((current) =>
+      current.availableRuntimes.some((runtime) => runtime.id === addedRuntimeId),
+    );
+    expect(updated.enabledRuntimes.map((runtime) => runtime.id)).toContain(addedRuntimeId);
+    expect(machinesSeen).toBeGreaterThanOrEqual(2);
+
+    // Machine registration never touches browser-persisted store state.
+    const rawStore = window.localStorage.getItem(STORE_KEY);
+    expect(rawStore).not.toContain("aaaaaaaa");
+  });
+
+  it("surfaces the bridge's machine add error to the caller", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = requestPath(input);
+      if (path === "/api/machines/add") {
+        void init;
+        return {
+          ok: false,
+          status: 502,
+          json: async () => ({ error: "machine add failed: ssh refused" }),
+        };
+      }
+      if (path === "/api/machines") {
+        return jsonResponse({ version: 1, machines: [] });
+      }
+      return jsonResponse(SSH_CAPABLE_CAPABILITIES);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await renderProvider();
+
+    const manager = await waitForManager((current) => current.machinesLoaded);
+    let failure: unknown = null;
+    await act(async () => {
+      failure = await manager.addMachine({ target: "root@10.0.0.250" }).then(
+        () => null,
+        (error: unknown) => error,
+      );
+    });
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe("machine add failed: ssh refused");
+  });
+
+  it("disables a machine through the bridge route and refreshes the machine tree", async () => {
+    const initialList = {
+      version: 1,
+      machines: [
+        { id: "local", label: "Local", kind: "local" },
+        { id: "farm1", label: "farm1", kind: "ssh" },
+      ],
+    };
+    const disabledList = {
+      version: 1,
+      machines: [{ id: "local", label: "Local", kind: "local" }],
+    };
+    let machinesSeen = 0;
+    const disableCalls: { path: string; body: unknown }[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = requestPath(input);
+      if (path === "/api/machines/farm1/disable") {
+        disableCalls.push({ path, body: init?.body });
+        return jsonResponse(disabledList);
+      }
+      if (path === "/api/machines") {
+        machinesSeen += 1;
+        return jsonResponse(machinesSeen === 1 ? initialList : disabledList);
+      }
+      if (path === "/api/machines/farm1/api/capabilities") {
+        return jsonResponse({ commands: [] });
+      }
+      return jsonResponse(SSH_CAPABLE_CAPABILITIES);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await renderProvider();
+
+    const manager = await waitForManager(
+      (current) =>
+        current.machinesLoaded &&
+        current.availableRuntimes.some((runtime) => runtime.id === FARM_MACHINE_RUNTIME_ID),
+    );
+
+    await act(async () => {
+      await manager.disableMachine("farm1");
+    });
+
+    // Native route, no request body.
+    expect(disableCalls).toEqual([{ path: "/api/machines/farm1/disable", body: undefined }]);
+    const updated = await waitForManager(
+      (current) =>
+        current.machinesLoaded &&
+        !current.availableRuntimes.some((runtime) => runtime.id === FARM_MACHINE_RUNTIME_ID),
+    );
+    expect(updated.machines.map((machine) => machine.id)).toEqual(["local"]);
+    expect(machinesSeen).toBeGreaterThanOrEqual(2);
+  });
+
+  it("surfaces the bridge's machine disable error to the caller", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = requestPath(input);
+      if (path === "/api/machines/farm1/disable") {
+        return {
+          ok: false,
+          status: 503,
+          json: async () => ({ error: "machine disable is unavailable: catalog relocated" }),
+        };
+      }
+      if (path === "/api/machines") {
+        return jsonResponse({ version: 1, machines: [] });
+      }
+      return jsonResponse(SSH_CAPABLE_CAPABILITIES);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await renderProvider();
+
+    const manager = await waitForManager((current) => current.machinesLoaded);
+    let failure: unknown = null;
+    await act(async () => {
+      failure = await manager.disableMachine("farm1").then(
+        () => null,
+        (error: unknown) => error,
+      );
+    });
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe(
+      "machine disable is unavailable: catalog relocated",
+    );
+  });
 });

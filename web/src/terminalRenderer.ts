@@ -139,6 +139,20 @@ export type MobileTerminalTouchEvent =
   | { type: "selection"; text: string }
   | { type: "url"; url: string };
 
+/**
+ * One structured pane mouse event, matching the daemon's AttachMouse input
+ * (crossterm modifier bits; 0-based cell coordinates). The bridge translates
+ * these 1:1; the daemon encodes them for the pane app's actual tracking mode.
+ */
+export type TerminalMouseReport = {
+  kind: "down" | "up" | "drag" | "moved" | "scroll_up" | "scroll_down";
+  button: "left" | "middle" | "right" | null;
+  column: number;
+  row: number;
+  modifiers: number;
+  lines: number;
+};
+
 export type TerminalRenderer = {
   mount(container: HTMLElement): Promise<TerminalSize>;
   write(data: string | Uint8Array): void;
@@ -159,6 +173,10 @@ export type TerminalRenderer = {
   getSelection(): string;
   clearSelection(): void;
   paste(text: string): void;
+  /** Server-reported pane mouse state (daemon MouseCapture truth). */
+  setMouseCapture(enabled: boolean): void;
+  hasActiveMouseTracking(): boolean;
+  onMouse(callback: (report: TerminalMouseReport) => void): () => void;
   setScrollSensitivity(value: number): void;
   dispose(): void;
 };
@@ -187,6 +205,10 @@ export class GhosttyRenderer implements TerminalRenderer {
   #renderFrameId: number | null = null;
   #renderInteractionCleanup: (() => void) | null = null;
   #selectionClipboardCleanup: (() => void) | null = null;
+  #mouseHandlers: ((report: TerminalMouseReport) => void)[] = [];
+  #mouseCapture = false;
+  #mouseDragButton: number | null = null;
+  #mouseReportingCleanup: (() => void) | null = null;
   #disposed = false;
 
   constructor(fontSizePx = DEFAULT_TERMINAL_FONT_SIZE_PX, cursorBlink = true) {
@@ -254,6 +276,7 @@ export class GhosttyRenderer implements TerminalRenderer {
     this.#selectionClipboardCleanup = disableGhosttySelectionClipboardWrites(terminal);
     this.#installAccessibleScreenPublisher();
     this.#installScrollHandlers();
+    this.#installMouseReporting();
     this.#installMobileInputBridge();
     this.#installImeFocusRedirect();
     return this.fit();
@@ -391,6 +414,8 @@ export class GhosttyRenderer implements TerminalRenderer {
     }
     this.#touchCleanup?.();
     this.#touchCleanup = null;
+    this.#mouseReportingCleanup?.();
+    this.#mouseReportingCleanup = null;
     this.#mobileInputCleanup?.();
     this.#mobileInputCleanup = null;
     this.#imeFocusCleanup?.();
@@ -483,12 +508,147 @@ export class GhosttyRenderer implements TerminalRenderer {
     }
   }
 
+  /**
+   * Server-reported pane mouse state (daemon `MouseCapture` truth): the pane
+   * app requested mouse reporting and the daemon translates structured events
+   * into the app's actual encoding. Never guessed from pane output — a fresh
+   * attach replays screen bytes but no DECSET mode sequences.
+   */
+  setMouseCapture(enabled: boolean) {
+    this.#mouseCapture = enabled;
+    if (!enabled) {
+      this.#mouseDragButton = null;
+    }
+  }
+
+  hasActiveMouseTracking(): boolean {
+    return this.#mouseCapture;
+  }
+
+  onMouse(callback: (report: TerminalMouseReport) => void) {
+    this.#mouseHandlers.push(callback);
+    return () => {
+      this.#mouseHandlers = this.#mouseHandlers.filter((entry) => entry !== callback);
+    };
+  }
+
+  #sendMouse(
+    terminal: Terminal,
+    kind: TerminalMouseReport["kind"],
+    button: TerminalMouseReport["button"],
+    event: MouseEvent,
+    lines = 0,
+  ) {
+    if (!this.#mouseCapture) {
+      return;
+    }
+    const position = touchCellPosition(terminal, event.clientX, event.clientY);
+    const modifiers =
+      (event.shiftKey ? 1 : 0) | (event.ctrlKey ? 2 : 0) | (event.altKey ? 4 : 0);
+    const report: TerminalMouseReport = {
+      kind,
+      button,
+      column: position.col,
+      row: position.row,
+      modifiers,
+      lines,
+    };
+    for (const handler of [...this.#mouseHandlers]) {
+      handler(report);
+    }
+  }
+
+  // Forward app mouse events as structured reports; the daemon encodes them
+  // for the pane app's actual tracking mode. Shift keeps the native
+  // selection/menu overrides.
+  #installMouseReporting() {
+    const terminal = this.#requireTerminal();
+    const container = this.#container;
+    if (!container) {
+      return;
+    }
+
+    const onContainerMouseDown = (event: MouseEvent) => {
+      if (!this.#mouseCapture || !this.#isCurrentTerminal(terminal) || event.shiftKey || event.button > 2) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      this.focusTextInput();
+      this.#mouseDragButton = event.button;
+      this.#sendMouse(terminal, "down", mouseButtonName(event.button), event);
+      document.addEventListener("mousemove", onDocumentMouseMove, true);
+      document.addEventListener("mouseup", onDocumentMouseUp, true);
+    };
+    const sendMove = (event: MouseEvent) => {
+      const kind = this.#mouseDragButton !== null ? "drag" : "moved";
+      this.#sendMouse(
+        terminal,
+        kind,
+        this.#mouseDragButton !== null ? mouseButtonName(this.#mouseDragButton) : null,
+        event,
+      );
+    };
+    const onContainerMouseMove = (event: MouseEvent) => {
+      if (!this.#mouseCapture || !this.#isCurrentTerminal(terminal) || event.shiftKey) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      sendMove(event);
+    };
+    const onDocumentMouseMove = (event: MouseEvent) => {
+      if (!this.#mouseCapture || !this.#isCurrentTerminal(terminal) || event.shiftKey) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      sendMove(event);
+    };
+    const onDocumentMouseUp = (event: MouseEvent) => {
+      if (this.#mouseDragButton === null) {
+        return;
+      }
+      const dragButton = this.#mouseDragButton;
+      this.#mouseDragButton = null;
+      document.removeEventListener("mousemove", onDocumentMouseMove, true);
+      document.removeEventListener("mouseup", onDocumentMouseUp, true);
+      // Release must reach the app once the press was forwarded, even if
+      // Shift appeared mid-drag — otherwise the app keeps a stuck selection.
+      if (this.#isCurrentTerminal(terminal)) {
+        this.#sendMouse(terminal, "up", mouseButtonName(dragButton), event);
+      }
+    };
+
+    container.addEventListener("mousedown", onContainerMouseDown, { capture: true });
+    container.addEventListener("mousemove", onContainerMouseMove, { capture: true });
+    this.#mouseReportingCleanup = () => {
+      this.#mouseDragButton = null;
+      container.removeEventListener("mousedown", onContainerMouseDown, { capture: true });
+      container.removeEventListener("mousemove", onContainerMouseMove, { capture: true });
+      document.removeEventListener("mousemove", onDocumentMouseMove, true);
+      document.removeEventListener("mouseup", onDocumentMouseUp, true);
+    };
+  }
+
   #installScrollHandlers() {
     const terminal = this.#requireTerminal();
 
     terminal.attachCustomWheelEventHandler((event) => {
-      if (!this.#isCurrentTerminal(terminal) || this.#hasMouseTracking(terminal)) {
+      if (!this.#isCurrentTerminal(terminal)) {
         return false;
+      }
+      if (this.#mouseCapture && !event.shiftKey) {
+        event.preventDefault();
+        event.stopPropagation();
+        this.#sendMouse(
+          terminal,
+          event.deltaY < 0 ? "scroll_up" : "scroll_down",
+          null,
+          event,
+          1,
+        );
+        return true;
       }
       event.preventDefault();
       event.stopPropagation();
@@ -1749,6 +1909,10 @@ function textareaKeyboardEventOutput(event: KeyboardEvent) {
     return customKeyboardEventOutput(event);
   }
   return event.shiftKey ? "\x1B[Z" : "\t";
+}
+
+function mouseButtonName(button: number): TerminalMouseReport["button"] {
+  return button === 1 ? "middle" : button === 2 ? "right" : "left";
 }
 
 function touchCellPosition(terminal: Terminal, clientX: number, clientY: number): TerminalCellPosition {

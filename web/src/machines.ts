@@ -15,6 +15,24 @@ export type MachinesList = {
 
 export type MachineGroupStatus = "connected" | "connecting" | "unavailable";
 
+/** Browser input for the bridge's native machine registration route. */
+export type MachineAddInput = {
+  target: string;
+  label?: string;
+  session?: string;
+};
+
+/**
+ * The bridge advertises saved-machine discovery; the same capability covers
+ * machine registration, so this gates the sidebar's add-machine affordance
+ * even when no SSH machine exists yet.
+ */
+export function supportsMachines(
+  capabilities: { machines?: { version: number } } | null | undefined,
+): boolean {
+  return capabilities?.machines?.version === 1;
+}
+
 export type MachineGroupView = {
   runtimeId: string;
   mode: string;

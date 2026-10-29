@@ -17,6 +17,7 @@ const renderer = vi.hoisted(() => ({
   setMobileTouchSelection: vi.fn(),
   setAccessibleScreenListener: vi.fn(),
   onInput: vi.fn(),
+  onMouse: vi.fn(),
   onScroll: vi.fn(),
 }));
 vi.mock("./terminalRenderer", () => ({

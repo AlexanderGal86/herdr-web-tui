@@ -4,6 +4,9 @@
 
 ### Added
 
+- Bottom-right **Open TTT** button: opens the TTT Editor in the active workspace as a new tab through the official Herdr plugin pane mechanism (`ttt.editor`/`editor`, `plugin.pane.open` over the daemon socket — no browser-supplied argv). The preset (`builtin:ttt`) is offered only while Herdr reports the plugin installed and enabled on the serving host, and machine runtimes never show it, so a click always launches on the bridge host the user is looking at. The button sits above the stage bar and, on touch layouts, above the mobile terminal controls strip, so it covers no bar controls or quick keys.
+- Pane-app mouse forwarding for the web terminal: the bridge now forwards the daemon's `MouseCapture` state over the terminal socket (`{"type":"mouse_mode","enabled":…}`, seeded from the shared session so a joining client learns the current flag) and translates browser mouse gestures into `AttachMouse` structured events the daemon encodes for the pane app's real tracking mode. While a pane app captures the mouse (TTT, vim, htop, …), clicks, drags, wheel, and right-click go to the app — right-click opens the app's own menu, and Shift+right-click keeps the Herdr pane menu; middle-click paste and text selection behave as before in plain shells. Mouse reports respect the same detach/takeover gating as keyboard input and are rejected unless they match a strict kind/button allowlist.
+- Fixed the browser terminal ignoring pane-app mouse reporting entirely: ghostty-web has no mouse→PTY path, so clicks in TTT-style panes previously did nothing.
 - Two-stage SCP uploads for saved SSH machines: uploading from a machine runtime now stages the file privately on the bridge host and copies it with `scp -s` into the remote user's `~/.local/share/herdr-web/uploads` directory, committing atomically with no-clobber semantics, conflict renaming, and explicit overwrite. The uploads UI is gated on a new `uploads` capability so runtimes without the route no longer advertise it, while older local bridges keep their existing upload behavior.
 
 - Added a built-in `omp` launcher preset: the launch dialog offers OMP alongside the other managed
@@ -24,7 +27,8 @@
 - Added saved-machine grouping with real remote routing, matching the CLI `machines` sidebar:
   the bridge discovers the operator's saved Herdr SSH machines from Herdr's own client state
   (`~/.local/state/herdr/client/endpoints.json`) and exposes them via `GET /api/machines`
-  (`machines` capability). The sidebar shows a `machines` section with a collapsible `Local`
+  (`machines` capability). The sidebar shows a `workspaces` section (the machine tree, headed
+  `workspaces` while it is active) with a collapsible `Local`
   group (the serving bridge daemon) and one collapsible group per enabled saved machine with
   a connection indicator; workspaces always sit under the machine that serves them, so the
   tree also works with a single serving bridge. All machine data flows through same-origin
@@ -39,6 +43,39 @@
   pane ids on different machines never mix. Machine selection is browser-session state and is
   never persisted to browser storage; configured HTTP bridge backends keep their existing
   grouping and remain distinct from saved machines.
+
+- Farm connections can now be created from the sidebar: whenever the serving bridge advertises
+  its `machines` capability, the section header shows a plus button opening an `Add machine`
+  dialog (SSH target, optional label, optional remote session) — including before any saved SSH
+  machine exists and while the Local/Remote zone split is off. Submitting runs the native
+  `herdr machine add` CLI on the bridge host as a plain argv vector, so registration follows the
+  CLI's documented flow: it may discover and start the remote Herdr server and saves the profile
+  using the bridge host's existing SSH access. The bridge itself stores nothing and adds no SSH
+  keys — authentication and host-key checking stay with OpenSSH — and steps the CLI reserves for
+  interactive confirmation (installing or replacing the remote server) fail with the CLI's own
+  error text, since the bridge runs it non-interactively. Option-like or control-character input
+  is rejected before anything runs, the new `POST /api/machines/add` route sits behind the
+  bridge's existing origin/Host request policy, and new machines appear in the tree immediately.
+  When `HERDR_WEB_MACHINES_ENDPOINTS` relocates the catalog the bridge reads, the route refuses
+  with 503 before invoking the CLI, since the CLI would write a different catalog than the one
+  being served.
+- Saved SSH machines can now be disabled from the web client: the machine's group context menu
+  offers `Disable connection` with a confirmation, and confirming calls the new
+  `POST /api/machines/{machine_id}/disable` bridge route. As with machine add, the bridge only
+  forwards a validated argv vector to the native `herdr machine disable <PROFILE_ID>` CLI on the
+  bridge host and never touches endpoints.json, SSH trust, or keys itself; the saved profile is
+  retained (re-enabling stays a native CLI operation, `herdr machine enable`). The route answers
+  with the freshly read machine list, so the machine leaves the sidebar immediately, and errors
+  map to sensible responses: the local machine and already-disabled machines are refused
+  (400), unknown or invalid ids are refused (404), a CLI failure returns 502 with the CLI's own
+  stderr tail, and a relocated catalog (`HERDR_WEB_MACHINES_ENDPOINTS`) refuses with 503 before
+  anything runs. The route sits behind the same origin/Host request policy as every other
+  machine route, so the behavior change applies to all bridge clients. Deployment is not part
+  of this change: existing bridge installations gain it only after they deploy a bridge build
+  from this source.
+- Restored the `workspaces` sidebar heading: while the machine tree is active the spaces list
+  header reads `workspaces` (instead of `spaces`), matching the CLI machine tree; every other
+  mode keeps the `spaces` label.
 
 - Add native TLS to the bridge behind a new `--tls-self-signed` flag. The
   single bridge port serves HTTPS and secure WebSockets (`wss://`) when the
