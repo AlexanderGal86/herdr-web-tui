@@ -234,7 +234,8 @@ function isPaneNotePayload(value: unknown): value is PaneNote {
     typeof note.revision !== "number" ||
     typeof note.link_state !== "string" ||
     !NOTE_LINK_STATES.includes(note.link_state as NoteLinkState) ||
-    !Array.isArray(note.attachment_history)
+    !Array.isArray(note.attachment_history) ||
+    !note.attachment_history.every(isNoteAttachment)
   ) {
     return false;
   }

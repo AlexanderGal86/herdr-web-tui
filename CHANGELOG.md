@@ -180,6 +180,9 @@
   [Will Hampson (@Whamp)](https://github.com/Whamp).
 
 ### Fixed
+- Web: reject malformed snapshot and note payloads element-by-element instead of accepting
+  arrays with non-object entries, so a malformed bridge response is treated as a retryable error
+  rather than crashing the workspace view or echoing bad attachment history back to the bridge.
 
 - Web: a backend save that is still in flight no longer clobbers the settings form when the
   user leaves a bridge and returns to it (editing the name or color) or starts a second

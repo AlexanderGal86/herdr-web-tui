@@ -10334,6 +10334,25 @@ function stageBreadcrumb(
   return [workspace?.label, tabLabel].filter(Boolean).join(" · ") || pane.pane_id;
 }
 
+function isRecordWithStrings(value: unknown, keys: readonly string[]): boolean {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return keys.every((key) => typeof record[key] === "string");
+}
+
+function isLayoutPayload(value: unknown): boolean {
+  if (!isRecordWithStrings(value, ["workspace_id", "tab_id"])) {
+    return false;
+  }
+  const { panes } = value as Record<string, unknown>;
+  return Array.isArray(panes) && panes.every((pane: unknown) => isRecordWithStrings(pane, ["pane_id"]));
+}
+
+/** Validates /api/snapshot payloads down to the identity fields App.tsx and
+ * state.ts actually read per element: workspace/tab/pane lookups by id and
+ * workspace, and layout zoom/pane matching by workspace, tab, and pane ids. */
 export function isSnapshotPayload(value: unknown): value is Snapshot {
   if (typeof value !== "object" || value === null) {
     return false;
@@ -10341,9 +10360,13 @@ export function isSnapshotPayload(value: unknown): value is Snapshot {
   const { workspaces, tabs, panes, layouts } = value as Record<string, unknown>;
   return (
     Array.isArray(workspaces) &&
+    workspaces.every((item) => isRecordWithStrings(item, ["workspace_id"])) &&
     Array.isArray(tabs) &&
+    tabs.every((item) => isRecordWithStrings(item, ["tab_id", "workspace_id"])) &&
     Array.isArray(panes) &&
-    Array.isArray(layouts)
+    panes.every((item) => isRecordWithStrings(item, ["pane_id", "workspace_id", "tab_id"])) &&
+    Array.isArray(layouts) &&
+    layouts.every(isLayoutPayload)
   );
 }
 

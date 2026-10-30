@@ -65,6 +65,14 @@ describe("notes helpers", () => {
     expect(parseNotesList("nope")).toBeNull();
   });
 
+  it("drops notes whose attachment history entries are malformed", () => {
+    const valid = note("n1", "p1", "linked", "200");
+    const badHistory = { ...valid, attachment_history: [{ pane_id: "p1" }] };
+    expect(parseNotesList({ store_id: "store", session_key: "s", notes: [valid, badHistory] }))
+      .toEqual({ store_id: "store", session_key: "s", notes: [valid] });
+    expect(parsePaneNote(badHistory)).toBeNull();
+  });
+
   it("validates single note payloads including optional attachments", () => {
     expect(parsePaneNote(note("n1", "p1", "linked", "200"))).toMatchObject({ note_id: "n1" });
     expect(parsePaneNote({ ...note("n1", "p1", "linked", "200"), attachment: { pane_id: "p1" } })).toBeNull();

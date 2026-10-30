@@ -2149,12 +2149,34 @@ function note(
   };
 }
 
+function minimalSnapshot() {
+  return {
+    workspaces: [{ workspace_id: "w1" }],
+    tabs: [{ tab_id: "t1", workspace_id: "w1" }],
+    panes: [{ pane_id: "p1", workspace_id: "w1", tab_id: "t1" }],
+    layouts: [{ workspace_id: "w1", tab_id: "t1", panes: [{ pane_id: "p1" }] }],
+    selected_pane_id: null as string | null,
+  };
+}
+
 describe("snapshot payload guard", () => {
   it("accepts a payload with every required snapshot collection", () => {
     expect(isSnapshotPayload({ workspaces: [], tabs: [], panes: [], layouts: [] })).toBe(true);
     expect(
-      isSnapshotPayload({ workspaces: [{}], tabs: [], panes: [], layouts: [], selected_pane_id: null }),
+      isSnapshotPayload(minimalSnapshot()),
     ).toBe(true);
+  });
+
+  it("rejects snapshot collections whose elements lack consumed identity fields", () => {
+    const base = minimalSnapshot();
+    expect(isSnapshotPayload({ ...base, panes: [null] })).toBe(false);
+    expect(isSnapshotPayload({ ...base, panes: [{ workspace_id: "w1", tab_id: "t1" }] })).toBe(false);
+    expect(isSnapshotPayload({ ...base, tabs: [{ no_id: "x" }] })).toBe(false);
+    expect(isSnapshotPayload({ ...base, tabs: [{ tab_id: "t1" }] })).toBe(false);
+    expect(isSnapshotPayload({ ...base, workspaces: [{}] })).toBe(false);
+    expect(isSnapshotPayload({ ...base, layouts: [{}] })).toBe(false);
+    expect(isSnapshotPayload({ ...base, layouts: [{ workspace_id: "w1", tab_id: "t1" }] })).toBe(false);
+    expect(isSnapshotPayload({ ...base, layouts: [{ workspace_id: "w1", tab_id: "t1", panes: [null] }] })).toBe(false);
   });
 
   it("rejects payloads missing a collection or not shaped like a snapshot", () => {
