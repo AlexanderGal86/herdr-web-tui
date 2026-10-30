@@ -162,6 +162,9 @@
 
 ### Fixed
 
+- Bridge: terminal-session pruning no longer fires on Herdr events whose payload text merely
+  contains a substring like `pane.closed` (e.g. a pane cwd or label); the event envelope's exact
+  `event` kind is now parsed and matched, and non-JSON payloads never prune.
 - Bridge: uploaded files are now stored with owner-only permissions (0600) after the write or
   overwrite rename, instead of the umask default (0644) that exposed uploaded content to other
   local users; the upload directory itself is unchanged.

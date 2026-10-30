@@ -5021,10 +5021,19 @@ fn close_terminal_session(
     }
 }
 
+/// Herdr subscription events are `{"event":"<kind>","data":{...}}` envelopes
+/// (`SubscriptionEventEnvelope`). Only an exact structural close kind may prune
+/// terminal sessions, so payload text such as a cwd or label containing
+/// "pane.closed" can never match, and non-JSON or bridge-local error payloads
+/// (which use a `"type"` field) return false.
 fn event_may_close_terminal_session(event: &str) -> bool {
-    event.contains("workspace.closed")
-        || event.contains("tab.closed")
-        || event.contains("pane.closed")
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(event) else {
+        return false;
+    };
+    value
+        .get("event")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|kind| matches!(kind, "workspace.closed" | "tab.closed" | "pane.closed"))
 }
 
 fn close_message(reason: &str) -> String {
@@ -9204,6 +9213,38 @@ mod tests {
             0o600
         );
         let _ = std::fs::remove_dir_all(&upload_dir);
+    }
+
+    #[test]
+    fn event_may_close_terminal_session_matches_only_envelope_event_kind() {
+        // Daemon subscription events are {"event":"<kind>","data":{...}} envelopes.
+        assert!(event_may_close_terminal_session(
+            r#"{"event":"pane.closed","data":{"pane_id":"pane-1"}}"#
+        ));
+        assert!(event_may_close_terminal_session(
+            r#"{"event":"tab.closed","data":{"tab_id":"tab-1"}}"#
+        ));
+        assert!(event_may_close_terminal_session(
+            r#"{"event":"workspace.closed","data":{"workspace_id":"ws-1"}}"#
+        ));
+    }
+
+    #[test]
+    fn event_may_close_terminal_session_ignores_payload_text_and_bad_json() {
+        // The close kind appearing only inside payload text (cwd/label) must
+        // not prune a terminal session.
+        assert!(!event_may_close_terminal_session(
+            r#"{"event":"pane.updated","data":{"pane_id":"pane-1","cwd":"/tmp/pane.closed","label":"tab.closed demo"}}"#
+        ));
+        assert!(!event_may_close_terminal_session(
+            r#"{"event":"pane.focused","data":{"pane_id":"workspace.closed"}}"#
+        ));
+        // Bridge-local stream error fallbacks are not close events.
+        assert!(!event_may_close_terminal_session(
+            r#"{"type":"error","error":"read failed"}"#
+        ));
+        assert!(!event_may_close_terminal_session("not json at all"));
+        assert!(!event_may_close_terminal_session(""));
     }
 
     #[test]
