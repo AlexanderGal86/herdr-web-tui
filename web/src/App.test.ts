@@ -12,6 +12,7 @@ import {
   buildVisibleTabWorkspaceGroups,
   canAddNoteFromPaneMenu,
   closeCopy,
+  ExecBusyTracker,
   filterCollapsedAgentPaneEntries,
   filterCollapsedTabEntries,
   mergeCreatedPaneNoteList,
@@ -119,6 +120,31 @@ describe("App connection guards", () => {
   it("rejects async results from stale backend connections", () => {
     expect(isConnectionResultCurrent("configured:a", "configured:a")).toBe(true);
     expect(isConnectionResultCurrent("configured:b", "configured:a")).toBe(false);
+  });
+});
+
+describe("App exec busy tracking", () => {
+  it("keeps busy set until the last overlapping exec settles", () => {
+    const tracker = new ExecBusyTracker();
+    tracker.begin();
+    tracker.begin();
+    // Whichever exec finishes first must not clear busy for the one still running.
+    expect(tracker.end()).toBe(true);
+    expect(tracker.end()).toBe(false);
+  });
+
+  it("clears busy when the only exec settles (rejection path shares the finally)", () => {
+    const tracker = new ExecBusyTracker();
+    tracker.begin();
+    expect(tracker.end()).toBe(false);
+  });
+
+  it("tracks a fresh exec after busy cleared", () => {
+    const tracker = new ExecBusyTracker();
+    tracker.begin();
+    tracker.end();
+    tracker.begin();
+    expect(tracker.end()).toBe(false);
   });
 });
 
