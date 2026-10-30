@@ -207,6 +207,24 @@ export function isImeCompositionInputType(inputType: string): boolean {
   );
 }
 
+/**
+ * The renderer's input listener receives a plain Event; not every dispatch is
+ * a real InputEvent, so narrow by the fields the reducer actually reads.
+ */
+export function terminalInputEventFields(
+  event: Event,
+): Pick<InputEvent, "data" | "inputType" | "isComposing"> {
+  const candidate = event as Partial<InputEvent>;
+  if (typeof candidate.inputType !== "string" || typeof candidate.isComposing !== "boolean") {
+    return { data: null, inputType: "", isComposing: false };
+  }
+  return {
+    data: typeof candidate.data === "string" || candidate.data === null ? candidate.data : null,
+    inputType: candidate.inputType,
+    isComposing: candidate.isComposing,
+  };
+}
+
 export function beforeInputOutput(event: Pick<InputEvent, "inputType" | "data">): string | null {
   switch (event.inputType) {
     case "insertText":

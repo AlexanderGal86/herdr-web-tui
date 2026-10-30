@@ -2,6 +2,7 @@ import type { FitAddon, Terminal } from "ghostty-web";
 import {
   findFirstUrlInSelection,
   openableHttpUrl,
+  selectionRowColRange,
   terminalSelectionRange,
   terminalUrlTapTarget,
   trimUrlPunctuation,
@@ -42,6 +43,7 @@ import {
   isImeComposingKeyEvent,
   keyboardEventOutput,
   reduceTerminalImeState,
+  terminalInputEventFields,
   shouldDeferBeforeInputToIme,
   textareaDelta,
 } from "./terminalImeInput";
@@ -111,15 +113,6 @@ type GhosttySelectionManagerAccess = {
     fire?: () => void;
   };
 };
-type GhosttyIdleRenderLoopAccess = {
-  animationFrameId?: number;
-};
-type GhosttyRenderAccess = {
-  renderer?: Terminal["renderer"];
-  wasmTerm?: Terminal["wasmTerm"];
-  viewportY: number;
-  scrollbarOpacity?: number;
-};
 type TerminalBufferLine = {
   readonly length: number;
   getCell(x: number):
@@ -188,6 +181,7 @@ export class GhosttyRenderer implements TerminalRenderer {
   #fitAddon: FitAddon | null = null;
   #container: HTMLElement | null = null;
   #scrollSensitivity = 1;
+  #wheelLineRemainder = 0;
   #scrollCallback: ((lines: number) => void) | null = null;
   #touchCleanup: (() => void) | null = null;
   #mobileInputCleanup: (() => void) | null = null;
@@ -205,6 +199,7 @@ export class GhosttyRenderer implements TerminalRenderer {
   #cursorBlink: boolean;
   #eventDrivenRendering: boolean;
   #renderFrameId: number | null = null;
+  #focusRetryTimeout: number | null = null;
   #renderInteractionCleanup: (() => void) | null = null;
   #selectionClipboardCleanup: (() => void) | null = null;
   #mouseHandlers: ((report: TerminalMouseReport) => void)[] = [];
@@ -385,7 +380,8 @@ export class GhosttyRenderer implements TerminalRenderer {
     positionGhosttyTextareaForInput(textarea, terminal);
     textarea.classList.add("ghostty-keyboard-input");
     textarea.focus({ preventScroll: true });
-    window.setTimeout(() => {
+    this.#focusRetryTimeout = window.setTimeout(() => {
+      this.#focusRetryTimeout = null;
       if (textarea.isConnected) {
         positionGhosttyTextareaForInput(textarea, this.#terminal);
         textarea.classList.add("ghostty-keyboard-input");
@@ -417,6 +413,10 @@ export class GhosttyRenderer implements TerminalRenderer {
     if (this.#renderFrameId !== null) {
       window.cancelAnimationFrame(this.#renderFrameId);
       this.#renderFrameId = null;
+    }
+    if (this.#focusRetryTimeout !== null) {
+      window.clearTimeout(this.#focusRetryTimeout);
+      this.#focusRetryTimeout = null;
     }
     this.#touchCleanup?.();
     this.#touchCleanup = null;
@@ -616,7 +616,13 @@ export class GhosttyRenderer implements TerminalRenderer {
       }
       event.preventDefault();
       event.stopPropagation();
-      const lines = normalizeWheelLines(event, terminal.rows, this.#scrollSensitivity);
+      const { lines, remainder } = normalizeWheelLines(
+        event,
+        terminal.rows,
+        this.#scrollSensitivity,
+        this.#wheelLineRemainder,
+      );
+      this.#wheelLineRemainder = remainder;
       if (lines === 0) {
         return true;
       }
@@ -1471,12 +1477,12 @@ export class GhosttyRenderer implements TerminalRenderer {
       }
     };
     const onInput = (event: Event) => {
-      const inputEvent = event as InputEvent;
+      const { data, inputType, isComposing } = terminalInputEventFields(event);
       const transition = reduceTerminalImeState(imeState, {
         type: "input",
-        data: inputEvent.data,
-        inputType: inputEvent.inputType,
-        isComposing: inputEvent.isComposing,
+        data,
+        inputType,
+        isComposing,
         textareaValue: textarea.value,
       });
       imeState = transition.state;
@@ -1737,6 +1743,26 @@ export function installTerminalInteractionRendering(
   };
 }
 
+/**
+ * SAFETY: ghostty-web keeps animationFrameId, scrollbarOpacity, and
+ * selectionManager private (absent from typings). All runtime access to those
+ * fields goes through this single view; callers null-check before use
+ * (selectionManager is additionally shape-validated by isGhosttySelectionManager).
+ */
+function ghosttyTerminalPrivateFields(terminal: Terminal): {
+  animationFrameId?: number;
+  scrollbarOpacity?: number;
+  selectionManager?: unknown;
+} {
+  // SAFETY: the runtime terminal object carries these private fields; the
+  // view type above documents exactly what callers may touch.
+  return terminal as unknown as {
+    animationFrameId?: number;
+    scrollbarOpacity?: number;
+    selectionManager?: unknown;
+  };
+}
+
 export function suspendGhosttyIdleRenderLoop(
   terminal: Terminal,
   cancelFrame: (frameId: number) => void = (frameId) => window.cancelAnimationFrame(frameId),
@@ -1744,14 +1770,12 @@ export function suspendGhosttyIdleRenderLoop(
   // ghostty-web 0.4.0 starts a permanent requestAnimationFrame loop even when
   // cursor blinking is disabled. A large high-DPI canvas is particularly costly
   // on Windows, so event-driven mode cancels the pending continuation after open().
-  // SAFETY: ghostty Terminal exposes the private animationFrameId field at
-  // runtime (absent from typings); the undefined check below guards access.
-  const access = terminal as unknown as GhosttyIdleRenderLoopAccess;
-  if (access.animationFrameId === undefined) {
+  const internals = ghosttyTerminalPrivateFields(terminal);
+  if (internals.animationFrameId === undefined) {
     return false;
   }
-  cancelFrame(access.animationFrameId);
-  delete access.animationFrameId;
+  cancelFrame(internals.animationFrameId);
+  delete internals.animationFrameId;
   return true;
 }
 
@@ -1763,19 +1787,14 @@ export function shouldUseEventDrivenTerminalRendering(
 }
 
 export function renderGhosttyTerminalFrame(terminal: Terminal) {
-  // SAFETY: ghostty Terminal carries private renderer/wasmTerm internals
-  // (not in typings); both are null-checked immediately below before use.
-  const access = terminal as unknown as GhosttyRenderAccess;
-  if (!access.renderer || !access.wasmTerm) {
+  // renderer/wasmTerm/viewportY are public optional fields; only scrollbarOpacity
+  // needs the private-field view. renderer/wasmTerm are null-checked before use.
+  const { renderer, wasmTerm, viewportY } = terminal;
+  if (!renderer || !wasmTerm) {
     return false;
   }
-  access.renderer.render(
-    access.wasmTerm,
-    false,
-    access.viewportY,
-    terminal,
-    access.scrollbarOpacity ?? 0,
-  );
+  const { scrollbarOpacity } = ghosttyTerminalPrivateFields(terminal);
+  renderer.render(wasmTerm, false, viewportY, terminal, scrollbarOpacity ?? 0);
   return true;
 }
 
@@ -2041,9 +2060,7 @@ function selectTerminalViewportRange(
 }
 
 function terminalSelectionManager(terminal: Terminal) {
-  // SAFETY: ghostty Terminal exposes an internal selectionManager (not in
-  // typings); isGhosttySelectionManager() below validates its shape.
-  const selectionManager = (terminal as unknown as { selectionManager?: unknown }).selectionManager;
+  const { selectionManager } = ghosttyTerminalPrivateFields(terminal);
   if (!isGhosttySelectionManager(selectionManager)) {
     return null;
   }
@@ -2105,9 +2122,13 @@ function terminalSelectedTextFromViewportRange(
   const selectedLines: string[] = [];
   for (let row = range.from.row; row <= range.to.row; row += 1) {
     const bufferRow = terminalBufferRow(terminal, row);
-    const line = terminal.buffer.active.getLine(bufferRow) as TerminalBufferLine | undefined;
-    const startCol = row === range.from.row ? range.from.col : 0;
-    const endCol = row === range.to.row ? range.to.col : terminal.cols - 1;
+    const line = terminalBufferLine(terminal.buffer.active, bufferRow);
+    const { startCol, endCol } = selectionRowColRange(
+      row,
+      range.from,
+      range.to,
+      terminal.cols - 1,
+    );
     selectedLines.push(
       line
         ? terminalBufferLineCellText(
@@ -2164,9 +2185,19 @@ function terminalBufferLineCellText(
   return text;
 }
 
+// SAFETY: typings omit cell.cell.grapheme_len (multi-codepoint cluster marker)
+// on buffer cells; the runtime line shape is a superset of IBufferLine. This
+// single helper keeps that cast out of the call sites.
+function terminalBufferLine(
+  buffer: Terminal["buffer"]["active"],
+  y: number,
+): TerminalBufferLine | undefined {
+  return buffer.getLine(y) as TerminalBufferLine | undefined;
+}
+
 function terminalLinkAt(terminal: Terminal, position: TerminalCellPosition) {
   const row = terminalBufferRow(terminal, position.row);
-  const line = terminal.buffer.active.getLine(row) as TerminalBufferLine | undefined;
+  const line = terminalBufferLine(terminal.buffer.active, row);
   if (!line || position.col < 0 || position.col >= line.length) {
     return null;
   }
@@ -2224,16 +2255,24 @@ function cssColor(element: Element, property: string, fallback: string) {
   return value || fallback;
 }
 
-function normalizeWheelLines(event: WheelEvent, rows: number, sensitivity: number) {
+/** DOM WheelEvent.deltaMode values (spec-fixed: pixel=0, line=1, page=2). */
+const DOM_DELTA_LINE = 1;
+const DOM_DELTA_PAGE = 2;
+
+/**
+ * Converts a wheel event to whole scroll lines, carrying the fractional
+ * remainder between events so slow trackpad deltas accumulate instead of
+ * each rounding up to a full line (jerky scrolling).
+ */
+export function normalizeWheelLines(
+  event: Pick<WheelEvent, "deltaY" | "deltaMode">,
+  rows: number,
+  sensitivity: number,
+  remainder: number,
+): { lines: number; remainder: number } {
   const unit =
-    event.deltaMode === WheelEvent.DOM_DELTA_PAGE
-      ? rows
-      : event.deltaMode === WheelEvent.DOM_DELTA_LINE
-        ? 1
-        : 1 / 16;
-  const rawLines = event.deltaY * unit * sensitivity;
-  if (Math.abs(rawLines) < 1) {
-    return rawLines < 0 ? -1 : rawLines > 0 ? 1 : 0;
-  }
-  return rawLines < 0 ? Math.ceil(rawLines) : Math.floor(rawLines);
+    event.deltaMode === DOM_DELTA_PAGE ? rows : event.deltaMode === DOM_DELTA_LINE ? 1 : 1 / 16;
+  const rawLines = event.deltaY * unit * sensitivity + remainder;
+  const lines = rawLines < 0 ? Math.ceil(rawLines) : Math.floor(rawLines);
+  return { lines, remainder: rawLines - lines };
 }

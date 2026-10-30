@@ -439,6 +439,12 @@ export function TerminalView({
     }
   }, []);
 
+// Drain up to this many queued parts (or bytes) per 35ms tick: a submit enqueues the
+// command and its Enter frame together, so pacing one part per tick delayed Enter;
+// the caps keep a large reconnect backlog from dumping onto a freshly opened socket.
+const TERMINAL_INPUT_QUEUE_MAX_PARTS_PER_TICK = 8;
+const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
+
   const flushQueuedTerminalInput = useCallback(() => {
     if (inputFlushTimerRef.current !== null) {
       window.clearTimeout(inputFlushTimerRef.current);
@@ -450,8 +456,20 @@ export function TerminalView({
       if (socket?.readyState !== WebSocket.OPEN) {
         return;
       }
-      const next = inputQueueRef.current.shift();
-      if (next !== undefined) {
+      let sentParts = 0;
+      let sentBytes = 0;
+      while (inputQueueRef.current.length > 0) {
+        const next = inputQueueRef.current[0]!;
+        if (
+          sentParts > 0 &&
+          (sentParts >= TERMINAL_INPUT_QUEUE_MAX_PARTS_PER_TICK ||
+            sentBytes + next.length > TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK)
+        ) {
+          break;
+        }
+        inputQueueRef.current.shift();
+        sentParts += 1;
+        sentBytes += next.length;
         sendTerminalInputFrame(socket, next);
       }
       if (inputQueueRef.current.length > 0) {
@@ -749,6 +767,7 @@ export function TerminalView({
     let foregroundFastAttemptsRemaining = 0;
     let attachConflictRetries = 0;
     let lastCloseReason: string | null = null;
+    let connectionLostNotified = false;
     let socketGeneration = 0;
     let socketStartedAt = 0;
     let lastForegroundReconnectAt = Number.NEGATIVE_INFINITY;
@@ -867,6 +886,7 @@ export function TerminalView({
         foregroundFastAttemptsRemaining = 0;
         reconnectScheduledForSocket.delete(currentSocketGeneration);
         lastCloseReason = null;
+        connectionLostNotified = false;
         terminalInputBlockedRef.current = false;
         setCloseReason(null);
         terminalAttachCountRef.current += 1;
@@ -958,8 +978,14 @@ export function TerminalView({
         // without a terminal close handshake — the herdr server went away
         // (restart). Ask the app to resnapshot immediately so this pane
         // remounts on the rotated terminal_id instead of retrying the dead
-        // one until the periodic poll notices.
-        window.dispatchEvent(new CustomEvent(TERMINAL_CONNECTION_LOST_EVENT));
+        // one until the periodic poll notices. Only the first close of an
+        // outage signals: failed reconnect attempts close without a reason
+        // too, and repeated app-wide resnapshots are redundant until a
+        // successful reopen (which resets the flag above).
+        if (!connectionLostNotified) {
+          connectionLostNotified = true;
+          window.dispatchEvent(new CustomEvent(TERMINAL_CONNECTION_LOST_EVENT));
+        }
         scheduleSocketReconnect("close", currentSocketGeneration);
       });
       nextSocket.addEventListener("error", () => {

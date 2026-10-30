@@ -118,6 +118,25 @@
 
 ### Changed
 
+- The duplicated selection column-range ternaries in `selectedTextFromVisibleRows` and the
+  renderer's viewport selection text are extracted into a shared tested `selectionRowColRange`
+  helper (anchor rows clamp to their endpoint, intermediate rows span to the caller's row end);
+  both call sites keep their existing row-end behavior.
+- The five scattered `as` casts reaching ghostty-web's private runtime fields are consolidated:
+  one `ghosttyTerminalPrivateFields` view (animationFrameId/scrollbarOpacity/selectionManager) and
+  one `terminalBufferLine` helper (the grapheme_len superset of `IBufferLine`) now carry the only
+  remaining assertions, and `renderGhosttyTerminalFrame` reads the public renderer/wasmTerm/
+  viewportY fields directly. Covered by the existing suspend/render/selection tests; no behavior
+  change.
+- `TERMINAL_INPUT_BATCH_DELAY_OPTIONS_MS` is typed as `readonly number[]` at its definition, so
+  the batch-delay preference check uses plain `Array.includes` instead of a cast to the literal
+  tuple's element type.
+- The terminal `input` event handler narrows its `Event` to the fields the IME reducer reads with
+  a validated `terminalInputEventFields` guard instead of a blind `as InputEvent` cast, so a
+  non-InputEvent dispatch degrades to an unknown edit instead of reading undefined fields.
+- Terminal upload responses are validated with a runtime type guard (mirroring the notes/machines
+  parsers) instead of an unchecked cast, so a malformed `file` payload now fails the upload with
+  `Upload failed (…)` instead of returning garbage data.
 - The four duplicate `/ws/ui-events` parsers (selection/notes/agent-activity/agent-pins, each with
   its own JSON.parse and try/catch) are consolidated into one exported `parseBridgeEvent` type-guard
   returning a discriminated union; behavior of every event kind is preserved (covered by
@@ -177,6 +196,18 @@
 - Bridge: the agent-activity tracker no longer panics on every agent-activity API call after a
   panic poisons its internal mutex; a poisoned lock now serves the last tracked state until the
   bridge restarts.
+- `herdr-web:terminal-connection-lost` is now dispatched once per outage instead of on every
+  reason-less close: failed reconnect attempts close the same way, and each dispatch triggered an
+  app-wide resnapshot. A successful reopen re-arms the signal for the next outage.
+- Queued terminal input now drains up to 8 parts (or 4 KiB) per 35ms tick instead of exactly one
+  part, so a submitted command and its Enter frame arrive together instead of Enter lagging one
+  tick behind; the caps still pace a large reconnect backlog onto a freshly opened socket.
+- Disposing the terminal renderer now also cancels the pending 0ms focus-retry timer from
+  `focusTextInput`, matching the render-frame cleanup, so a dispose right after focus cannot fire
+  into a detached textarea.
+- Trackpad wheel scrolling now accumulates fractional line deltas across wheel events
+  (`normalizeWheelLines` carries a remainder on the renderer) instead of rounding every sub-line
+  delta up to a full line, which made slow two-finger scrolling jump one line per event.
 - A machine-bridge connection whose local client disconnected is now torn down even when the
   ssh child keeps running: previously an ssh child that ignored stdin EOF and stayed silent held
   one of the 32 connection permits forever (the keepalive fix only covered the opposite case of a

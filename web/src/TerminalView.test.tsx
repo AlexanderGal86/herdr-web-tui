@@ -374,6 +374,44 @@ function testPane(terminalId: string): PaneInfo {
 
 
 describe("TerminalView connection-lost signaling", () => {
+  it("sends a queued command submit as one batch instead of pacing Enter 35ms behind", async () => {
+    const drafts = createCommandDraftStore();
+    await renderTerminalView(testPane("terminal-queued"), drafts);
+    const renderer = terminalRenderers[0]!;
+    await act(async () => renderer.completeMount());
+    const socket = FakeWebSocket.instances.at(-1)!;
+    await act(async () => {
+      socket.open();
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    const field = document.querySelector<HTMLElement>(
+      ".terminal-command-controls .term-native-input",
+    );
+    if (!field) {
+      throw new Error("Expected the command field");
+    }
+    const isTextarea = field instanceof HTMLTextAreaElement;
+    const valueSetter = Object.getOwnPropertyDescriptor(
+      (isTextarea ? window.HTMLTextAreaElement : window.HTMLInputElement).prototype,
+      "value",
+    )!.set!;
+    await act(async () => {
+      valueSetter.call(field, "echo hi");
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const send = [...document.querySelectorAll<HTMLButtonElement>(".term-send")].at(-1)!;
+    expect(send.getAttribute("aria-label")).toBe("Send command");
+    await act(async () => {
+      send.click();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    const inputFrames = socket.sent.filter((frame) => frame.includes('"type":"input"'));
+    expect(inputFrames).toEqual([
+      JSON.stringify({ type: "input", data: "echo hi" }),
+      JSON.stringify({ type: "input", data: "\r" }),
+    ]);
+  });
+
   it("signals herdr-web:terminal-connection-lost when the socket closes unexpectedly", async () => {
     const drafts = createCommandDraftStore();
     await renderTerminalView(testPane("terminal-lost"), drafts);
@@ -402,6 +440,139 @@ describe("TerminalView connection-lost signaling", () => {
     });
     window.removeEventListener(TERMINAL_CONNECTION_LOST_EVENT, listener);
     expect(lostEvents).toHaveLength(1);
+  });
+
+  it("signals terminal-connection-lost once per outage, not per failed reconnect", async () => {
+    const drafts = createCommandDraftStore();
+    await renderTerminalView(testPane("terminal-lost-once"), drafts);
+    const renderer = terminalRenderers[0]!;
+    await act(async () => renderer.completeMount());
+    const socket = FakeWebSocket.instances.at(-1)!;
+    await act(async () => {
+      socket.open();
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    const lostEvents: Event[] = [];
+    const listener = (event: Event) => lostEvents.push(event);
+    window.addEventListener(TERMINAL_CONNECTION_LOST_EVENT, listener);
+    await act(async () => {
+      socket.close();
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    expect(lostEvents).toHaveLength(1);
+    // The first reconnect attempt also closes without a reason; that is the
+    // same outage and must not trigger another app-wide resnapshot.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    const retrySocket = FakeWebSocket.instances.at(-1)!;
+    expect(retrySocket).not.toBe(socket);
+    await act(async () => {
+      retrySocket.close();
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    expect(lostEvents).toHaveLength(1);
+    // A successful reconnect ends the outage, so a later loss signals again.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1100);
+    });
+    const recoveredSocket = FakeWebSocket.instances.at(-1)!;
+    await act(async () => {
+      recoveredSocket.open();
+      await vi.advanceTimersByTimeAsync(600);
+      recoveredSocket.close();
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    window.removeEventListener(TERMINAL_CONNECTION_LOST_EVENT, listener);
+    expect(lostEvents).toHaveLength(2);
+  });
+});
+
+describe("TerminalView queued input draining", () => {
+  const inputFrames = (socket: FakeWebSocket) =>
+    socket.sent.filter((frame) => frame.includes('"type":"input"'));
+
+  const submitCommand = async (command: string) => {
+    const field = document.querySelector<HTMLElement>(
+      ".terminal-command-controls .term-native-input",
+    );
+    if (!field) {
+      throw new Error("Expected the command field");
+    }
+    const isTextarea = field instanceof HTMLTextAreaElement;
+    const valueSetter = Object.getOwnPropertyDescriptor(
+      (isTextarea ? window.HTMLTextAreaElement : window.HTMLInputElement).prototype,
+      "value",
+    )!.set!;
+    await act(async () => {
+      valueSetter.call(field, command);
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const send = [...document.querySelectorAll<HTMLButtonElement>(".term-send")].at(-1)!;
+    await act(async () => {
+      send.click();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+  };
+
+  const renderAttachedTerminal = async (terminalId: string) => {
+    const drafts = createCommandDraftStore();
+    await renderTerminalView(testPane(terminalId), drafts);
+    const renderer = terminalRenderers[0]!;
+    await act(async () => renderer.completeMount());
+    const socket = FakeWebSocket.instances.at(-1)!;
+    await act(async () => {
+      socket.open();
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    return socket;
+  };
+
+  it("sends a queued part larger than the per-tick byte budget whole instead of blocking", async () => {
+    const socket = await renderAttachedTerminal("terminal-oversized");
+    const oversized = "x".repeat(4097);
+    await submitCommand(oversized);
+    // The first part of a tick is exempt from the budget, so the oversized
+    // command goes out immediately and whole; the Enter frame paces to the
+    // next 35ms tick behind it in FIFO order.
+    expect(inputFrames(socket)).toEqual([
+      JSON.stringify({ type: "input", data: oversized }),
+    ]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(35);
+    });
+    expect(inputFrames(socket)).toEqual([
+      JSON.stringify({ type: "input", data: oversized }),
+      JSON.stringify({ type: "input", data: "\r" }),
+    ]);
+  });
+
+  it("holds queued input while the socket is closed and drains it in order after reconnect", async () => {
+    const socket = await renderAttachedTerminal("terminal-held");
+    const oversized = "y".repeat(4097);
+    await submitCommand(oversized);
+    // Tick 1 spent the budget on the oversized part, so Enter sits queued
+    // behind the 35ms pacing timer when the socket drops.
+    expect(inputFrames(socket)).toHaveLength(1);
+    socket.close();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(35);
+    });
+    // Nothing was sent past the closed socket (FakeWebSocket.send throws
+    // while not OPEN) and the queued Enter was not lost either.
+    expect(inputFrames(socket)).toHaveLength(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    const retrySocket = FakeWebSocket.instances.at(-1)!;
+    expect(retrySocket).not.toBe(socket);
+    await act(async () => {
+      retrySocket.open();
+      await vi.advanceTimersByTimeAsync(35);
+    });
+    expect(inputFrames(retrySocket)).toEqual([
+      JSON.stringify({ type: "input", data: "\r" }),
+    ]);
   });
 });
 

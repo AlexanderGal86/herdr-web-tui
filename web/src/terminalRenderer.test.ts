@@ -2,14 +2,142 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   disableGhosttySelectionClipboardWrites,
+  GhosttyRenderer,
   handleTerminalCustomKeyEvent,
   installMouseDragReporting,
   installTerminalInteractionRendering,
+  normalizeWheelLines,
   renderGhosttyTerminalFrame,
   refreshTerminalFontRendering,
   shouldUseEventDrivenTerminalRendering,
   suspendGhosttyIdleRenderLoop,
 } from "./terminalRenderer";
+
+// Minimal stand-in for the ghostty-web module: just enough surface for
+// GhosttyRenderer.mount()/dispose() to run against a stubbed terminal.
+vi.mock("ghostty-web", () => {
+  class Terminal {
+    options: { fontSize?: number };
+    cols = 80;
+    rows = 24;
+    textarea: HTMLTextAreaElement;
+    element: HTMLDivElement;
+    buffer = { active: { cursorX: 0, cursorY: 0 } };
+    renderer: { getCanvas: () => HTMLCanvasElement; getMetrics: () => { width: number; height: number } };
+
+    constructor(options: { fontSize?: number }) {
+      this.options = options;
+      this.textarea = document.createElement("textarea");
+      this.element = document.createElement("div");
+      const canvas = document.createElement("canvas");
+      // jsdom rects are zero-sized, which would route textarea positioning
+      // to the hidden parking spot; give the terminal a real rect instead.
+      canvas.getBoundingClientRect = () =>
+        ({ left: 0, top: 0, right: 640, bottom: 480, width: 640, height: 480, x: 0, y: 0 }) as DOMRect;
+      const metrics = { width: 9, height: 16 };
+      this.renderer = { getCanvas: () => canvas, getMetrics: () => metrics };
+    }
+
+    loadAddon() {}
+    open(container: HTMLElement) {
+      container.append(this.element, this.textarea);
+    }
+    attachCustomKeyEventHandler() {}
+    attachCustomWheelEventHandler() {}
+    onScroll() {
+      return { dispose() {} };
+    }
+    clearSelection() {}
+    input() {}
+    dispose() {}
+  }
+  class FitAddon {
+    fit() {}
+    dispose() {}
+  }
+  return { Terminal, FitAddon, init: async () => {} };
+});
+
+describe("normalizeWheelLines", () => {
+  const pixelWheel = (deltaY: number) => ({ deltaY, deltaMode: 0 });
+
+  it("accumulates sub-line pixel deltas until they cross a whole line", () => {
+    let remainder = 0;
+    for (let i = 0; i < 3; i += 1) {
+      const result = normalizeWheelLines(pixelWheel(4), 24, 1, remainder);
+      expect(result.lines).toBe(0);
+      remainder = result.remainder;
+    }
+    expect(normalizeWheelLines(pixelWheel(4), 24, 1, remainder)).toEqual({
+      lines: 1,
+      remainder: 0,
+    });
+  });
+
+  it("scrolls whole lines immediately and keeps the fractional remainder", () => {
+    expect(normalizeWheelLines(pixelWheel(40), 24, 1, 0)).toEqual({
+      lines: 2,
+      remainder: 0.5,
+    });
+  });
+
+  it("carries the remainder across events in both directions", () => {
+    const first = normalizeWheelLines(pixelWheel(-40), 24, 1, 0);
+    expect(first).toEqual({ lines: -2, remainder: -0.5 });
+    expect(normalizeWheelLines(pixelWheel(-8), 24, 1, first.remainder)).toEqual({
+      lines: -1,
+      remainder: 0,
+    });
+  });
+
+  it("keeps page and line delta modes on the same accumulation path", () => {
+    expect(normalizeWheelLines({ deltaY: 0.5, deltaMode: 1 }, 24, 1, 0)).toEqual({
+      lines: 0,
+      remainder: 0.5,
+    });
+    expect(normalizeWheelLines({ deltaY: 1, deltaMode: 2 }, 24, 1, 0)).toEqual({
+      lines: 24,
+      remainder: 0,
+    });
+  });
+
+  it("sends whole line-mode deltas immediately and accumulates fractional pages", () => {
+    expect(normalizeWheelLines({ deltaY: 3, deltaMode: 1 }, 24, 1, 0)).toEqual({
+      lines: 3,
+      remainder: 0,
+    });
+    expect(normalizeWheelLines({ deltaY: 0.5, deltaMode: 2 }, 24, 1, 0)).toEqual({
+      lines: 12,
+      remainder: 0,
+    });
+  });
+
+  // The remainder is signed and cumulative: a direction flip must consume the
+  // opposite fraction instead of resetting it, or every flip loses distance.
+  it("consumes the opposite-sign remainder on a direction change instead of resetting", () => {
+    const afterDown = normalizeWheelLines(pixelWheel(60), 24, 1, 0);
+    expect(afterDown).toEqual({ lines: 3, remainder: 0.75 });
+    expect(normalizeWheelLines(pixelWheel(-32), 24, 1, afterDown.remainder)).toEqual({
+      lines: -1,
+      remainder: -0.25,
+    });
+    // A flip smaller than the pending remainder scrolls nothing yet and keeps
+    // accumulating — nothing is lost, just deferred.
+    const flip = normalizeWheelLines(pixelWheel(-8), 24, 1, 0.75);
+    expect(flip).toEqual({ lines: 0, remainder: 0.25 });
+  });
+
+  it("applies sensitivity before accumulating the remainder", () => {
+    expect(normalizeWheelLines(pixelWheel(40), 24, 2, 0)).toEqual({
+      lines: 5,
+      remainder: 0,
+    });
+    expect(normalizeWheelLines(pixelWheel(40), 24, 0.5, 0)).toEqual({
+      lines: 1,
+      remainder: 0.25,
+    });
+  });
+});
 
 describe("terminal event-driven rendering", () => {
   it("redraws idle selections and scrolling and removes the hooks on disposal", () => {
@@ -308,3 +436,31 @@ function dispatchCtrlC(
   }
   return handled;
 }
+
+describe("GhosttyRenderer dispose", () => {
+  it("cancels the pending focus-retry timeout so it cannot fire after dispose", async () => {
+    vi.useFakeTimers();
+    const container = document.createElement("div");
+    document.body.append(container);
+    try {
+      const renderer = new GhosttyRenderer(14, true);
+      await renderer.mount(container);
+      const textarea = container.querySelector("textarea");
+      if (!textarea) {
+        throw new Error("Expected the terminal textarea");
+      }
+      renderer.focusTextInput();
+      // The sync part anchored the textarea at the cursor; the 0ms retry is pending.
+      expect(textarea.style.getPropertyValue("--ghostty-ime-left")).not.toBe("-10000px");
+      // Blurring makes the pending retry observable: if it survived dispose it
+      // would refocus the disposed terminal's textarea.
+      textarea.blur();
+      renderer.dispose();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(document.activeElement).not.toBe(textarea);
+    } finally {
+      vi.useRealTimers();
+      container.remove();
+    }
+  });
+});

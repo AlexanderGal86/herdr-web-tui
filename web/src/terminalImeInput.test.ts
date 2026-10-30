@@ -7,6 +7,7 @@ import {
   keyboardEventOutput,
   reduceTerminalImeState,
   shouldDeferBeforeInputToIme,
+  terminalInputEventFields,
   textareaDelta,
 } from "./terminalImeInput";
 import type { TerminalImeEvent, TerminalImeState } from "./terminalImeInput";
@@ -263,6 +264,36 @@ describe("terminal IME event sequences", () => {
 });
 
 describe("terminal IME guards", () => {
+  it("narrows a real input event to the fields the reducer reads", () => {
+    const event = { data: "a", inputType: "insertText", isComposing: false } as unknown as Event;
+    expect(terminalInputEventFields(event)).toEqual({
+      data: "a",
+      inputType: "insertText",
+      isComposing: false,
+    });
+  });
+
+  it("keeps null data from real input events", () => {
+    const event = { data: null, inputType: "insertText", isComposing: true } as unknown as Event;
+    expect(terminalInputEventFields(event)).toEqual({
+      data: null,
+      inputType: "insertText",
+      isComposing: true,
+    });
+  });
+
+  it("degrades non-input events to inert unknown-edit fields", () => {
+    expect(terminalInputEventFields({} as unknown as Event)).toEqual({
+      data: null,
+      inputType: "",
+      isComposing: false,
+    });
+    expect(terminalInputEventFields({ data: "x" } as unknown as Event)).toEqual({
+      data: null,
+      inputType: "",
+      isComposing: false,
+    });
+  });
   it("recognizes composing key events including legacy keyCode 229", () => {
     expect(isImeComposingKeyEvent({ isComposing: true, keyCode: 65 })).toBe(true);
     expect(isImeComposingKeyEvent({ isComposing: false, keyCode: 229 })).toBe(true);

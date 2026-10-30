@@ -25,6 +25,23 @@ export function terminalSelectionRange(
   };
 }
 
+/**
+ * Column range for one row of a selection: anchor rows clamp to their endpoint,
+ * intermediate rows span from column 0 to `defaultEndCol` (the row's last cell —
+ * callers pass the visible-rows text length or the terminal width).
+ */
+export function selectionRowColRange(
+  row: number,
+  from: { row: number; col: number },
+  to: { row: number; col: number },
+  defaultEndCol: number,
+) {
+  return {
+    startCol: row === from.row ? from.col : 0,
+    endCol: row === to.row ? to.col : defaultEndCol,
+  };
+}
+
 export function selectedTextFromVisibleRows(
   rows: readonly string[],
   start: TerminalSelectionPoint,
@@ -36,8 +53,12 @@ export function selectedTextFromVisibleRows(
   const selectedLines: string[] = [];
   for (let row = range.from.row; row <= range.to.row; row += 1) {
     const line = rows[row] ?? "";
-    const startCol = row === range.from.row ? range.from.col : 0;
-    const endCol = row === range.to.row ? range.to.col : Math.max(0, line.length - 1);
+    const { startCol, endCol } = selectionRowColRange(
+      row,
+      range.from,
+      range.to,
+      Math.max(0, line.length - 1),
+    );
     selectedLines.push(line.slice(startCol, endCol + 1).trimEnd());
   }
   return selectedLines.join("\n");
