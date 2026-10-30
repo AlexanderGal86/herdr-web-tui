@@ -3244,18 +3244,51 @@ async fn store_local_upload(
                 ));
             }
         }
-        let temp_path = upload_dir.join(format!(
-            ".herdr-web-upload-{}-{}.tmp",
-            std::process::id(),
-            UPLOAD_TEMP_COUNTER.fetch_add(1, Ordering::AcqRel)
-        ));
-        tokio::fs::write(&temp_path, body).await?;
-        // Uploads land in a shared directory; keep them owner-only like the
-        // agent-pins and notes stores instead of the umask default (0644),
-        // before the rename publishes the file.
-        if let Err(err) = crate::store_util::set_private_file_permissions(&temp_path) {
-            let _ = tokio::fs::remove_file(&temp_path).await;
-            return Err(UploadError::Io(err));
+        // Uploads land in a shared directory; keep the temp owner-only like
+        // the agent-pins and notes stores instead of the umask default (0644),
+        // and reserve it with create_new so a pre-planted symlink at the
+        // predictable temp name cannot redirect the write.
+        let mut reserved = None;
+        for _ in 0..2 {
+            let candidate = upload_dir.join(format!(
+                ".herdr-web-upload-{}-{}.tmp",
+                std::process::id(),
+                UPLOAD_TEMP_COUNTER.fetch_add(1, Ordering::AcqRel)
+            ));
+            let mut options = tokio::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            match options.open(&candidate).await {
+                Ok(file) => {
+                    reserved = Some((candidate, file));
+                    break;
+                }
+                // Stale temp from a previous run only costs one retry on the
+                // next counter value.
+                Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
+                Err(err) => return Err(UploadError::Io(err)),
+            }
+        }
+        let Some((temp_path, mut file)) = reserved else {
+            return Err(UploadError::Io(io::Error::new(
+                ErrorKind::AlreadyExists,
+                "upload temp name collision",
+            )));
+        };
+        {
+            use tokio::io::AsyncWriteExt;
+
+            if let Err(err) = async {
+                file.write_all(body).await?;
+                file.flush().await
+            }
+            .await
+            {
+                drop(file);
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                return Err(UploadError::Io(err));
+            }
         }
         // Unix rename(2) atomically replaces a regular-file destination, so the
         // previous upload never disappears mid-swap; Windows rename refuses
@@ -9219,6 +9252,59 @@ mod tests {
             0o600
         );
         let _ = std::fs::remove_dir_all(&upload_dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn store_local_upload_refuses_to_write_through_a_preplanted_temp_symlink() {
+        let unique = format!(
+            "herdr-web-upload-symlink-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let base = std::env::temp_dir().join(unique);
+        let upload_dir = base.join("uploads");
+        std::fs::create_dir_all(&upload_dir).unwrap();
+        let victim = base.join("victim.txt");
+        std::fs::write(&victim, b"original").unwrap();
+        std::fs::write(upload_dir.join("notes.txt"), b"first").unwrap();
+
+        // The temp counter is process-global and concurrent tests consume
+        // values, so poison a range wide enough to cover the drift and force
+        // both reservation attempts to collide.
+        let start = UPLOAD_TEMP_COUNTER.load(Ordering::Acquire);
+        for offset in 0..64 {
+            let name = format!(
+                ".herdr-web-upload-{}-{}.tmp",
+                std::process::id(),
+                start + offset
+            );
+            std::os::unix::fs::symlink(&victim, upload_dir.join(name)).unwrap();
+        }
+
+        let query = UploadQuery {
+            name: Some("notes.txt".to_string()),
+            overwrite: true,
+            rename_conflicts: false,
+        };
+        let result = store_local_upload(
+            &upload_dir,
+            &query,
+            Some("text/plain"),
+            &Bytes::from_static(b"replaced"),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"original".to_vec(),
+            "upload body must not be written through a pre-planted symlink"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
