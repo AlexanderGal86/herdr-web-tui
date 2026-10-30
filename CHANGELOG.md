@@ -156,6 +156,21 @@
 
 ### Fixed
 
+- Saved-machine ssh connections now send fast keepalives (`ServerAliveInterval=5`,
+  `ServerAliveCountMax=2`, matching the upload path) so a silently dead peer can no
+  longer hold a bridge connection permit; when the ssh child exits, the local bridge
+  socket is closed so the peer sees EOF and the permit is released promptly.
+- Pane observation polls no longer serialize the whole observation store twice per call to
+  detect changes; mutations now report their own change flag (matching the notes store), which
+  also removes a spurious rewrite when serialization ever failed. Recovered stores are still
+  rewritten unconditionally.
+- Saved-machine bridge sockets no longer die silently on transient accept errors (EMFILE,
+  ENFILE, ENOBUFS, ECONNABORTED): the accept loop now classifies errors, backs off with capped
+  exponential delay while remaining stop-responsive, and only exits (with a visible `failed`
+  state and an error log) when the listener itself is broken.
+- Local upload overwrites are now committed with a single atomic `rename` on Unix instead of
+  unlink-then-rename, so a crash or a failed swap can no longer leave the upload directory
+  without the previous file. Symlink and directory destinations are still refused.
 - Text selection is creatable with the mouse again in every pane, including ones whose app
   tracks the mouse (agent TUIs like pi, vim, htop): structured mouse reports are now forwarded
   to the pane app only in panes opted into right-click passthrough (TTT), so every other pane
