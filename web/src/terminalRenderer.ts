@@ -2263,6 +2263,10 @@ const DOM_DELTA_PAGE = 2;
  * Converts a wheel event to whole scroll lines, carrying the fractional
  * remainder between events so slow trackpad deltas accumulate instead of
  * each rounding up to a full line (jerky scrolling).
+ *
+ * The remainder is signed and carried across direction changes, never reset:
+ * carrying keeps lines the floor of the cumulative scrolled distance, while a
+ * reset would silently drop sub-line direction flips.
  */
 export function normalizeWheelLines(
   event: Pick<WheelEvent, "deltaY" | "deltaMode">,
