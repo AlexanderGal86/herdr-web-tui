@@ -5,11 +5,56 @@ import {
   handleTerminalCustomKeyEvent,
   installMouseDragReporting,
   installTerminalInteractionRendering,
+  normalizeWheelLines,
   renderGhosttyTerminalFrame,
   refreshTerminalFontRendering,
   shouldUseEventDrivenTerminalRendering,
   suspendGhosttyIdleRenderLoop,
 } from "./terminalRenderer";
+
+describe("normalizeWheelLines", () => {
+  const pixelWheel = (deltaY: number) => ({ deltaY, deltaMode: 0 });
+
+  it("accumulates sub-line pixel deltas until they cross a whole line", () => {
+    let remainder = 0;
+    for (let i = 0; i < 3; i += 1) {
+      const result = normalizeWheelLines(pixelWheel(4), 24, 1, remainder);
+      expect(result.lines).toBe(0);
+      remainder = result.remainder;
+    }
+    expect(normalizeWheelLines(pixelWheel(4), 24, 1, remainder)).toEqual({
+      lines: 1,
+      remainder: 0,
+    });
+  });
+
+  it("scrolls whole lines immediately and keeps the fractional remainder", () => {
+    expect(normalizeWheelLines(pixelWheel(40), 24, 1, 0)).toEqual({
+      lines: 2,
+      remainder: 0.5,
+    });
+  });
+
+  it("carries the remainder across events in both directions", () => {
+    const first = normalizeWheelLines(pixelWheel(-40), 24, 1, 0);
+    expect(first).toEqual({ lines: -2, remainder: -0.5 });
+    expect(normalizeWheelLines(pixelWheel(-8), 24, 1, first.remainder)).toEqual({
+      lines: -1,
+      remainder: 0,
+    });
+  });
+
+  it("keeps page and line delta modes on the same accumulation path", () => {
+    expect(normalizeWheelLines({ deltaY: 0.5, deltaMode: 1 }, 24, 1, 0)).toEqual({
+      lines: 0,
+      remainder: 0.5,
+    });
+    expect(normalizeWheelLines({ deltaY: 1, deltaMode: 2 }, 24, 1, 0)).toEqual({
+      lines: 24,
+      remainder: 0,
+    });
+  });
+});
 
 describe("terminal event-driven rendering", () => {
   it("redraws idle selections and scrolling and removes the hooks on disposal", () => {

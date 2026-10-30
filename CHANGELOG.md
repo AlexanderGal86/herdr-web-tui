@@ -177,6 +177,9 @@
 
 ### Fixed
 
+- Trackpad wheel scrolling now accumulates fractional line deltas across wheel events
+  (`normalizeWheelLines` carries a remainder on the renderer) instead of rounding every sub-line
+  delta up to a full line, which made slow two-finger scrolling jump one line per event.
 - A machine-bridge connection whose local client disconnected is now torn down even when the
   ssh child keeps running: previously an ssh child that ignored stdin EOF and stayed silent held
   one of the 32 connection permits forever (the keepalive fix only covered the opposite case of a

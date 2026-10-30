@@ -180,6 +180,7 @@ export class GhosttyRenderer implements TerminalRenderer {
   #fitAddon: FitAddon | null = null;
   #container: HTMLElement | null = null;
   #scrollSensitivity = 1;
+  #wheelLineRemainder = 0;
   #scrollCallback: ((lines: number) => void) | null = null;
   #touchCleanup: (() => void) | null = null;
   #mobileInputCleanup: (() => void) | null = null;
@@ -608,7 +609,13 @@ export class GhosttyRenderer implements TerminalRenderer {
       }
       event.preventDefault();
       event.stopPropagation();
-      const lines = normalizeWheelLines(event, terminal.rows, this.#scrollSensitivity);
+      const { lines, remainder } = normalizeWheelLines(
+        event,
+        terminal.rows,
+        this.#scrollSensitivity,
+        this.#wheelLineRemainder,
+      );
+      this.#wheelLineRemainder = remainder;
       if (lines === 0) {
         return true;
       }
@@ -2237,16 +2244,24 @@ function cssColor(element: Element, property: string, fallback: string) {
   return value || fallback;
 }
 
-function normalizeWheelLines(event: WheelEvent, rows: number, sensitivity: number) {
+/** DOM WheelEvent.deltaMode values (spec-fixed: pixel=0, line=1, page=2). */
+const DOM_DELTA_LINE = 1;
+const DOM_DELTA_PAGE = 2;
+
+/**
+ * Converts a wheel event to whole scroll lines, carrying the fractional
+ * remainder between events so slow trackpad deltas accumulate instead of
+ * each rounding up to a full line (jerky scrolling).
+ */
+export function normalizeWheelLines(
+  event: Pick<WheelEvent, "deltaY" | "deltaMode">,
+  rows: number,
+  sensitivity: number,
+  remainder: number,
+): { lines: number; remainder: number } {
   const unit =
-    event.deltaMode === WheelEvent.DOM_DELTA_PAGE
-      ? rows
-      : event.deltaMode === WheelEvent.DOM_DELTA_LINE
-        ? 1
-        : 1 / 16;
-  const rawLines = event.deltaY * unit * sensitivity;
-  if (Math.abs(rawLines) < 1) {
-    return rawLines < 0 ? -1 : rawLines > 0 ? 1 : 0;
-  }
-  return rawLines < 0 ? Math.ceil(rawLines) : Math.floor(rawLines);
+    event.deltaMode === DOM_DELTA_PAGE ? rows : event.deltaMode === DOM_DELTA_LINE ? 1 : 1 / 16;
+  const rawLines = event.deltaY * unit * sensitivity + remainder;
+  const lines = rawLines < 0 ? Math.ceil(rawLines) : Math.floor(rawLines);
+  return { lines, remainder: rawLines - lines };
 }
