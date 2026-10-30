@@ -177,6 +177,9 @@
 
 ### Fixed
 
+- Disposing the terminal renderer now also cancels the pending 0ms focus-retry timer from
+  `focusTextInput`, matching the render-frame cleanup, so a dispose right after focus cannot fire
+  into a detached textarea.
 - Trackpad wheel scrolling now accumulates fractional line deltas across wheel events
   (`normalizeWheelLines` carries a remainder on the renderer) instead of rounding every sub-line
   delta up to a full line, which made slow two-finger scrolling jump one line per event.

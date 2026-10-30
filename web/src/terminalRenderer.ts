@@ -198,6 +198,7 @@ export class GhosttyRenderer implements TerminalRenderer {
   #cursorBlink: boolean;
   #eventDrivenRendering: boolean;
   #renderFrameId: number | null = null;
+  #focusRetryTimeout: number | null = null;
   #renderInteractionCleanup: (() => void) | null = null;
   #selectionClipboardCleanup: (() => void) | null = null;
   #mouseHandlers: ((report: TerminalMouseReport) => void)[] = [];
@@ -378,7 +379,8 @@ export class GhosttyRenderer implements TerminalRenderer {
     positionGhosttyTextareaForInput(textarea, terminal);
     textarea.classList.add("ghostty-keyboard-input");
     textarea.focus({ preventScroll: true });
-    window.setTimeout(() => {
+    this.#focusRetryTimeout = window.setTimeout(() => {
+      this.#focusRetryTimeout = null;
       if (textarea.isConnected) {
         positionGhosttyTextareaForInput(textarea, this.#terminal);
         textarea.classList.add("ghostty-keyboard-input");
@@ -410,6 +412,10 @@ export class GhosttyRenderer implements TerminalRenderer {
     if (this.#renderFrameId !== null) {
       window.cancelAnimationFrame(this.#renderFrameId);
       this.#renderFrameId = null;
+    }
+    if (this.#focusRetryTimeout !== null) {
+      window.clearTimeout(this.#focusRetryTimeout);
+      this.#focusRetryTimeout = null;
     }
     this.#touchCleanup?.();
     this.#touchCleanup = null;
