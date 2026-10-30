@@ -118,6 +118,10 @@
 
 ### Changed
 
+- The four duplicate `/ws/ui-events` parsers (selection/notes/agent-activity/agent-pins, each with
+  its own JSON.parse and try/catch) are consolidated into one exported `parseBridgeEvent` type-guard
+  returning a discriminated union; behavior of every event kind is preserved (covered by
+  characterization tests).
 - The sidebar `spaceEntries` computation is memoized (like the neighboring machine space entries),
   avoiding an O(workspaces×panes) rebuild on every render.
 - Development model documented in `README.md` and `AGENTS.md`: upstream

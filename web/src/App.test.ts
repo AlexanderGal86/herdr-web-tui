@@ -42,6 +42,7 @@ import {
   stableBridgeRefreshOffsetMs,
   updateCollapsedSidebarGroups,
   isSnapshotPayload,
+  parseBridgeEvent,
 } from "./App";
 import type { BridgeConnectionRef, BridgeConnectionView } from "./App";
 import type { BridgeRuntime } from "./bridge";
@@ -2161,5 +2162,33 @@ describe("snapshot payload guard", () => {
     expect(isSnapshotPayload(null)).toBe(false);
     expect(isSnapshotPayload("snapshot")).toBe(false);
     expect(isSnapshotPayload({ workspaces: {}, tabs: [], panes: [], layouts: [] })).toBe(false);
+  });
+});
+
+describe("parseBridgeEvent", () => {
+  // Characterization of the previous selectionPaneId/isNotesChangedEvent/
+  // isAgentActivityChangedEvent/isAgentPinsChangedEvent behavior, captured
+  // before they were consolidated into one parser.
+  it("parses each recognized ui-event kind", () => {
+    expect(parseBridgeEvent({ data: JSON.stringify({ type: "herdr_web.selection_changed", pane_id: "p1" }) }))
+      .toEqual({ type: "selection", paneId: "p1" });
+    expect(parseBridgeEvent({ data: JSON.stringify({ type: "herdr_web.notes_changed" }) }))
+      .toEqual({ type: "notes_changed" });
+    expect(parseBridgeEvent({ data: JSON.stringify({ type: "herdr_web.agent_activity_changed" }) }))
+      .toEqual({ type: "agent_activity_changed" });
+    expect(parseBridgeEvent({ data: JSON.stringify({ type: "herdr_web.agent_pins_changed" }) }))
+      .toEqual({ type: "agent_pins_changed" });
+  });
+
+  it("treats malformed payloads as unknown, including selection events without a string pane id", () => {
+    expect(parseBridgeEvent({ data: JSON.stringify({ type: "herdr_web.selection_changed", pane_id: 7 }) }))
+      .toEqual({ type: "unknown" });
+    expect(parseBridgeEvent({ data: JSON.stringify({ type: "herdr_web.selection_changed" }) }))
+      .toEqual({ type: "unknown" });
+    expect(parseBridgeEvent({ data: JSON.stringify({ type: "something.else", pane_id: "p" }) }))
+      .toEqual({ type: "unknown" });
+    expect(parseBridgeEvent({ data: JSON.stringify([1, 2]) })).toEqual({ type: "unknown" });
+    expect(parseBridgeEvent({ data: "not json" })).toEqual({ type: "unknown" });
+    expect(parseBridgeEvent({ data: { nested: true } })).toEqual({ type: "unknown" });
   });
 });
