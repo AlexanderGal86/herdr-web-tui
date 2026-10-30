@@ -162,6 +162,9 @@
 
 ### Fixed
 
+- Bridge command and launcher-preset errors now go through the shared `apiErrorMessage` helper, so a
+  structured error body (e.g. `{"error":{...}}`) surfaces the HTTP status fallback instead of a
+  literal `[object Object]` message; plain string errors are still preferred.
 - `/api/notes` responses are validated instead of blindly cast: list and mutation payloads go through
   `parseNotesList`/`parsePaneNote` guards (modeled on `parseMachinesList`), malformed note entries are
   dropped from lists, and a malformed single-note response fails with an explicit error instead of

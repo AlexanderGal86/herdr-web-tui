@@ -36,6 +36,23 @@ describe("command helpers", () => {
     expect(createdPaneId({})).toBeNull();
   });
 
+  it("keeps structured error bodies from becoming [object Object]", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response(JSON.stringify({ error: { code: 7 } }), { status: 500 }),
+    );
+
+    await expect(
+      createCommands((path) => `http://bridge:8787${path}`).closePane("pane-1"),
+    ).rejects.toThrow("command failed (500)");
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response(JSON.stringify({ error: "boom" }), { status: 502 }),
+    );
+    await expect(
+      createCommands((path) => `http://bridge:8787${path}`).closePane("pane-1"),
+    ).rejects.toThrow("boom");
+  });
+
   it("uses injected bridge URLs for commands", async () => {
     const httpUrl = (path: string) => `http://192.168.1.20:4000${path}`;
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
