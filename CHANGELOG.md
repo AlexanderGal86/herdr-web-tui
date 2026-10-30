@@ -162,6 +162,9 @@
 
 ### Fixed
 
+- Bridge: the agent-activity tracker no longer panics on every agent-activity API call after a
+  panic poisons its internal mutex; a poisoned lock now serves the last tracked state until the
+  bridge restarts.
 - A machine-bridge connection whose local client disconnected is now torn down even when the
   ssh child keeps running: previously an ssh child that ignored stdin EOF and stayed silent held
   one of the 32 connection permits forever (the keepalive fix only covered the opposite case of a
