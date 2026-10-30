@@ -3245,6 +3245,10 @@ async fn store_local_upload(
             UPLOAD_TEMP_COUNTER.fetch_add(1, Ordering::AcqRel)
         ));
         tokio::fs::write(&temp_path, body).await?;
+        // Unix rename(2) atomically replaces a regular-file destination, so the
+        // previous upload never disappears mid-swap; Windows rename refuses
+        // existing destinations, so the unlink stays there only.
+        #[cfg(windows)]
         if destination.exists() {
             tokio::fs::remove_file(&destination).await?;
         }
@@ -9305,6 +9309,100 @@ mod tests {
         ];
         contents.sort();
         assert_eq!(contents, [b"first".to_vec(), b"second".to_vec()]);
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn store_local_upload_overwrite_replaces_existing_file_and_cleans_temp() {
+        let dir = upload_test_dir("overwrite");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("image.png"), b"old")
+            .await
+            .unwrap();
+        let query = UploadQuery {
+            name: Some("image.png".to_string()),
+            overwrite: true,
+            rename_conflicts: false,
+        };
+
+        let response = store_local_upload(&dir, &query, None, &Bytes::from_static(b"new"))
+            .await
+            .unwrap();
+
+        assert_eq!(response.file.name, "image.png");
+        assert_eq!(response.file.size, b"new".len());
+        assert_eq!(
+            tokio::fs::read(dir.join("image.png")).await.unwrap(),
+            b"new"
+        );
+        let mut read_dir = tokio::fs::read_dir(&dir).await.unwrap();
+        let mut entries = Vec::new();
+        while let Some(entry) = read_dir.next_entry().await.unwrap() {
+            entries.push(entry.file_name().to_string_lossy().to_string());
+        }
+        entries.sort();
+        assert_eq!(entries, vec!["image.png".to_string()]);
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn store_local_upload_overwrite_refuses_directory_destination() {
+        let dir = upload_test_dir("refuse-dir");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::create_dir_all(dir.join("nested.png"))
+            .await
+            .unwrap();
+        let query = UploadQuery {
+            name: Some("nested.png".to_string()),
+            overwrite: true,
+            rename_conflicts: false,
+        };
+
+        let err = store_local_upload(&dir, &query, None, &Bytes::from_static(b"new"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            UploadError::BadRequest(ref message)
+                if message == "refusing to overwrite non-file path"
+        ));
+        assert!(tokio::fs::metadata(dir.join("nested.png"))
+            .await
+            .unwrap()
+            .is_dir());
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn store_local_upload_overwrite_refuses_symlink_destination() {
+        let dir = upload_test_dir("refuse-symlink");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let outside = dir.join("outside.png");
+        tokio::fs::write(&outside, b"untouched").await.unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("link.png")).unwrap();
+        let query = UploadQuery {
+            name: Some("link.png".to_string()),
+            overwrite: true,
+            rename_conflicts: false,
+        };
+
+        let err = store_local_upload(&dir, &query, None, &Bytes::from_static(b"new"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            UploadError::BadRequest(ref message)
+                if message == "refusing to overwrite non-file path"
+        ));
+        assert_eq!(tokio::fs::read(&outside).await.unwrap(), b"untouched");
+        assert!(tokio::fs::symlink_metadata(dir.join("link.png"))
+            .await
+            .unwrap()
+            .file_type()
+            .is_symlink());
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 

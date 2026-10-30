@@ -156,6 +156,9 @@
 
 ### Fixed
 
+- Local upload overwrites are now committed with a single atomic `rename` on Unix instead of
+  unlink-then-rename, so a crash or a failed swap can no longer leave the upload directory
+  without the previous file. Symlink and directory destinations are still refused.
 - Text selection is creatable with the mouse again in every pane, including ones whose app
   tracks the mouse (agent TUIs like pi, vim, htop): structured mouse reports are now forwarded
   to the pane app only in panes opted into right-click passthrough (TTT), so every other pane
