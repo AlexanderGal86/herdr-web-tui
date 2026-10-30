@@ -181,6 +181,9 @@
 
 ### Fixed
 
+- Queued terminal input now drains up to 8 parts (or 4 KiB) per 35ms tick instead of exactly one
+  part, so a submitted command and its Enter frame arrive together instead of Enter lagging one
+  tick behind; the caps still pace a large reconnect backlog onto a freshly opened socket.
 - Disposing the terminal renderer now also cancels the pending 0ms focus-retry timer from
   `focusTextInput`, matching the render-frame cleanup, so a dispose right after focus cannot fire
   into a detached textarea.

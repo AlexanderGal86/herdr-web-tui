@@ -439,6 +439,12 @@ export function TerminalView({
     }
   }, []);
 
+// Drain up to this many queued parts (or bytes) per 35ms tick: a submit enqueues the
+// command and its Enter frame together, so pacing one part per tick delayed Enter;
+// the caps keep a large reconnect backlog from dumping onto a freshly opened socket.
+const TERMINAL_INPUT_QUEUE_MAX_PARTS_PER_TICK = 8;
+const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
+
   const flushQueuedTerminalInput = useCallback(() => {
     if (inputFlushTimerRef.current !== null) {
       window.clearTimeout(inputFlushTimerRef.current);
@@ -450,8 +456,20 @@ export function TerminalView({
       if (socket?.readyState !== WebSocket.OPEN) {
         return;
       }
-      const next = inputQueueRef.current.shift();
-      if (next !== undefined) {
+      let sentParts = 0;
+      let sentBytes = 0;
+      while (inputQueueRef.current.length > 0) {
+        const next = inputQueueRef.current[0]!;
+        if (
+          sentParts > 0 &&
+          (sentParts >= TERMINAL_INPUT_QUEUE_MAX_PARTS_PER_TICK ||
+            sentBytes + next.length > TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK)
+        ) {
+          break;
+        }
+        inputQueueRef.current.shift();
+        sentParts += 1;
+        sentBytes += next.length;
         sendTerminalInputFrame(socket, next);
       }
       if (inputQueueRef.current.length > 0) {
