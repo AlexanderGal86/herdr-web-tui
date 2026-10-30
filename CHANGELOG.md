@@ -118,6 +118,10 @@
 
 ### Changed
 
+- The duplicated selection column-range ternaries in `selectedTextFromVisibleRows` and the
+  renderer's viewport selection text are extracted into a shared tested `selectionRowColRange`
+  helper (anchor rows clamp to their endpoint, intermediate rows span to the caller's row end);
+  both call sites keep their existing row-end behavior.
 - The five scattered `as` casts reaching ghostty-web's private runtime fields are consolidated:
   one `ghosttyTerminalPrivateFields` view (animationFrameId/scrollbarOpacity/selectionManager) and
   one `terminalBufferLine` helper (the grapheme_len superset of `IBufferLine`) now carry the only

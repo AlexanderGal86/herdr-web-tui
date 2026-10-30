@@ -5,6 +5,7 @@ import {
   normalizeSelectionForUrl,
   openableHttpUrl,
   selectedTextFromVisibleRows,
+  selectionRowColRange,
   terminalSelectionRange,
   terminalSelectionRightClickCopyText,
   terminalUrlTapTarget,
@@ -153,6 +154,28 @@ describe("terminal selection helpers", () => {
     expect(selectedTextFromVisibleRows(["alpha"], { col: 1, row: 0 }, { col: 1, row: 0 }, 10)).toBe(
       "l",
     );
+  });
+
+  it("computes per-row column ranges for anchor and intermediate rows", () => {
+    expect(selectionRowColRange(1, { col: 2, row: 1 }, { col: 5, row: 3 }, 15)).toEqual({
+      startCol: 2,
+      endCol: 15,
+    });
+    expect(selectionRowColRange(2, { col: 2, row: 1 }, { col: 5, row: 3 }, 15)).toEqual({
+      startCol: 0,
+      endCol: 15,
+    });
+    expect(selectionRowColRange(3, { col: 2, row: 1 }, { col: 5, row: 3 }, 15)).toEqual({
+      startCol: 0,
+      endCol: 5,
+    });
+  });
+
+  it("uses raw anchor roles unchanged; callers pass the normalized range", () => {
+    expect(selectionRowColRange(3, { col: 5, row: 3 }, { col: 2, row: 1 }, 15)).toEqual({
+      startCol: 5,
+      endCol: 15,
+    });
   });
 
   it("returns null for right-click copy text without selectable content", () => {

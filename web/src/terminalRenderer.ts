@@ -2,6 +2,7 @@ import type { FitAddon, Terminal } from "ghostty-web";
 import {
   findFirstUrlInSelection,
   openableHttpUrl,
+  selectionRowColRange,
   terminalSelectionRange,
   terminalUrlTapTarget,
   trimUrlPunctuation,
@@ -2122,8 +2123,12 @@ function terminalSelectedTextFromViewportRange(
   for (let row = range.from.row; row <= range.to.row; row += 1) {
     const bufferRow = terminalBufferRow(terminal, row);
     const line = terminalBufferLine(terminal.buffer.active, bufferRow);
-    const startCol = row === range.from.row ? range.from.col : 0;
-    const endCol = row === range.to.row ? range.to.col : terminal.cols - 1;
+    const { startCol, endCol } = selectionRowColRange(
+      row,
+      range.from,
+      range.to,
+      terminal.cols - 1,
+    );
     selectedLines.push(
       line
         ? terminalBufferLineCellText(
