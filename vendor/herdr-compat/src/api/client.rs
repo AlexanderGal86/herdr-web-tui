@@ -212,7 +212,15 @@ impl fmt::Display for ApiClientError {
     }
 }
 
-impl std::error::Error for ApiClientError {}
+impl std::error::Error for ApiClientError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(err) => Some(err),
+            Self::Json(err) => Some(err),
+            Self::ErrorResponse(_) | Self::EmptyResponse | Self::UnexpectedResult(_) => None,
+        }
+    }
+}
 
 impl From<io::Error> for ApiClientError {
     fn from(err: io::Error) -> Self {
@@ -294,6 +302,22 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::io::Read;
+
+    #[test]
+    fn api_client_error_exposes_wrapped_io_and_json_sources() {
+        let err = ApiClientError::Io(io::Error::new(io::ErrorKind::ConnectionRefused, "refused"));
+        let source = std::error::Error::source(&err);
+        assert!(source
+            .and_then(|source| source.downcast_ref::<io::Error>())
+            .is_some_and(|source| source.kind() == io::ErrorKind::ConnectionRefused));
+
+        let json = ApiClientError::Json(
+            serde_json::from_str::<serde_json::Value>("not json").unwrap_err(),
+        );
+        assert!(std::error::Error::source(&json).is_some());
+
+        assert!(std::error::Error::source(&ApiClientError::EmptyResponse).is_none());
+    }
 
     #[test]
     fn socket_path_target_uses_explicit_path() {

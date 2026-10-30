@@ -162,6 +162,21 @@
 
 ### Fixed
 
+- Vendored herdr-compat: `ApiClientError` now implements `source()`, so the underlying io or
+  serde_json cause stays reachable through the error chain for loggers and diagnostics (the
+  bridge binary picks this up without changes); `Display` output is unchanged.
+- Bridge: terminal-session pruning no longer fires on Herdr events whose payload text merely
+  contains a substring like `pane.closed` (e.g. a pane cwd or label); the event envelope's exact
+  `event` kind is now parsed and matched, and non-JSON payloads never prune.
+- Bridge: uploaded files are now stored with owner-only permissions (0600), set at creation
+  time (create-new path) or on the temp file before the publish rename (overwrite path), instead
+  of the umask default (0644) that briefly exposed uploaded content to other local users; the
+  upload directory itself is unchanged.
+- Bridge: the `Content-Security-Policy` header is now computed once at startup and cloned per
+  response instead of being rebuilt from the configured connect sources on every HTTP reply.
+- Bridge: the agent-activity tracker no longer panics on every agent-activity API call after a
+  panic poisons its internal mutex; a poisoned lock now serves the last tracked state until the
+  bridge restarts.
 - A machine-bridge connection whose local client disconnected is now torn down even when the
   ssh child keeps running: previously an ssh child that ignored stdin EOF and stayed silent held
   one of the 32 connection permits forever (the keepalive fix only covered the opposite case of a

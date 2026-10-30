@@ -71,14 +71,14 @@ impl AgentActivityManager {
     pub fn observe_snapshot(&self, panes: &[PaneInfo]) -> bool {
         self.tracker
             .lock()
-            .expect("agent activity tracker lock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .observe_snapshot(panes, now_ms())
     }
 
     pub fn observe_status_event(&self, pane_id: &str, agent_status: AgentStatus) -> bool {
         self.tracker
             .lock()
-            .expect("agent activity tracker lock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .observe_status_event(pane_id, agent_status, now_ms())
     }
 
@@ -86,7 +86,7 @@ impl AgentActivityManager {
         let records = self
             .tracker
             .lock()
-            .expect("agent activity tracker lock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .list(panes);
         AgentActivityListResponse {
             session_key: self.session_key.clone(),
@@ -445,6 +445,23 @@ mod tests {
             records[0].last_status_transition_at.as_deref(),
             Some("1200")
         );
+    }
+
+    #[test]
+    fn poisoned_tracker_lock_still_serves_agent_activity_api() {
+        let manager = AgentActivityManager::new();
+        // A panic while holding the tracker lock is the only way the mutex
+        // gets poisoned; the tracker is advisory and recoverable, so later
+        // API calls must keep serving the stale data instead of panicking.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = manager.tracker.lock().unwrap();
+            panic!("poison the tracker lock");
+        }));
+        assert!(manager.tracker.is_poisoned());
+
+        manager.observe_status_event("pane-1", AgentStatus::Working);
+        let response = manager.list(&[]);
+        assert_eq!(response.records.len(), 0);
     }
 
     #[test]

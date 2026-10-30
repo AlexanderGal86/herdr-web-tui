@@ -134,7 +134,8 @@ struct RequestPolicy {
     bind_port: u16,
     allowed_hosts: Vec<String>,
     allowed_origins: Vec<String>,
-    allowed_connect_sources: Vec<String>,
+    // Precomputed once at startup so per-response security-header insertion is a clone.
+    content_security_policy: HeaderValue,
     default_scheme_port: u16,
 }
 
@@ -1097,12 +1098,14 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
             .map_err(|message| io::Error::new(ErrorKind::InvalidInput, message))?,
     );
     let notes = Arc::new(NotesManager::new()?);
+    let allowed_connect_sources = options.allowed_connect_sources.clone();
+    let content_security_policy = content_security_policy(&allowed_connect_sources);
     let request_policy = RequestPolicy {
         bind_host: options.host.clone(),
         bind_port: options.port,
         allowed_hosts: options.allowed_hosts.clone(),
         allowed_origins: options.allowed_origins.clone(),
-        allowed_connect_sources: options.allowed_connect_sources.clone(),
+        content_security_policy,
         default_scheme_port: if options.tls_self_signed { 443 } else { 80 },
     };
     let api = ApiClient::for_socket_path(crate::session::active_api_socket_path());
@@ -1350,7 +1353,7 @@ async fn add_security_headers(
     );
     headers.insert(
         HeaderName::from_static("content-security-policy"),
-        content_security_policy(&policy),
+        policy.content_security_policy.clone(),
     );
     if let Some(origin) = cors_origin {
         insert_cors_headers(headers, origin);
@@ -1572,12 +1575,14 @@ async fn create_new_upload(
         if !is_direct_child(upload_dir, &destination) {
             return Err(UploadError::BadRequest("invalid file name".to_string()));
         }
-        match tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&destination)
-            .await
-        {
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // Uploads land in a shared directory; keep them owner-only like the
+        // agent-pins and notes stores instead of the umask default (0644),
+        // starting at file creation so the file is never briefly world-readable.
+        #[cfg(unix)]
+        options.mode(0o600);
+        match options.open(&destination).await {
             Ok(mut file) => {
                 use tokio::io::AsyncWriteExt;
 
@@ -1776,9 +1781,9 @@ fn connect_sources_for_origin(origin: &str) -> Result<Vec<String>, String> {
     Ok(vec![origin, websocket_origin])
 }
 
-fn content_security_policy(policy: &RequestPolicy) -> HeaderValue {
+fn content_security_policy(allowed_connect_sources: &[String]) -> HeaderValue {
     let mut connect_src = vec!["'self'".to_string(), "data:".to_string()];
-    connect_src.extend(policy.allowed_connect_sources.iter().cloned());
+    connect_src.extend(allowed_connect_sources.iter().cloned());
     let value = format!(
         "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src {}; \
          img-src 'self' data: blob:; \
@@ -3245,6 +3250,13 @@ async fn store_local_upload(
             UPLOAD_TEMP_COUNTER.fetch_add(1, Ordering::AcqRel)
         ));
         tokio::fs::write(&temp_path, body).await?;
+        // Uploads land in a shared directory; keep them owner-only like the
+        // agent-pins and notes stores instead of the umask default (0644),
+        // before the rename publishes the file.
+        if let Err(err) = crate::store_util::set_private_file_permissions(&temp_path) {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(UploadError::Io(err));
+        }
         // Unix rename(2) atomically replaces a regular-file destination, so the
         // previous upload never disappears mid-swap; Windows rename refuses
         // existing destinations, so the unlink stays there only.
@@ -5015,10 +5027,19 @@ fn close_terminal_session(
     }
 }
 
+/// Herdr subscription events are `{"event":"<kind>","data":{...}}` envelopes
+/// (`SubscriptionEventEnvelope`). Only an exact structural close kind may prune
+/// terminal sessions, so payload text such as a cwd or label containing
+/// "pane.closed" can never match, and non-JSON or bridge-local error payloads
+/// (which use a `"type"` field) return false.
 fn event_may_close_terminal_session(event: &str) -> bool {
-    event.contains("workspace.closed")
-        || event.contains("tab.closed")
-        || event.contains("pane.closed")
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(event) else {
+        return false;
+    };
+    value
+        .get("event")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|kind| matches!(kind, "workspace.closed" | "tab.closed" | "pane.closed"))
 }
 
 fn close_message(reason: &str) -> String {
@@ -5888,7 +5909,7 @@ mod tests {
             bind_port: 0,
             allowed_hosts: Vec::new(),
             allowed_origins: Vec::new(),
-            allowed_connect_sources: Vec::new(),
+            content_security_policy: content_security_policy(&Vec::new()),
             default_scheme_port: 443,
         };
         let state = BridgeState {
@@ -6084,7 +6105,7 @@ mod tests {
             bind_port: 0,
             allowed_hosts: Vec::new(),
             allowed_origins: Vec::new(),
-            allowed_connect_sources: Vec::new(),
+            content_security_policy: content_security_policy(&Vec::new()),
             default_scheme_port: 80,
         };
         let state = BridgeState {
@@ -6158,7 +6179,7 @@ mod tests {
             bind_port: 0,
             allowed_hosts: Vec::new(),
             allowed_origins: Vec::new(),
-            allowed_connect_sources: Vec::new(),
+            content_security_policy: content_security_policy(&Vec::new()),
             default_scheme_port: 80,
         };
         let state = BridgeState {
@@ -7962,7 +7983,7 @@ mod tests {
             bind_port: 4000,
             allowed_hosts: Vec::new(),
             allowed_origins: vec!["http://localhost".to_string()],
-            allowed_connect_sources: Vec::new(),
+            content_security_policy: content_security_policy(&Vec::new()),
             default_scheme_port: 80,
         };
         assert!(request_allowed(
@@ -8029,7 +8050,7 @@ mod tests {
             bind_port: 4000,
             allowed_hosts: vec!["herdr-host.local".to_string()],
             allowed_origins: Vec::new(),
-            allowed_connect_sources: Vec::new(),
+            content_security_policy: content_security_policy(&Vec::new()),
             default_scheme_port: 80,
         };
         assert!(host_authority_allowed("herdr-host.local:4000", &policy));
@@ -8045,7 +8066,7 @@ mod tests {
             bind_port: 4000,
             allowed_hosts: Vec::new(),
             allowed_origins: vec!["http://localhost".to_string()],
-            allowed_connect_sources: Vec::new(),
+            content_security_policy: content_security_policy(&Vec::new()),
             default_scheme_port: 80,
         };
         assert_eq!(
@@ -8099,12 +8120,26 @@ mod tests {
     }
 
     #[test]
-    fn content_security_policy_includes_configured_connect_sources() {
-        let mut policy = test_policy("0.0.0.0", 8787);
-        policy.allowed_connect_sources = connect_sources_for_origin("http://srv:8787").unwrap();
+    fn content_security_policy_pins_the_default_header_value() {
+        let policy = test_policy("127.0.0.1", 8787);
 
-        let header = content_security_policy(&policy);
-        let value = header.to_str().unwrap();
+        assert_eq!(
+            policy.content_security_policy.to_str().unwrap(),
+            "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' data:; \
+             img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self'; \
+             object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+        );
+    }
+
+    #[test]
+    fn content_security_policy_includes_configured_connect_sources() {
+        let connect_sources = connect_sources_for_origin("http://srv:8787").unwrap();
+        let policy = RequestPolicy {
+            content_security_policy: content_security_policy(&connect_sources),
+            ..test_policy("0.0.0.0", 8787)
+        };
+
+        let value = policy.content_security_policy.to_str().unwrap();
 
         assert!(value.contains("connect-src 'self' data: http://srv:8787 ws://srv:8787;"));
         assert!(value.contains("img-src 'self' data: blob:;"));
@@ -9071,10 +9106,12 @@ mod tests {
 
     #[test]
     fn tls_origin_wss_connect_sources() {
-        let mut policy = test_policy("0.0.0.0", 9443);
-        policy.allowed_connect_sources =
-            connect_sources_for_origin("https://srv.example:9443").unwrap();
-        let csp = content_security_policy(&policy);
+        let connect_sources = connect_sources_for_origin("https://srv.example:9443").unwrap();
+        let policy = RequestPolicy {
+            content_security_policy: content_security_policy(&connect_sources),
+            ..test_policy("0.0.0.0", 9443)
+        };
+        let csp = policy.content_security_policy;
         let csp = csp.to_str().expect("csp header");
         assert!(csp.contains("https://srv.example:9443"));
         assert!(csp.contains("wss://srv.example:9443"));
@@ -9121,6 +9158,99 @@ mod tests {
             protocol: Some(protocol),
             capabilities: None,
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn store_local_upload_sets_private_file_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let unique = format!(
+            "herdr-web-upload-perms-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let upload_dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&upload_dir).unwrap();
+        let create_query = UploadQuery {
+            name: Some("notes.txt".to_string()),
+            overwrite: false,
+            rename_conflicts: false,
+        };
+        store_local_upload(
+            &upload_dir,
+            &create_query,
+            Some("text/plain"),
+            &Bytes::from_static(b"body"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::metadata(upload_dir.join("notes.txt"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        let overwrite_query = UploadQuery {
+            name: Some("notes.txt".to_string()),
+            overwrite: true,
+            rename_conflicts: false,
+        };
+        store_local_upload(
+            &upload_dir,
+            &overwrite_query,
+            Some("text/plain"),
+            &Bytes::from_static(b"replaced"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::metadata(upload_dir.join("notes.txt"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let _ = std::fs::remove_dir_all(&upload_dir);
+    }
+
+    #[test]
+    fn event_may_close_terminal_session_matches_only_envelope_event_kind() {
+        // Daemon subscription events are {"event":"<kind>","data":{...}} envelopes.
+        assert!(event_may_close_terminal_session(
+            r#"{"event":"pane.closed","data":{"pane_id":"pane-1"}}"#
+        ));
+        assert!(event_may_close_terminal_session(
+            r#"{"event":"tab.closed","data":{"tab_id":"tab-1"}}"#
+        ));
+        assert!(event_may_close_terminal_session(
+            r#"{"event":"workspace.closed","data":{"workspace_id":"ws-1"}}"#
+        ));
+    }
+
+    #[test]
+    fn event_may_close_terminal_session_ignores_payload_text_and_bad_json() {
+        // The close kind appearing only inside payload text (cwd/label) must
+        // not prune a terminal session.
+        assert!(!event_may_close_terminal_session(
+            r#"{"event":"pane.updated","data":{"pane_id":"pane-1","cwd":"/tmp/pane.closed","label":"tab.closed demo"}}"#
+        ));
+        assert!(!event_may_close_terminal_session(
+            r#"{"event":"pane.focused","data":{"pane_id":"workspace.closed"}}"#
+        ));
+        // Bridge-local stream error fallbacks are not close events.
+        assert!(!event_may_close_terminal_session(
+            r#"{"type":"error","error":"read failed"}"#
+        ));
+        assert!(!event_may_close_terminal_session("not json at all"));
+        assert!(!event_may_close_terminal_session(""));
     }
 
     #[test]
@@ -9436,7 +9566,7 @@ mod tests {
             bind_port,
             allowed_hosts: Vec::new(),
             allowed_origins: Vec::new(),
-            allowed_connect_sources: Vec::new(),
+            content_security_policy: content_security_policy(&Vec::new()),
             default_scheme_port: 80,
         }
     }
@@ -9474,7 +9604,7 @@ mod tests {
             bind_port: 443,
             allowed_hosts: vec!["srv.example".to_string()],
             allowed_origins: Vec::new(),
-            allowed_connect_sources: Vec::new(),
+            content_security_policy: content_security_policy(&Vec::new()),
             default_scheme_port: 443,
         };
         assert!(host_authority_allowed("srv.example", &policy));
