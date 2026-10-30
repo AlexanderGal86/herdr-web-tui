@@ -42,6 +42,7 @@ import {
   isImeComposingKeyEvent,
   keyboardEventOutput,
   reduceTerminalImeState,
+  terminalInputEventFields,
   shouldDeferBeforeInputToIme,
   textareaDelta,
 } from "./terminalImeInput";
@@ -1471,12 +1472,12 @@ export class GhosttyRenderer implements TerminalRenderer {
       }
     };
     const onInput = (event: Event) => {
-      const inputEvent = event as InputEvent;
+      const { data, inputType, isComposing } = terminalInputEventFields(event);
       const transition = reduceTerminalImeState(imeState, {
         type: "input",
-        data: inputEvent.data,
-        inputType: inputEvent.inputType,
-        isComposing: inputEvent.isComposing,
+        data,
+        inputType,
+        isComposing,
         textareaValue: textarea.value,
       });
       imeState = transition.state;

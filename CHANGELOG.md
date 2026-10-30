@@ -118,6 +118,9 @@
 
 ### Changed
 
+- The terminal `input` event handler narrows its `Event` to the fields the IME reducer reads with
+  a validated `terminalInputEventFields` guard instead of a blind `as InputEvent` cast, so a
+  non-InputEvent dispatch degrades to an unknown edit instead of reading undefined fields.
 - Terminal upload responses are validated with a runtime type guard (mirroring the notes/machines
   parsers) instead of an unchecked cast, so a malformed `file` payload now fails the upload with
   `Upload failed (…)` instead of returning garbage data.
