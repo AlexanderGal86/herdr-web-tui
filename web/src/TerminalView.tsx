@@ -900,6 +900,8 @@ export function TerminalView({
           const mouseMode = parseTerminalMouseMode(event.data);
           if (mouseMode !== null) {
             ready.renderer.setMouseCapture(mouseMode);
+            // Re-seed the gate with every mouse_mode frame: a pane that
+            // starts/stops tracking must not lose (or gain) forwarding.
             ready.renderer.setMousePassthrough(rightClickPassthroughRef.current);
             return;
           }
