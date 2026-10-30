@@ -182,10 +182,22 @@ export function BackendSettingsDialog({
   const titleId = useId();
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   useFocusReturn();
-  const [form, setForm] = useState<FormState>(() => newBackendForm(bridge.store.backends));
-  const [selectionMode, setSelectionMode] = useState<SelectionMode>(
+  const [form, setFormState] = useState<FormState>(() => newBackendForm(bridge.store.backends));
+  const [selectionMode, setSelectionModeState] = useState<SelectionMode>(
     initialSelectionMode(bridge.lastSelectedBridgeId, bridge.sameOriginAvailable),
   );
+  // Bumped on every form/selection change and on every save start, so an
+  // in-flight save only restores the form when nothing touched it since the
+  // save began (user edit, mode/selection change, or a newer save).
+  const formGeneration = useRef(0);
+  const setForm: typeof setFormState = (update) => {
+    formGeneration.current += 1;
+    setFormState(update);
+  };
+  const setSelectionMode: typeof setSelectionModeState = (update) => {
+    formGeneration.current += 1;
+    setSelectionModeState(update);
+  };
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [duplicate, setDuplicate] = useState<BridgeBackendProfile | null>(null);
@@ -270,6 +282,7 @@ export function BackendSettingsDialog({
   const saveBackend = async () => {
     setBusy(true);
     setMessage(null);
+    const requestGeneration = ++formGeneration.current;
     try {
       const baseUrl = normalizeBridgeBaseUrl(form.baseUrl);
       const found = duplicateBackend(bridge.store.backends, baseUrl, form.id ?? undefined);
@@ -284,20 +297,16 @@ export function BackendSettingsDialog({
       } catch (error) {
         probeWarning = error instanceof Error ? error.message : "Backend could not be reached.";
       }
-      const requestFormId = form.id;
-      const requestBaseUrl = baseUrl;
-      const requestSelectionMode = selectionMode;
       const profile = form.id
         ? await bridge.updateBackend(form.id, { name: form.name, baseUrl, color: form.color })
         : await bridge.addBackend({ name: form.name, baseUrl, color: form.color }, false);
-      // The user may have switched selection modes while the requests were in
-      // flight (Add bridge / same-origin); only restore the form if not.
-      setSelectionMode((current) => (current === requestSelectionMode ? "backend" : current));
-      setForm((current) =>
-        current.id === requestFormId && current.baseUrl === requestBaseUrl
-          ? backendFormFromProfile(profile)
-          : current,
-      );
+      // Snapshot identity (id/baseUrl/selection mode) cannot detect the user
+      // leaving and returning to the same backend mid-flight; the generation
+      // counter can, so apply the saved profile only when nothing changed.
+      if (formGeneration.current === requestGeneration) {
+        setSelectionModeState("backend");
+        setFormState(backendFormFromProfile(profile));
+      }
       setMessage(probeWarning ? `Backend saved. ${probeWarning}` : "Backend saved.");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not save backend");

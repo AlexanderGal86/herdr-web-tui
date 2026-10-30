@@ -180,10 +180,17 @@
   [Will Hampson (@Whamp)](https://github.com/Whamp).
 
 ### Fixed
+- Web: reject malformed snapshot and note payloads element-by-element instead of accepting
+  arrays with non-object entries, so a malformed bridge response is treated as a retryable error
+  rather than crashing the workspace view or echoing bad attachment history back to the bridge.
 
 - Bridge: teardown of a machine's ssh connection now kills the ssh process's whole process
   group instead of only the ssh leader, so ssh descendants (e.g. ProxyCommand helpers) can no
   longer outlive the connection teardown and keep running with the permit already released.
+- Web: a backend save that is still in flight no longer clobbers the settings form when the
+  user leaves a bridge and returns to it (editing the name or color) or starts a second
+  overlapping save — the saved profile is only restored while nothing touched the form since
+  the save began.
 - Vendored herdr-compat: `ApiClientError` now implements `source()`, so the underlying io or
   serde_json cause stays reachable through the error chain for loggers and diagnostics (the
   bridge binary picks this up without changes); `Display` output is unchanged.

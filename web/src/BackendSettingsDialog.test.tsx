@@ -386,6 +386,100 @@ describe("BackendSettingsDialog save race", () => {
       requiredElement<HTMLButtonElement>(container, ".backend-row-action").dataset.active,
     ).toBe("true");
   });
+
+  it("keeps edits made after leaving and returning to the same backend", async () => {
+    (bridge.store as { backends: import("./bridge").BridgeBackendProfile[] }).backends = [
+      { id: "b1", name: "Host", baseUrl: "http://host:1", color: "#112233" },
+    ];
+    (bridge as { lastSelectedBridgeId: string | null }).lastSelectedBridgeId = "b1";
+
+    const probe = deferred<void>();
+    const update = deferred<import("./bridge").BridgeBackendProfile>();
+    bridge.probeBackend.mockImplementation(() => probe.promise);
+    bridge.updateBackend.mockImplementation(() => update.promise);
+
+    const { container } = await render(<BackendSettingsDialog {...settingsProps()} />);
+    await act(async () =>
+      requiredElement<HTMLButtonElement>(container, ".modal-actions .btn-primary").click(),
+    );
+
+    // Leave the backend (start adding a new one) and come back to the same
+    // backend, so id/baseUrl/selection mode match the in-flight save again.
+    await act(async () =>
+      requiredElement<HTMLButtonElement>(container, ".backend-row-action").click(),
+    );
+    const hostRow = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(".backend-row-main"),
+    ).find((button) => button.textContent?.includes("Host"));
+    if (!hostRow) {
+      throw new Error("missing backend row for Host");
+    }
+    await act(async () => hostRow.click());
+    const nameInput = requiredElement<HTMLInputElement>(
+      container,
+      'input[placeholder="Home workstation"]',
+    );
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+      setter?.call(nameInput, "MyHost");
+      nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    await act(async () => {
+      probe.resolve(undefined);
+      update.resolve({ id: "b1", name: "Host", baseUrl: "http://host:1", color: "#112233" });
+    });
+
+    expect(nameInput.value).toBe("MyHost");
+  });
+
+  it("lets the later of two overlapping saves win", async () => {
+    (bridge.store as { backends: import("./bridge").BridgeBackendProfile[] }).backends = [
+      { id: "b1", name: "Host", baseUrl: "http://host:1", color: "#112233" },
+    ];
+    (bridge as { lastSelectedBridgeId: string | null }).lastSelectedBridgeId = "b1";
+
+    const probe1 = deferred<void>();
+    const probe2 = deferred<void>();
+    const updateFirst = deferred<import("./bridge").BridgeBackendProfile>();
+    const updateSecond = deferred<import("./bridge").BridgeBackendProfile>();
+    bridge.probeBackend
+      .mockImplementationOnce(() => probe1.promise)
+      .mockImplementationOnce(() => probe2.promise);
+    // updateBackend is called in completion order: the later save (save 2)
+    // resolves its probe first and therefore consumes the first mock slot.
+    bridge.updateBackend
+      .mockImplementationOnce(() => updateSecond.promise)
+      .mockImplementationOnce(() => updateFirst.promise);
+
+    const { container } = await render(<BackendSettingsDialog {...settingsProps()} />);
+    // Save #1 via the Save button; save #2 via form submit while busy.
+    await act(async () =>
+      requiredElement<HTMLButtonElement>(container, ".modal-actions .btn-primary").click(),
+    );
+    await act(async () =>
+      requiredElement<HTMLFormElement>(container, "form.modal").dispatchEvent(
+        new Event("submit", { bubbles: true, cancelable: true }),
+      ),
+    );
+
+    // The later save finishes first; the earlier save finishing afterwards
+    // must not overwrite its result.
+    await act(async () => {
+      probe2.resolve(undefined);
+      updateSecond.resolve({ id: "b1", name: "Second", baseUrl: "http://host:1", color: "#112233" });
+    });
+
+    await act(async () => {
+      probe1.resolve(undefined);
+      updateFirst.resolve({ id: "b1", name: "First", baseUrl: "http://host:1", color: "#112233" });
+    });
+
+
+    expect(
+      requiredElement<HTMLInputElement>(container, 'input[placeholder="Home workstation"]').value,
+    ).toBe("Second");
+  });
 });
 
 function deferred<T>() {
