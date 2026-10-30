@@ -118,6 +118,8 @@
 
 ### Changed
 
+- The sidebar `spaceEntries` computation is memoized (like the neighboring machine space entries),
+  avoiding an O(workspaces×panes) rebuild on every render.
 - Development model documented in `README.md` and `AGENTS.md`: upstream
   `kcosr/herdr-web` is a source of ideas only; this fork develops independently
   and does not track or layer on upstream releases (#1).

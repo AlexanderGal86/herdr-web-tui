@@ -6681,24 +6681,28 @@ function Switcher({
       selectedBridgeId,
     ],
   );
-  const spaceEntries = hostBridgeViews.flatMap((view) => {
-    const viewSnapshot = view.snapshot;
-    if (!viewSnapshot) {
-      return [];
-    }
-    const activeWorkspace = activeWorkspaceForView(view);
-    return viewSnapshot.workspaces.map((workspace) => {
-      const workspacePanes = viewSnapshot.panes.filter(
-        (pane) => pane.workspace_id === workspace.workspace_id,
-      );
-      return {
-        view,
-        workspace,
-        workspacePanes,
-        active: workspace.workspace_id === activeWorkspace?.workspace_id,
-      };
-    });
-  });
+  const spaceEntries = useMemo(
+    () =>
+      hostBridgeViews.flatMap((view) => {
+        const viewSnapshot = view.snapshot;
+        if (!viewSnapshot) {
+          return [];
+        }
+        const activeWorkspace = activeWorkspaceForView(view);
+        return viewSnapshot.workspaces.map((workspace) => {
+          const workspacePanes = viewSnapshot.panes.filter(
+            (pane) => pane.workspace_id === workspace.workspace_id,
+          );
+          return {
+            view,
+            workspace,
+            workspacePanes,
+            active: workspace.workspace_id === activeWorkspace?.workspace_id,
+          };
+        });
+      }),
+    [activeWorkspaceForView, hostBridgeViews],
+  );
   const reorderBridgeView = spaceReorderMode
     ? (hostBridgeViews.find((view) => view.runtime.id === spaceReorderMode.bridgeId) ?? null)
     : null;
