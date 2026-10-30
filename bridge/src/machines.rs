@@ -458,12 +458,14 @@ impl MachineManager {
             &self.socket_dir,
             BridgeKind::Api,
             self.permits.clone(),
+            "ssh",
         )?;
         let client_bridge = SshSocketBridge::start(
             endpoint,
             &self.socket_dir,
             BridgeKind::Client,
             self.permits.clone(),
+            "ssh",
         )?;
         let state = Arc::new(MachineSshState {
             api: herdr_compat::api::client::ApiClient::for_socket_path(api_bridge.path.clone()),
@@ -743,6 +745,7 @@ impl SshSocketBridge {
         socket_dir: &Path,
         kind: BridgeKind,
         permits: ConnectionPermits,
+        ssh_program: &str,
     ) -> Result<Self, String> {
         if !is_valid_machine_id(&endpoint.id) || endpoint.id == LOCAL_MACHINE_ID {
             return Err(format!("invalid machine id: {}", endpoint.id));
@@ -778,6 +781,9 @@ impl SshSocketBridge {
                 BridgeKind::Client => REMOTE_CLIENT_BRIDGE_COMMAND,
             }
             .to_string();
+            // Injected so tests can point the bridge at a fake ssh instead
+            // of relying on PATH lookups.
+            let ssh_program = ssh_program.to_string();
             // Non-blocking accept so the loop can observe `stop` and exit
             // deterministically; Drop joins the thread instead of leaking it
             // blocked inside accept().
@@ -809,9 +815,15 @@ impl SshSocketBridge {
                             enabled: true,
                         };
                         let remote_command = remote_command.clone();
+                        let ssh_program = ssh_program.clone();
                         std::thread::spawn(move || {
                             let _permit = guard;
-                            serve_bridge_connection(stream, &endpoint, &remote_command)
+                            serve_bridge_connection(
+                                stream,
+                                &endpoint,
+                                &remote_command,
+                                &ssh_program,
+                            )
                         });
                     },
                     &thread_stop,
@@ -881,12 +893,13 @@ fn serve_bridge_connection(
     stream: std::os::unix::net::UnixStream,
     endpoint: &SavedEndpoint,
     remote_command: &str,
+    ssh_program: &str,
 ) {
     use std::io::Write as _;
     use std::net::Shutdown;
 
     let args = ssh_remote_herdr_args(endpoint, remote_command);
-    let mut command = Command::new("ssh");
+    let mut command = Command::new(ssh_program);
     command
         .args(&args)
         .stdin(Stdio::piped())
@@ -925,9 +938,19 @@ fn serve_bridge_connection(
             return;
         }
     };
+    // Shared so the stdin copier can tear the child down: EOF on the client
+    // socket means the local client is gone for good (no client here
+    // half-closes — API requests drop the stream, terminal detach shuts down
+    // both directions), and an ssh child that ignores stdin EOF and stays
+    // silent would otherwise hold the permit until it exits on its own.
+    let child = Arc::new(std::sync::Mutex::new(child));
+    let kill_on_client_eof = Arc::clone(&child);
     let up = std::thread::spawn(move || {
         let _ = copy_pipe(&mut read_stream, &mut child_stdin);
         // Dropping stdin sends EOF so a half-closed local peer ends the ssh child.
+        if let Ok(mut child) = kill_on_client_eof.lock() {
+            let _ = child.kill();
+        }
     });
     let _ = copy_pipe(&mut child_stdout, &mut write_stream);
     let _ = write_stream.flush();
@@ -936,6 +959,9 @@ fn serve_bridge_connection(
     // the peer happens to send or disconnect.
     let _ = write_stream.shutdown(Shutdown::Both);
     let _ = up.join();
+    let mut child = child
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -2294,7 +2320,8 @@ mod tests {
         let endpoint = test_endpoint(&hex_id(6), "root@10.255.255.1");
         let root = home_test_root("pb");
         let bridge =
-            SshSocketBridge::start(&endpoint, &root, BridgeKind::Api, permits.clone()).unwrap();
+            SshSocketBridge::start(&endpoint, &root, BridgeKind::Api, permits.clone(), "ssh")
+                .unwrap();
         let socket_path = bridge.path.clone();
 
         let first = std::os::unix::net::UnixStream::connect(&socket_path).unwrap();
@@ -2332,7 +2359,8 @@ mod tests {
         let endpoint = test_endpoint(&hex_id(7), "root@127.0.0.1");
         let root = home_test_root("pk");
         let bridge =
-            SshSocketBridge::start(&endpoint, &root, BridgeKind::Api, permits.clone()).unwrap();
+            SshSocketBridge::start(&endpoint, &root, BridgeKind::Api, permits.clone(), "ssh")
+                .unwrap();
         let socket_path = bridge.path.clone();
 
         let mut client = std::os::unix::net::UnixStream::connect(&socket_path).unwrap();
@@ -2366,6 +2394,81 @@ mod tests {
         );
 
         drop(client);
+        drop(bridge);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // A5 permit release: a local client that closed its connection must not
+    // keep a permit held by an ssh child that ignores stdin EOF and stays
+    // silent — the child is torn down once the client is gone for good.
+    // No local client in this codebase half-closes (API requests drop the
+    // stream, terminal detach shuts down both directions), so EOF on the
+    // client socket means the session is dead.
+    #[cfg(unix)]
+    #[test]
+    fn bridge_releases_permit_when_client_leaves_and_ssh_ignores_stdin_eof() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let permits = ConnectionPermits::new(1);
+        // The stub ignores stdin EOF and stays silent: it exits immediately
+        // for the warm-up argument, otherwise it sleeps far past the test
+        // deadline (a real herdr server can keep an ssh child alive like
+        // this after the local client disconnects). `exec` keeps it a single
+        // process owning stdout, like a real ssh child, so killing it closes
+        // the pipe instead of leaving a descendant holding it open.
+        let endpoint = test_endpoint(&hex_id(9), "root@127.0.0.1");
+        let root = home_test_root("pl");
+        let script = root.join("fake-ssh.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n[ \"$1\" = warmup ] && exit 0\nexec sleep 30\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+        // ETXTBSY warm-up (see machine_disable_runner): exec the just-written
+        // stub until the overlayfs window passes, so the bridge's own spawn
+        // below is proven good and cannot silently shortcut the scenario.
+        for _ in 0..40 {
+            match std::process::Command::new(&script).arg("warmup").status() {
+                Ok(status) if status.success() => break,
+                Err(err) if err.to_string().contains("Text file busy") => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                other => panic!("warmup failed: {other:?}"),
+            }
+        }
+        let bridge = SshSocketBridge::start(
+            &endpoint,
+            &root,
+            BridgeKind::Api,
+            permits.clone(),
+            script.to_str().unwrap(),
+        )
+        .unwrap();
+        let socket_path = bridge.path.clone();
+
+        let client = std::os::unix::net::UnixStream::connect(&socket_path).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while permits.current() != 1 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(permits.current(), 1, "connection must hold the permit");
+
+        // The client is gone for good: the silent ssh child must be torn
+        // down and the permit released promptly, not after its 30 s sleep.
+        drop(client);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while permits.current() != 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            permits.current(),
+            0,
+            "permit must be released once the local client closed"
+        );
+
         drop(bridge);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2505,7 +2608,8 @@ mod tests {
         let permits = ConnectionPermits::new(4);
         let endpoint = test_endpoint(&hex_id(7), "root@198.51.100.20");
         let root = home_test_root("ds");
-        let bridge = SshSocketBridge::start(&endpoint, &root, BridgeKind::Api, permits).unwrap();
+        let bridge =
+            SshSocketBridge::start(&endpoint, &root, BridgeKind::Api, permits, "ssh").unwrap();
         let socket_path = bridge.path.clone();
         assert!(socket_path.exists());
 
