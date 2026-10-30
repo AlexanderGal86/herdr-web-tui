@@ -162,6 +162,8 @@
 
 ### Fixed
 
+- Bridge: the `Content-Security-Policy` header is now computed once at startup and cloned per
+  response instead of being rebuilt from the configured connect sources on every HTTP reply.
 - Bridge: the agent-activity tracker no longer panics on every agent-activity API call after a
   panic poisons its internal mutex; a poisoned lock now serves the last tracked state until the
   bridge restarts.

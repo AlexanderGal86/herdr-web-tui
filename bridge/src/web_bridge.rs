@@ -134,7 +134,8 @@ struct RequestPolicy {
     bind_port: u16,
     allowed_hosts: Vec<String>,
     allowed_origins: Vec<String>,
-    allowed_connect_sources: Vec<String>,
+    // Precomputed once at startup so per-response security-header insertion is a clone.
+    content_security_policy: HeaderValue,
     default_scheme_port: u16,
 }
 
@@ -1097,12 +1098,14 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
             .map_err(|message| io::Error::new(ErrorKind::InvalidInput, message))?,
     );
     let notes = Arc::new(NotesManager::new()?);
+    let allowed_connect_sources = options.allowed_connect_sources.clone();
+    let content_security_policy = content_security_policy(&allowed_connect_sources);
     let request_policy = RequestPolicy {
         bind_host: options.host.clone(),
         bind_port: options.port,
         allowed_hosts: options.allowed_hosts.clone(),
         allowed_origins: options.allowed_origins.clone(),
-        allowed_connect_sources: options.allowed_connect_sources.clone(),
+        content_security_policy,
         default_scheme_port: if options.tls_self_signed { 443 } else { 80 },
     };
     let api = ApiClient::for_socket_path(crate::session::active_api_socket_path());
@@ -1350,7 +1353,7 @@ async fn add_security_headers(
     );
     headers.insert(
         HeaderName::from_static("content-security-policy"),
-        content_security_policy(&policy),
+        policy.content_security_policy.clone(),
     );
     if let Some(origin) = cors_origin {
         insert_cors_headers(headers, origin);
@@ -1776,9 +1779,9 @@ fn connect_sources_for_origin(origin: &str) -> Result<Vec<String>, String> {
     Ok(vec![origin, websocket_origin])
 }
 
-fn content_security_policy(policy: &RequestPolicy) -> HeaderValue {
+fn content_security_policy(allowed_connect_sources: &[String]) -> HeaderValue {
     let mut connect_src = vec!["'self'".to_string(), "data:".to_string()];
-    connect_src.extend(policy.allowed_connect_sources.iter().cloned());
+    connect_src.extend(allowed_connect_sources.iter().cloned());
     let value = format!(
         "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src {}; \
          img-src 'self' data: blob:; \
@@ -5888,7 +5891,7 @@ mod tests {
             bind_port: 0,
             allowed_hosts: Vec::new(),
             allowed_origins: Vec::new(),
-            allowed_connect_sources: Vec::new(),
+            content_security_policy: content_security_policy(&Vec::new()),
             default_scheme_port: 443,
         };
         let state = BridgeState {
@@ -6084,7 +6087,7 @@ mod tests {
             bind_port: 0,
             allowed_hosts: Vec::new(),
             allowed_origins: Vec::new(),
-            allowed_connect_sources: Vec::new(),
+            content_security_policy: content_security_policy(&Vec::new()),
             default_scheme_port: 80,
         };
         let state = BridgeState {
@@ -6158,7 +6161,7 @@ mod tests {
             bind_port: 0,
             allowed_hosts: Vec::new(),
             allowed_origins: Vec::new(),
-            allowed_connect_sources: Vec::new(),
+            content_security_policy: content_security_policy(&Vec::new()),
             default_scheme_port: 80,
         };
         let state = BridgeState {
@@ -7962,7 +7965,7 @@ mod tests {
             bind_port: 4000,
             allowed_hosts: Vec::new(),
             allowed_origins: vec!["http://localhost".to_string()],
-            allowed_connect_sources: Vec::new(),
+            content_security_policy: content_security_policy(&Vec::new()),
             default_scheme_port: 80,
         };
         assert!(request_allowed(
@@ -8029,7 +8032,7 @@ mod tests {
             bind_port: 4000,
             allowed_hosts: vec!["herdr-host.local".to_string()],
             allowed_origins: Vec::new(),
-            allowed_connect_sources: Vec::new(),
+            content_security_policy: content_security_policy(&Vec::new()),
             default_scheme_port: 80,
         };
         assert!(host_authority_allowed("herdr-host.local:4000", &policy));
@@ -8045,7 +8048,7 @@ mod tests {
             bind_port: 4000,
             allowed_hosts: Vec::new(),
             allowed_origins: vec!["http://localhost".to_string()],
-            allowed_connect_sources: Vec::new(),
+            content_security_policy: content_security_policy(&Vec::new()),
             default_scheme_port: 80,
         };
         assert_eq!(
@@ -8099,12 +8102,26 @@ mod tests {
     }
 
     #[test]
-    fn content_security_policy_includes_configured_connect_sources() {
-        let mut policy = test_policy("0.0.0.0", 8787);
-        policy.allowed_connect_sources = connect_sources_for_origin("http://srv:8787").unwrap();
+    fn content_security_policy_pins_the_default_header_value() {
+        let policy = test_policy("127.0.0.1", 8787);
 
-        let header = content_security_policy(&policy);
-        let value = header.to_str().unwrap();
+        assert_eq!(
+            policy.content_security_policy.to_str().unwrap(),
+            "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' data:; \
+             img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self'; \
+             object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+        );
+    }
+
+    #[test]
+    fn content_security_policy_includes_configured_connect_sources() {
+        let connect_sources = connect_sources_for_origin("http://srv:8787").unwrap();
+        let policy = RequestPolicy {
+            content_security_policy: content_security_policy(&connect_sources),
+            ..test_policy("0.0.0.0", 8787)
+        };
+
+        let value = policy.content_security_policy.to_str().unwrap();
 
         assert!(value.contains("connect-src 'self' data: http://srv:8787 ws://srv:8787;"));
         assert!(value.contains("img-src 'self' data: blob:;"));
@@ -9071,10 +9088,12 @@ mod tests {
 
     #[test]
     fn tls_origin_wss_connect_sources() {
-        let mut policy = test_policy("0.0.0.0", 9443);
-        policy.allowed_connect_sources =
-            connect_sources_for_origin("https://srv.example:9443").unwrap();
-        let csp = content_security_policy(&policy);
+        let connect_sources = connect_sources_for_origin("https://srv.example:9443").unwrap();
+        let policy = RequestPolicy {
+            content_security_policy: content_security_policy(&connect_sources),
+            ..test_policy("0.0.0.0", 9443)
+        };
+        let csp = policy.content_security_policy;
         let csp = csp.to_str().expect("csp header");
         assert!(csp.contains("https://srv.example:9443"));
         assert!(csp.contains("wss://srv.example:9443"));
@@ -9436,7 +9455,7 @@ mod tests {
             bind_port,
             allowed_hosts: Vec::new(),
             allowed_origins: Vec::new(),
-            allowed_connect_sources: Vec::new(),
+            content_security_policy: content_security_policy(&Vec::new()),
             default_scheme_port: 80,
         }
     }
@@ -9474,7 +9493,7 @@ mod tests {
             bind_port: 443,
             allowed_hosts: vec!["srv.example".to_string()],
             allowed_origins: Vec::new(),
-            allowed_connect_sources: Vec::new(),
+            content_security_policy: content_security_policy(&Vec::new()),
             default_scheme_port: 443,
         };
         assert!(host_authority_allowed("srv.example", &policy));
