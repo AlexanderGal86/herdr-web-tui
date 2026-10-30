@@ -156,6 +156,8 @@
 
 ### Fixed
 
+- Pane selection sync (`/api/selection`) now uses the shared `fetchWithTimeout` helper, so a hung
+  bridge can no longer leave the selection request pending indefinitely.
 - Failed bridge snapshot refreshes now log the underlying error cause in the console instead of
   silently swallowing it, while the connection state keeps its existing shape.
 - The bridge snapshot response is validated before use: a malformed payload (missing the

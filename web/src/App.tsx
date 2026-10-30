@@ -10366,7 +10366,7 @@ async function syncSelectedPane(
   httpUrl: (path: string, query?: URLSearchParams) => string,
   paneId: string,
 ) {
-  const response = await fetch(httpUrl("/api/selection"), {
+  const response = await fetchWithTimeout(httpUrl("/api/selection"), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ pane_id: paneId }),
