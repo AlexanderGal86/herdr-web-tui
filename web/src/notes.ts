@@ -201,18 +201,86 @@ async function sendNoteMutation(
   return parseNoteResponse(response);
 }
 
+const NOTE_LINK_STATES: readonly NoteLinkState[] = ["linked", "unresolved", "detached"];
+
+function isNoteAttachment(value: unknown): value is NoteAttachment {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const attachment = value as Record<string, unknown>;
+  return (
+    typeof attachment.pane_id === "string" &&
+    typeof attachment.workspace_id === "string" &&
+    typeof attachment.tab_id === "string" &&
+    typeof attachment.captured_at === "string" &&
+    typeof attachment.context === "object" &&
+    attachment.context !== null
+  );
+}
+
+function isPaneNotePayload(value: unknown): value is PaneNote {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const note = value as Record<string, unknown>;
+  if (
+    typeof note.note_id !== "string" ||
+    !note.note_id ||
+    typeof note.title !== "string" ||
+    typeof note.body !== "string" ||
+    typeof note.created_at !== "string" ||
+    typeof note.updated_at !== "string" ||
+    typeof note.session_key !== "string" ||
+    typeof note.revision !== "number" ||
+    typeof note.link_state !== "string" ||
+    !NOTE_LINK_STATES.includes(note.link_state as NoteLinkState) ||
+    !Array.isArray(note.attachment_history)
+  ) {
+    return false;
+  }
+  if (note.attachment !== null && note.attachment !== undefined && !isNoteAttachment(note.attachment)) {
+    return false;
+  }
+  return true;
+}
+
+/** Parses a /api/notes list payload; malformed note entries are dropped. */
+export function parseNotesList(value: unknown): NotesListResponse | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const { store_id, session_key, notes } = value as Record<string, unknown>;
+  if (typeof store_id !== "string" || typeof session_key !== "string" || !Array.isArray(notes)) {
+    return null;
+  }
+  return { store_id, session_key, notes: notes.filter(isPaneNotePayload) };
+}
+
+/** Parses a single note payload; returns null when the shape is malformed. */
+export function parsePaneNote(value: unknown): PaneNote | null {
+  return isPaneNotePayload(value) ? value : null;
+}
+
 async function parseNotesResponse(response: Response) {
   if (!response.ok) {
     throw await notesApiError(response, "notes");
   }
-  return (await response.json()) as NotesListResponse;
+  const parsed = parseNotesList(await response.json());
+  if (!parsed) {
+    throw new Error("notes failed: malformed response");
+  }
+  return parsed;
 }
 
 async function parseNoteResponse(response: Response) {
   if (!response.ok) {
     throw await notesApiError(response, "note mutation");
   }
-  return (await response.json()) as PaneNote;
+  const parsed = parsePaneNote(await response.json());
+  if (!parsed) {
+    throw new Error("note mutation failed: malformed response");
+  }
+  return parsed;
 }
 
 async function notesApiError(response: Response, fallback: string) {

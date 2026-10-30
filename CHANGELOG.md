@@ -162,6 +162,10 @@
 
 ### Fixed
 
+- `/api/notes` responses are validated instead of blindly cast: list and mutation payloads go through
+  `parseNotesList`/`parsePaneNote` guards (modeled on `parseMachinesList`), malformed note entries are
+  dropped from lists, and a malformed single-note response fails with an explicit error instead of
+  crashing note rendering later.
 - Pane selection sync (`/api/selection`) now uses the shared `fetchWithTimeout` helper, so a hung
   bridge can no longer leave the selection request pending indefinitely.
 - Failed bridge snapshot refreshes now log the underlying error cause in the console instead of
