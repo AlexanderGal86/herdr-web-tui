@@ -1575,12 +1575,14 @@ async fn create_new_upload(
         if !is_direct_child(upload_dir, &destination) {
             return Err(UploadError::BadRequest("invalid file name".to_string()));
         }
-        match tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&destination)
-            .await
-        {
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // Uploads land in a shared directory; keep them owner-only like the
+        // agent-pins and notes stores instead of the umask default (0644),
+        // starting at file creation so the file is never briefly world-readable.
+        #[cfg(unix)]
+        options.mode(0o600);
+        match options.open(&destination).await {
             Ok(mut file) => {
                 use tokio::io::AsyncWriteExt;
 
@@ -3248,6 +3250,13 @@ async fn store_local_upload(
             UPLOAD_TEMP_COUNTER.fetch_add(1, Ordering::AcqRel)
         ));
         tokio::fs::write(&temp_path, body).await?;
+        // Uploads land in a shared directory; keep them owner-only like the
+        // agent-pins and notes stores instead of the umask default (0644),
+        // before the rename publishes the file.
+        if let Err(err) = crate::store_util::set_private_file_permissions(&temp_path) {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(UploadError::Io(err));
+        }
         // Unix rename(2) atomically replaces a regular-file destination, so the
         // previous upload never disappears mid-swap; Windows rename refuses
         // existing destinations, so the unlink stays there only.
@@ -3264,9 +3273,6 @@ async fn store_local_upload(
         }
         (name, destination)
     };
-    // Uploads land in a shared directory; keep them owner-only like the
-    // agent-pins and notes stores instead of the umask default (0644).
-    crate::store_util::set_private_file_permissions(&destination).map_err(UploadError::Io)?;
     Ok(UploadResponse {
         file: UploadEntry {
             name,
