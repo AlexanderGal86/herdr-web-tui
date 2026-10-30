@@ -158,7 +158,10 @@
 
 - Right-click copy/menu and middle-click paste work again in panes whose app tracks the mouse
   (agent TUIs, TTT): pane-app mouse forwarding no longer swallows those browser gestures.
-  Right/middle clicks still go to the app in panes opted into right-click passthrough — TTT
+  Right-click passthrough now reroutes clicks only while the pane app actually tracks the
+  mouse, so an opted-in pane without tracking keeps the Herdr pane menu instead of a dead
+  right-click. Right/middle clicks still go to the app in panes opted into right-click
+  passthrough — TTT
   panes launched from the web are seeded into it automatically (and the preference now persists
   across reloads, like manual toggles) so their context menus keep working, and the explicit
   pane-menu toggle still overrides (TTT panes launched outside the web need the toggle once).
