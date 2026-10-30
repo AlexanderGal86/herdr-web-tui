@@ -118,6 +118,9 @@
 
 ### Changed
 
+- `TERMINAL_INPUT_BATCH_DELAY_OPTIONS_MS` is typed as `readonly number[]` at its definition, so
+  the batch-delay preference check uses plain `Array.includes` instead of a cast to the literal
+  tuple's element type.
 - The terminal `input` event handler narrows its `Event` to the fields the IME reducer reads with
   a validated `terminalInputEventFields` guard instead of a blind `as InputEvent` cast, so a
   non-InputEvent dispatch degrades to an unknown edit instead of reading undefined fields.
