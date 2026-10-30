@@ -905,6 +905,14 @@ fn serve_bridge_connection(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    // Own process group so teardown can SIGKILL ssh's whole subtree:
+    // `Child::kill` alone only signals the ssh leader, and descendants
+    // (ProxyCommand helpers, forwarded helpers) survive their leader.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(err) => {
@@ -916,6 +924,7 @@ fn serve_bridge_connection(
     let mut child_stdin = match child.stdin.take() {
         Some(stdin) => stdin,
         None => {
+            kill_process_group(child.id());
             let _ = child.kill();
             let _ = child.wait();
             return;
@@ -924,6 +933,7 @@ fn serve_bridge_connection(
     let mut child_stdout = match child.stdout.take() {
         Some(stdout) => stdout,
         None => {
+            kill_process_group(child.id());
             let _ = child.kill();
             let _ = child.wait();
             return;
@@ -933,6 +943,7 @@ fn serve_bridge_connection(
     let mut read_stream = match write_stream.try_clone() {
         Ok(stream) => stream,
         Err(_) => {
+            kill_process_group(child.id());
             let _ = child.kill();
             let _ = child.wait();
             return;
@@ -949,6 +960,7 @@ fn serve_bridge_connection(
         let _ = copy_pipe(&mut read_stream, &mut child_stdin);
         // Dropping stdin sends EOF so a half-closed local peer ends the ssh child.
         if let Ok(mut child) = kill_on_client_eof.lock() {
+            kill_process_group(child.id());
             let _ = child.kill();
         }
     });
@@ -962,6 +974,7 @@ fn serve_bridge_connection(
     let mut child = child
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    kill_process_group(child.id());
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -1168,14 +1181,14 @@ fn run_machine_argv(
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => std::thread::sleep(PROBE_POLL),
             Ok(None) => {
-                kill_machine_add_group(child.id());
+                kill_process_group(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = stderr.finish();
                 return Err(format!("{action} timed out"));
             }
             Err(err) => {
-                kill_machine_add_group(child.id());
+                kill_process_group(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = stderr.finish();
@@ -1196,18 +1209,20 @@ fn run_machine_argv(
     })
 }
 
-/// SIGKILLs the process group the machine-add CLI was spawned as leader of;
-/// the group is app-owned (process_group(0)), so the signal can never reach
-/// this process, other sessions, or unrelated user processes.
+/// SIGKILLs the process group the child was spawned as leader of (the
+/// machine-add CLI and the bridge ssh child both use process_group(0));
+/// the group is app-owned, so the signal can never reach this process,
+/// other sessions, or unrelated user processes. A group whose leader has
+/// already exited may report ESRCH — a benign race, ignored here.
 #[cfg(unix)]
-fn kill_machine_add_group(pid: u32) {
+fn kill_process_group(pid: u32) {
     unsafe {
         libc::kill(-(pid as i32), libc::SIGKILL);
     }
 }
 
 #[cfg(not(unix))]
-fn kill_machine_add_group(_pid: u32) {}
+fn kill_process_group(_pid: u32) {}
 
 /// Bounds stderr collection: capture keeps only the latest bytes (the CLI's
 /// diagnostics put the reason last) but draining never stops while the CLI
@@ -2489,6 +2504,125 @@ mod tests {
 
         drop(bridge);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Wave-3 teardown: `Child::kill` only signals the ssh leader itself, so
+    // ssh descendants would survive the teardown and keep running after the
+    // connection permit is released. The stub spawns a long-lived
+    // grandchild to stand in for a ProxyCommand helper / forwarded helper.
+    #[cfg(unix)]
+    #[test]
+    fn bridge_teardown_kills_grandchildren_when_client_leaves() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let permits = ConnectionPermits::new(1);
+        let endpoint = test_endpoint(&hex_id(11), "root@127.0.0.1");
+        let root = home_test_root("pg");
+        let script = root.join("fake-ssh.sh");
+        let pid_file = root.join("grandchild.pid");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n[ \"$1\" = warmup ] && exit 0\nsleep 300 & echo $! > {}\nsleep 30\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+        // ETXTBSY warm-up (see machine_disable_runner): exec the just-written
+        // stub until the overlayfs window passes, so the bridge's own spawn
+        // below is proven good and cannot silently shortcut the scenario.
+        for _ in 0..40 {
+            match std::process::Command::new(&script).arg("warmup").status() {
+                Ok(status) if status.success() => break,
+                Err(err) if err.to_string().contains("Text file busy") => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                other => panic!("warmup failed: {other:?}"),
+            }
+        }
+        let bridge = SshSocketBridge::start(
+            &endpoint,
+            &root,
+            BridgeKind::Api,
+            permits.clone(),
+            script.to_str().unwrap(),
+        )
+        .unwrap();
+        let socket_path = bridge.path.clone();
+
+        let client = std::os::unix::net::UnixStream::connect(&socket_path).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while permits.current() != 1 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(permits.current(), 1, "connection must hold the permit");
+        let grandchild_pid: i32 = {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                    if let Ok(pid) = text.trim().parse() {
+                        break pid;
+                    }
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "fake ssh never wrote its grandchild pid"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        assert!(
+            process_alive(grandchild_pid),
+            "grandchild must be alive before the client leaves"
+        );
+
+        // The client is gone for good: the whole ssh process group — not
+        // just the ssh leader — must be torn down with it.
+        drop(client);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while permits.current() != 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            permits.current(),
+            0,
+            "permit must be released once the local client closed"
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if !process_alive(grandchild_pid) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "grandchild pid {grandchild_pid} survived the teardown"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        drop(bridge);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `kill(pid, 0)` keeps succeeding for zombies, and PID 1 in test
+    /// containers is not guaranteed to reap, so on Linux the /proc state
+    /// decides; without /proc (macOS) the probe result is the best signal.
+    #[cfg(unix)]
+    fn process_alive(pid: i32) -> bool {
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return false;
+        }
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            // The state is the first field after the parenthesized comm.
+            Ok(stat) => !stat
+                .rsplit(')')
+                .next()
+                .is_some_and(|rest| rest.trim_start().starts_with('Z')),
+            Err(_) => true,
+        }
     }
 
     // Machine bridge accept loop: transient accept errors must be classified
