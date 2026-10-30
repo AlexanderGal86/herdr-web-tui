@@ -162,6 +162,9 @@
 
 ### Fixed
 
+- Overlay focus traps now keep Tab inside the trap when the focused element became unfocusable
+  (e.g. `tabindex=-1` or disabled while focused): such elements are treated like focus outside the
+  focusable list and wrap to the first/last focusable element.
 - Bridge command and launcher-preset errors now go through the shared `apiErrorMessage` helper, so a
   structured error body (e.g. `{"error":{...}}`) surfaces the HTTP status fallback instead of a
   literal `[object Object]` message; plain string errors are still preferred.

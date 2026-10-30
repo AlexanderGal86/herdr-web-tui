@@ -48,7 +48,13 @@ export function trapFocusWithin<T extends HTMLElement>(event: ReactKeyboardEvent
   const first = focusable[0];
   const last = focusable[focusable.length - 1];
   const active = document.activeElement;
-  const outside = active === container || !container.contains(active);
+  // An element inside the trap that left the focusable list (tabindex=-1,
+  // disabled, hidden) must still wrap like outside focus, otherwise Tab
+  // escapes the trap.
+  const outside =
+    active === container ||
+    !container.contains(active) ||
+    !focusable.includes(active as HTMLElement);
   if (event.shiftKey && (active === first || outside)) {
     event.preventDefault();
     last.focus();
