@@ -1196,6 +1196,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
   );
   const [launchTarget, setLaunchTarget] = useState<ScopedLaunchTarget | null>(null);
   const [busy, setBusy] = useState(false);
+  const activeExecsRef = useRef(new ExecBusyTracker());
   const [error, setError] = useState<string | null>(null);
   const [refitToken, setRefitToken] = useState(0);
   const [terminalFocusToken, setTerminalFocusToken] = useState(0);
@@ -3681,6 +3682,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
       return false;
     }
     const requestConnectionKey = runtime.connectionKey;
+    activeExecsRef.current.begin();
     setBusy(true);
     try {
       const result = await action();
@@ -3725,7 +3727,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
       setError(caught instanceof Error ? caught.message : "Command failed");
       return false;
     } finally {
-      setBusy(false);
+      setBusy(activeExecsRef.current.end());
     }
   }
 
@@ -5156,6 +5158,18 @@ export function stableBridgeRefreshOffsetMs(bridgeId: BridgeId) {
     hash = (hash * 31 + bridgeId.charCodeAt(index)) >>> 0;
   }
   return hash % SNAPSHOT_REFRESH_INTERVAL_MS;
+}
+
+/** Tracks busy state across overlapping exec() calls: busy stays set until the last one settles. */
+export class ExecBusyTracker {
+  #active = 0;
+  begin(): void {
+    this.#active += 1;
+  }
+  end(): boolean {
+    this.#active -= 1;
+    return this.#active > 0;
+  }
 }
 
 export function applySnapshotOverlays(
