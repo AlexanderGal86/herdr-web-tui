@@ -2265,8 +2265,11 @@ const DOM_DELTA_PAGE = 2;
  * each rounding up to a full line (jerky scrolling).
  *
  * The remainder is signed and carried across direction changes, never reset:
- * carrying keeps lines the floor of the cumulative scrolled distance, while a
- * reset would silently drop sub-line direction flips.
+ * per event the accumulated value is truncated toward zero into whole lines
+ * and its signed fraction (|remainder| < 1) carries on, so emitted lines plus
+ * the remainder always sum to the cumulative delta and an opposite-direction
+ * delta consumes the pending fraction before scrolling; a reset would
+ * silently drop sub-line direction flips.
  */
 export function normalizeWheelLines(
   event: Pick<WheelEvent, "deltaY" | "deltaMode">,
