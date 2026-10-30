@@ -1624,6 +1624,7 @@ mod tests {
         // down the entire owned process group, not only the direct child.
         // ETXTBSY warm-up (see machine_disable_runner in machines.rs): an
         // instantly failing spawn must not be mistaken for the real run.
+        let mut attempts = 0;
         loop {
             let proc = RemoteProc {
                 program: fake.to_string_lossy().into_owned(),
@@ -1632,6 +1633,11 @@ mod tests {
             };
             match tokio::time::timeout(Duration::from_millis(400), exec(proc)).await {
                 Ok(Err(error)) if error.contains("Text file busy") => {
+                    attempts += 1;
+                    assert!(
+                        attempts <= 40,
+                        "stub stayed busy (ETXTBSY) after 40 attempts"
+                    );
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
                 _ => break,
@@ -1656,6 +1662,7 @@ mod tests {
         // long-lived grandchild must both be torn down. ETXTBSY warm-up
         // (see machine_disable_runner in machines.rs): a spawn failure is
         // instant, so only the real run pays the 300 ms timeout.
+        let mut attempts = 0;
         let error = loop {
             let proc = RemoteProc {
                 program: fake.to_string_lossy().into_owned(),
@@ -1664,6 +1671,11 @@ mod tests {
             };
             match run_owned_process(proc, Duration::from_millis(300)).await {
                 Err(error) if error.contains("Text file busy") => {
+                    attempts += 1;
+                    assert!(
+                        attempts <= 40,
+                        "stub stayed busy (ETXTBSY) after 40 attempts"
+                    );
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
                 Err(error) => break error,

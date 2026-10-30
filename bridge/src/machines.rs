@@ -1725,6 +1725,7 @@ mod tests {
         // target argv (no environment mutation: setenv races sibling threads
         // that read process env concurrently).
         let started = Instant::now();
+        let mut attempts = 0;
         let error = loop {
             match run_machine_add_program(
                 program,
@@ -1734,6 +1735,11 @@ mod tests {
                 None,
             ) {
                 Err(error) if error.contains("Text file busy") => {
+                    attempts += 1;
+                    assert!(
+                        attempts <= 40,
+                        "stub stayed busy (ETXTBSY) after 40 attempts"
+                    );
                     std::thread::sleep(Duration::from_millis(50));
                 }
                 Err(error) => break error,
@@ -1819,6 +1825,7 @@ mod tests {
         // runner does NOT wait for the 30 s descendant. The stub keys its
         // failure off the profile id argv (no environment mutation).
         let started = Instant::now();
+        let mut attempts = 0;
         let error = loop {
             match run_machine_disable_program(
                 program,
@@ -1826,6 +1833,11 @@ mod tests {
                 "bad0face",
             ) {
                 Err(error) if error.contains("Text file busy") => {
+                    attempts += 1;
+                    assert!(
+                        attempts <= 40,
+                        "stub stayed busy (ETXTBSY) after 40 attempts"
+                    );
                     std::thread::sleep(Duration::from_millis(50));
                 }
                 Err(error) => break error,
@@ -1873,6 +1885,7 @@ mod tests {
         let started = Instant::now();
         // ETXTBSY warm-up (see machine_disable_runner): spawn failures fail
         // instantly, so only the real run pays the 1 s timeout.
+        let mut attempts = 0;
         let error = loop {
             match run_machine_add_program(
                 script.to_str().unwrap(),
@@ -1882,6 +1895,11 @@ mod tests {
                 None,
             ) {
                 Err(error) if error.contains("Text file busy") => {
+                    attempts += 1;
+                    assert!(
+                        attempts <= 40,
+                        "stub stayed busy (ETXTBSY) after 40 attempts"
+                    );
                     std::thread::sleep(Duration::from_millis(50));
                 }
                 Err(error) => break error,
