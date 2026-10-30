@@ -162,6 +162,9 @@
 
 ### Fixed
 
+- Backend settings no longer clobber the dialog state when a save finishes after the user switched
+  to adding a new bridge or to the same-origin mode mid-flight: the saved profile only replaces the
+  form if the selection mode and form contents are still the ones the save started with.
 - Overlay focus traps now keep Tab inside the trap when the focused element became unfocusable
   (e.g. `tabindex=-1` or disabled while focused): such elements are treated like focus outside the
   focusable list and wrap to the first/last focusable element.

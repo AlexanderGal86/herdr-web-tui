@@ -284,11 +284,20 @@ export function BackendSettingsDialog({
       } catch (error) {
         probeWarning = error instanceof Error ? error.message : "Backend could not be reached.";
       }
+      const requestFormId = form.id;
+      const requestBaseUrl = baseUrl;
+      const requestSelectionMode = selectionMode;
       const profile = form.id
         ? await bridge.updateBackend(form.id, { name: form.name, baseUrl, color: form.color })
         : await bridge.addBackend({ name: form.name, baseUrl, color: form.color }, false);
-      setSelectionMode("backend");
-      setForm(backendFormFromProfile(profile));
+      // The user may have switched selection modes while the requests were in
+      // flight (Add bridge / same-origin); only restore the form if not.
+      setSelectionMode((current) => (current === requestSelectionMode ? "backend" : current));
+      setForm((current) =>
+        current.id === requestFormId && current.baseUrl === requestBaseUrl
+          ? backendFormFromProfile(profile)
+          : current,
+      );
       setMessage(probeWarning ? `Backend saved. ${probeWarning}` : "Backend saved.");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not save backend");
