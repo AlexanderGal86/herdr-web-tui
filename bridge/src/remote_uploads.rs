@@ -1620,14 +1620,29 @@ mod tests {
         let dir = unique_temp_dir("procgroup-cancel");
         let fake = write_fake_slow_scp(&dir);
         let exec = default_exec();
-        let proc = RemoteProc {
-            program: fake.to_string_lossy().into_owned(),
-            args: Vec::new(),
-            stdin: None,
-        };
         // Cancel the exec shortly after spawn: dropping the future must tear
         // down the entire owned process group, not only the direct child.
-        let _ = tokio::time::timeout(Duration::from_millis(400), exec(proc)).await;
+        // ETXTBSY warm-up (see machine_disable_runner in machines.rs): an
+        // instantly failing spawn must not be mistaken for the real run.
+        let mut attempts = 0;
+        loop {
+            let proc = RemoteProc {
+                program: fake.to_string_lossy().into_owned(),
+                args: Vec::new(),
+                stdin: None,
+            };
+            match tokio::time::timeout(Duration::from_millis(400), exec(proc)).await {
+                Ok(Err(error)) if error.contains("Text file busy") => {
+                    attempts += 1;
+                    assert!(
+                        attempts <= 40,
+                        "stub stayed busy (ETXTBSY) after 40 attempts"
+                    );
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                _ => break,
+            }
+        }
 
         let pid = wait_for_grandchild_pid(&dir);
         tokio::time::sleep(Duration::from_millis(400)).await;
@@ -1643,16 +1658,29 @@ mod tests {
     async fn timed_out_exec_kills_the_whole_owned_process_group() {
         let dir = unique_temp_dir("procgroup-timeout");
         let fake = write_fake_slow_scp(&dir);
-        let proc = RemoteProc {
-            program: fake.to_string_lossy().into_owned(),
-            args: Vec::new(),
-            stdin: None,
-        };
         // Inject a short overall timeout: the direct child AND its
-        // long-lived grandchild must both be torn down.
-        let error = match run_owned_process(proc, Duration::from_millis(300)).await {
-            Err(error) => error,
-            Ok(_) => panic!("the injected timeout must fail the run"),
+        // long-lived grandchild must both be torn down. ETXTBSY warm-up
+        // (see machine_disable_runner in machines.rs): a spawn failure is
+        // instant, so only the real run pays the 300 ms timeout.
+        let mut attempts = 0;
+        let error = loop {
+            let proc = RemoteProc {
+                program: fake.to_string_lossy().into_owned(),
+                args: Vec::new(),
+                stdin: None,
+            };
+            match run_owned_process(proc, Duration::from_millis(300)).await {
+                Err(error) if error.contains("Text file busy") => {
+                    attempts += 1;
+                    assert!(
+                        attempts <= 40,
+                        "stub stayed busy (ETXTBSY) after 40 attempts"
+                    );
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(error) => break error,
+                Ok(_) => panic!("the injected timeout must fail the run"),
+            }
         };
         assert_eq!(error, "process timed out");
 

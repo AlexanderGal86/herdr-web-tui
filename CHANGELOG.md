@@ -156,6 +156,19 @@
 
 ### Fixed
 
+- A machine-bridge connection whose local client disconnected is now torn down even when the
+  ssh child keeps running: previously an ssh child that ignored stdin EOF and stayed silent held
+  one of the 32 connection permits forever (the keepalive fix only covered the opposite case of a
+  dead ssh child with a silent local client). Since no bridge client half-closes its socket
+  (API requests drop the stream, terminal detach shuts down both directions), EOF on the client
+  socket now ends the session: the stdin copier kills the ssh child, the stdout copier and the
+  accept-loop permit are released promptly, and the child is reaped.
+- Bridge unit tests no longer flake when run in parallel: every `MachineManager` test
+  now gets its own machine socket root (injected through the manager config) instead of
+  racing `remove_file`/`bind` cycles on the shared default socket directory under
+  `~/.local/state/herdr-web/machines` (the `EADDRINUSE`/`Address already in use` flakes),
+  and the fake-CLI/fake-scp stub tests retry the transient `ETXTBSY` overlayfs window
+  after writing a stub script, matching the existing machine-disable test.
 - Saved-machine ssh connections now send fast keepalives (`ServerAliveInterval=5`,
   `ServerAliveCountMax=2`, matching the upload path) so a silently dead peer can no
   longer hold a bridge connection permit; when the ssh child exits, the local bridge

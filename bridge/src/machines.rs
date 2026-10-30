@@ -339,6 +339,10 @@ pub(crate) struct MachineManagerConfig {
     pub(crate) probe: ProbeFn,
     pub(crate) negative_cache_ttl: Duration,
     pub(crate) max_bridge_connections: usize,
+    /// Per-manager socket root override. Tests give every MachineManager its
+    /// own directory: parallel test managers would otherwise race their
+    /// remove_file→bind cycles on the shared default root (EADDRINUSE).
+    pub(crate) socket_dir: Option<PathBuf>,
 }
 
 impl Default for MachineManagerConfig {
@@ -347,6 +351,7 @@ impl Default for MachineManagerConfig {
             probe: Arc::new(probe_remote_support) as ProbeFn,
             negative_cache_ttl: DEFAULT_NEGATIVE_CACHE_TTL,
             max_bridge_connections: DEFAULT_MAX_BRIDGE_CONNECTIONS,
+            socket_dir: None,
         }
     }
 }
@@ -379,7 +384,10 @@ impl MachineManager {
     }
 
     pub(crate) fn with_config(config: MachineManagerConfig) -> io::Result<Self> {
-        let socket_dir = default_machine_socket_dir()?;
+        let socket_dir = match config.socket_dir {
+            Some(dir) => dir,
+            None => default_machine_socket_dir()?,
+        };
         ensure_machine_dir(&socket_dir)?;
         Ok(Self {
             socket_dir,
@@ -450,12 +458,14 @@ impl MachineManager {
             &self.socket_dir,
             BridgeKind::Api,
             self.permits.clone(),
+            "ssh",
         )?;
         let client_bridge = SshSocketBridge::start(
             endpoint,
             &self.socket_dir,
             BridgeKind::Client,
             self.permits.clone(),
+            "ssh",
         )?;
         let state = Arc::new(MachineSshState {
             api: herdr_compat::api::client::ApiClient::for_socket_path(api_bridge.path.clone()),
@@ -735,6 +745,7 @@ impl SshSocketBridge {
         socket_dir: &Path,
         kind: BridgeKind,
         permits: ConnectionPermits,
+        ssh_program: &str,
     ) -> Result<Self, String> {
         if !is_valid_machine_id(&endpoint.id) || endpoint.id == LOCAL_MACHINE_ID {
             return Err(format!("invalid machine id: {}", endpoint.id));
@@ -770,6 +781,9 @@ impl SshSocketBridge {
                 BridgeKind::Client => REMOTE_CLIENT_BRIDGE_COMMAND,
             }
             .to_string();
+            // Injected so tests can point the bridge at a fake ssh instead
+            // of relying on PATH lookups.
+            let ssh_program = ssh_program.to_string();
             // Non-blocking accept so the loop can observe `stop` and exit
             // deterministically; Drop joins the thread instead of leaking it
             // blocked inside accept().
@@ -801,9 +815,15 @@ impl SshSocketBridge {
                             enabled: true,
                         };
                         let remote_command = remote_command.clone();
+                        let ssh_program = ssh_program.clone();
                         std::thread::spawn(move || {
                             let _permit = guard;
-                            serve_bridge_connection(stream, &endpoint, &remote_command)
+                            serve_bridge_connection(
+                                stream,
+                                &endpoint,
+                                &remote_command,
+                                &ssh_program,
+                            )
                         });
                     },
                     &thread_stop,
@@ -873,12 +893,13 @@ fn serve_bridge_connection(
     stream: std::os::unix::net::UnixStream,
     endpoint: &SavedEndpoint,
     remote_command: &str,
+    ssh_program: &str,
 ) {
     use std::io::Write as _;
     use std::net::Shutdown;
 
     let args = ssh_remote_herdr_args(endpoint, remote_command);
-    let mut command = Command::new("ssh");
+    let mut command = Command::new(ssh_program);
     command
         .args(&args)
         .stdin(Stdio::piped())
@@ -917,9 +938,19 @@ fn serve_bridge_connection(
             return;
         }
     };
+    // Shared so the stdin copier can tear the child down: EOF on the client
+    // socket means the local client is gone for good (no client here
+    // half-closes — API requests drop the stream, terminal detach shuts down
+    // both directions), and an ssh child that ignores stdin EOF and stays
+    // silent would otherwise hold the permit until it exits on its own.
+    let child = Arc::new(std::sync::Mutex::new(child));
+    let kill_on_client_eof = Arc::clone(&child);
     let up = std::thread::spawn(move || {
         let _ = copy_pipe(&mut read_stream, &mut child_stdin);
         // Dropping stdin sends EOF so a half-closed local peer ends the ssh child.
+        if let Ok(mut child) = kill_on_client_eof.lock() {
+            let _ = child.kill();
+        }
     });
     let _ = copy_pipe(&mut child_stdout, &mut write_stream);
     let _ = write_stream.flush();
@@ -928,6 +959,9 @@ fn serve_bridge_connection(
     // the peer happens to send or disconnect.
     let _ = write_stream.shutdown(Shutdown::Both);
     let _ = up.join();
+    let mut child = child
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -1660,17 +1694,25 @@ mod tests {
         std::fs::set_permissions(&script, permissions).unwrap();
         let program = script.to_str().unwrap();
 
-        // Success: the CLI receives exactly the constructed argv.
-        assert_eq!(
-            run_machine_add_program(
+        // Warm-up: exec'ing a just-written script can transiently fail with
+        // ETXTBSY on overlayfs while sibling stub tests run in parallel
+        // (see machine_disable_runner). A spawn failure never reaches the
+        // stub, so the args log still receives exactly one append.
+        for _ in 0..40 {
+            match run_machine_add_program(
                 program,
                 Duration::from_secs(MACHINE_ADD_TIMEOUT_SECONDS),
                 "root@198.51.100.20",
                 Some("farm"),
-                Some("gpu")
-            ),
-            Ok(())
-        );
+                Some("gpu"),
+            ) {
+                Ok(()) => break,
+                Err(message) if message.contains("Text file busy") => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(message) => panic!("unexpected stub failure: {message}"),
+            }
+        }
         let recorded = std::fs::read_to_string(&args_log).unwrap();
         assert_eq!(
             recorded,
@@ -1683,14 +1725,27 @@ mod tests {
         // target argv (no environment mutation: setenv races sibling threads
         // that read process env concurrently).
         let started = Instant::now();
-        let error = run_machine_add_program(
-            program,
-            Duration::from_secs(MACHINE_ADD_TIMEOUT_SECONDS),
-            "root@fail.test",
-            None,
-            None,
-        )
-        .unwrap_err();
+        let mut attempts = 0;
+        let error = loop {
+            match run_machine_add_program(
+                program,
+                Duration::from_secs(MACHINE_ADD_TIMEOUT_SECONDS),
+                "root@fail.test",
+                None,
+                None,
+            ) {
+                Err(error) if error.contains("Text file busy") => {
+                    attempts += 1;
+                    assert!(
+                        attempts <= 40,
+                        "stub stayed busy (ETXTBSY) after 40 attempts"
+                    );
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(error) => break error,
+                Ok(()) => panic!("stub reported success for the failure profile"),
+            }
+        };
         assert!(
             started.elapsed() < Duration::from_secs(10),
             "runner waited on the descendant: {:?}",
@@ -1770,6 +1825,7 @@ mod tests {
         // runner does NOT wait for the 30 s descendant. The stub keys its
         // failure off the profile id argv (no environment mutation).
         let started = Instant::now();
+        let mut attempts = 0;
         let error = loop {
             match run_machine_disable_program(
                 program,
@@ -1777,6 +1833,11 @@ mod tests {
                 "bad0face",
             ) {
                 Err(error) if error.contains("Text file busy") => {
+                    attempts += 1;
+                    assert!(
+                        attempts <= 40,
+                        "stub stayed busy (ETXTBSY) after 40 attempts"
+                    );
                     std::thread::sleep(Duration::from_millis(50));
                 }
                 Err(error) => break error,
@@ -1822,14 +1883,29 @@ mod tests {
         std::fs::set_permissions(&script, permissions).unwrap();
 
         let started = Instant::now();
-        let error = run_machine_add_program(
-            script.to_str().unwrap(),
-            Duration::from_secs(1),
-            "root@host",
-            None,
-            None,
-        )
-        .unwrap_err();
+        // ETXTBSY warm-up (see machine_disable_runner): spawn failures fail
+        // instantly, so only the real run pays the 1 s timeout.
+        let mut attempts = 0;
+        let error = loop {
+            match run_machine_add_program(
+                script.to_str().unwrap(),
+                Duration::from_secs(1),
+                "root@host",
+                None,
+                None,
+            ) {
+                Err(error) if error.contains("Text file busy") => {
+                    attempts += 1;
+                    assert!(
+                        attempts <= 40,
+                        "stub stayed busy (ETXTBSY) after 40 attempts"
+                    );
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(error) => break error,
+                Ok(()) => panic!("stub reported success for the timeout profile"),
+            }
+        };
         assert_eq!(error, "machine add timed out");
         assert!(
             started.elapsed() < Duration::from_secs(10),
@@ -2098,6 +2174,7 @@ mod tests {
         });
         let manager = Arc::new(manager_with(MachineManagerConfig {
             probe,
+            socket_dir: Some(home_test_root("bp")),
             ..MachineManagerConfig::default()
         }));
 
@@ -2136,6 +2213,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let manager = Arc::new(manager_with(MachineManagerConfig {
             probe: counting_probe(Arc::clone(&calls), false),
+            socket_dir: Some(home_test_root("cs")),
             ..MachineManagerConfig::default()
         }));
         let endpoint = test_endpoint(&hex_id(3), "root@198.51.100.20");
@@ -2171,6 +2249,7 @@ mod tests {
         let manager = manager_with(MachineManagerConfig {
             probe: counting_probe(Arc::clone(&calls), true),
             negative_cache_ttl: Duration::from_millis(60),
+            socket_dir: Some(home_test_root("nc")),
             ..MachineManagerConfig::default()
         });
         let endpoint = test_endpoint(&hex_id(4), "root@198.51.100.20");
@@ -2201,6 +2280,7 @@ mod tests {
     fn endpoint_change_for_same_id_evicts_stale_bridge_and_moves_sockets() {
         let manager = manager_with(MachineManagerConfig {
             probe: ok_probe(),
+            socket_dir: Some(home_test_root("ec")),
             ..MachineManagerConfig::default()
         });
         let mut endpoint = test_endpoint(&hex_id(5), "root@198.51.100.20");
@@ -2258,7 +2338,8 @@ mod tests {
         let endpoint = test_endpoint(&hex_id(6), "root@10.255.255.1");
         let root = home_test_root("pb");
         let bridge =
-            SshSocketBridge::start(&endpoint, &root, BridgeKind::Api, permits.clone()).unwrap();
+            SshSocketBridge::start(&endpoint, &root, BridgeKind::Api, permits.clone(), "ssh")
+                .unwrap();
         let socket_path = bridge.path.clone();
 
         let first = std::os::unix::net::UnixStream::connect(&socket_path).unwrap();
@@ -2296,7 +2377,8 @@ mod tests {
         let endpoint = test_endpoint(&hex_id(7), "root@127.0.0.1");
         let root = home_test_root("pk");
         let bridge =
-            SshSocketBridge::start(&endpoint, &root, BridgeKind::Api, permits.clone()).unwrap();
+            SshSocketBridge::start(&endpoint, &root, BridgeKind::Api, permits.clone(), "ssh")
+                .unwrap();
         let socket_path = bridge.path.clone();
 
         let mut client = std::os::unix::net::UnixStream::connect(&socket_path).unwrap();
@@ -2330,6 +2412,81 @@ mod tests {
         );
 
         drop(client);
+        drop(bridge);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // A5 permit release: a local client that closed its connection must not
+    // keep a permit held by an ssh child that ignores stdin EOF and stays
+    // silent — the child is torn down once the client is gone for good.
+    // No local client in this codebase half-closes (API requests drop the
+    // stream, terminal detach shuts down both directions), so EOF on the
+    // client socket means the session is dead.
+    #[cfg(unix)]
+    #[test]
+    fn bridge_releases_permit_when_client_leaves_and_ssh_ignores_stdin_eof() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let permits = ConnectionPermits::new(1);
+        // The stub ignores stdin EOF and stays silent: it exits immediately
+        // for the warm-up argument, otherwise it sleeps far past the test
+        // deadline (a real herdr server can keep an ssh child alive like
+        // this after the local client disconnects). `exec` keeps it a single
+        // process owning stdout, like a real ssh child, so killing it closes
+        // the pipe instead of leaving a descendant holding it open.
+        let endpoint = test_endpoint(&hex_id(9), "root@127.0.0.1");
+        let root = home_test_root("pl");
+        let script = root.join("fake-ssh.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n[ \"$1\" = warmup ] && exit 0\nexec sleep 30\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+        // ETXTBSY warm-up (see machine_disable_runner): exec the just-written
+        // stub until the overlayfs window passes, so the bridge's own spawn
+        // below is proven good and cannot silently shortcut the scenario.
+        for _ in 0..40 {
+            match std::process::Command::new(&script).arg("warmup").status() {
+                Ok(status) if status.success() => break,
+                Err(err) if err.to_string().contains("Text file busy") => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                other => panic!("warmup failed: {other:?}"),
+            }
+        }
+        let bridge = SshSocketBridge::start(
+            &endpoint,
+            &root,
+            BridgeKind::Api,
+            permits.clone(),
+            script.to_str().unwrap(),
+        )
+        .unwrap();
+        let socket_path = bridge.path.clone();
+
+        let client = std::os::unix::net::UnixStream::connect(&socket_path).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while permits.current() != 1 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(permits.current(), 1, "connection must hold the permit");
+
+        // The client is gone for good: the silent ssh child must be torn
+        // down and the permit released promptly, not after its 30 s sleep.
+        drop(client);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while permits.current() != 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            permits.current(),
+            0,
+            "permit must be released once the local client closed"
+        );
+
         drop(bridge);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2469,7 +2626,8 @@ mod tests {
         let permits = ConnectionPermits::new(4);
         let endpoint = test_endpoint(&hex_id(7), "root@198.51.100.20");
         let root = home_test_root("ds");
-        let bridge = SshSocketBridge::start(&endpoint, &root, BridgeKind::Api, permits).unwrap();
+        let bridge =
+            SshSocketBridge::start(&endpoint, &root, BridgeKind::Api, permits, "ssh").unwrap();
         let socket_path = bridge.path.clone();
         assert!(socket_path.exists());
 
@@ -2505,6 +2663,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let manager = manager_with(MachineManagerConfig {
             probe: counting_probe(Arc::clone(&calls), false),
+            socket_dir: Some(home_test_root("or")),
             ..MachineManagerConfig::default()
         });
         for bad in [
