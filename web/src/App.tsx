@@ -10326,12 +10326,29 @@ function stageBreadcrumb(
   return [workspace?.label, tabLabel].filter(Boolean).join(" · ") || pane.pane_id;
 }
 
+export function isSnapshotPayload(value: unknown): value is Snapshot {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const { workspaces, tabs, panes, layouts } = value as Record<string, unknown>;
+  return (
+    Array.isArray(workspaces) &&
+    Array.isArray(tabs) &&
+    Array.isArray(panes) &&
+    Array.isArray(layouts)
+  );
+}
+
 async function fetchSnapshot(httpUrl: (path: string, query?: URLSearchParams) => string) {
   const response = await fetchWithTimeout(httpUrl("/api/snapshot"));
   if (!response.ok) {
     throw new Error(`snapshot failed: ${response.status}`);
   }
-  return (await response.json()) as Snapshot;
+  const payload: unknown = await response.json();
+  if (!isSnapshotPayload(payload)) {
+    throw new Error("snapshot failed: malformed payload");
+  }
+  return payload;
 }
 
 function disconnectedHttpUrl(): string {

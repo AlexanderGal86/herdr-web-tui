@@ -41,6 +41,7 @@ import {
   sortScopedAgentPanes,
   stableBridgeRefreshOffsetMs,
   updateCollapsedSidebarGroups,
+  isSnapshotPayload,
 } from "./App";
 import type { BridgeConnectionRef, BridgeConnectionView } from "./App";
 import type { BridgeRuntime } from "./bridge";
@@ -2146,3 +2147,19 @@ function note(
         : undefined,
   };
 }
+
+describe("snapshot payload guard", () => {
+  it("accepts a payload with every required snapshot collection", () => {
+    expect(isSnapshotPayload({ workspaces: [], tabs: [], panes: [], layouts: [] })).toBe(true);
+    expect(
+      isSnapshotPayload({ workspaces: [{}], tabs: [], panes: [], layouts: [], selected_pane_id: null }),
+    ).toBe(true);
+  });
+
+  it("rejects payloads missing a collection or not shaped like a snapshot", () => {
+    expect(isSnapshotPayload({ workspaces: [], tabs: [], panes: [] })).toBe(false);
+    expect(isSnapshotPayload(null)).toBe(false);
+    expect(isSnapshotPayload("snapshot")).toBe(false);
+    expect(isSnapshotPayload({ workspaces: {}, tabs: [], panes: [], layouts: [] })).toBe(false);
+  });
+});

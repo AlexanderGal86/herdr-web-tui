@@ -156,6 +156,9 @@
 
 ### Fixed
 
+- The bridge snapshot response is validated before use: a malformed payload (missing the
+  workspaces/tabs/panes/layouts collections) now fails the snapshot fetch with an explicit
+  error instead of being blindly cast and crashing later rendering.
 - Agent pin toggles no longer apply a stale response after the bridge reconnects mid-request: the
   pin state update is dropped unless the connection key captured at request time still matches.
 - Saved-machine ssh connections now send fast keepalives (`ServerAliveInterval=5`,
