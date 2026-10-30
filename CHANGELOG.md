@@ -162,6 +162,9 @@
 
 ### Fixed
 
+- Bridge: uploaded files are now stored with owner-only permissions (0600) after the write or
+  overwrite rename, instead of the umask default (0644) that exposed uploaded content to other
+  local users; the upload directory itself is unchanged.
 - Bridge: the `Content-Security-Policy` header is now computed once at startup and cloned per
   response instead of being rebuilt from the configured connect sources on every HTTP reply.
 - Bridge: the agent-activity tracker no longer panics on every agent-activity API call after a

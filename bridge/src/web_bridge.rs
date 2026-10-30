@@ -3264,6 +3264,9 @@ async fn store_local_upload(
         }
         (name, destination)
     };
+    // Uploads land in a shared directory; keep them owner-only like the
+    // agent-pins and notes stores instead of the umask default (0644).
+    crate::store_util::set_private_file_permissions(&destination).map_err(UploadError::Io)?;
     Ok(UploadResponse {
         file: UploadEntry {
             name,
@@ -9140,6 +9143,67 @@ mod tests {
             protocol: Some(protocol),
             capabilities: None,
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn store_local_upload_sets_private_file_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let unique = format!(
+            "herdr-web-upload-perms-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let upload_dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&upload_dir).unwrap();
+        let create_query = UploadQuery {
+            name: Some("notes.txt".to_string()),
+            overwrite: false,
+            rename_conflicts: false,
+        };
+        store_local_upload(
+            &upload_dir,
+            &create_query,
+            Some("text/plain"),
+            &Bytes::from_static(b"body"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::metadata(upload_dir.join("notes.txt"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        let overwrite_query = UploadQuery {
+            name: Some("notes.txt".to_string()),
+            overwrite: true,
+            rename_conflicts: false,
+        };
+        store_local_upload(
+            &upload_dir,
+            &overwrite_query,
+            Some("text/plain"),
+            &Bytes::from_static(b"replaced"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::metadata(upload_dir.join("notes.txt"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let _ = std::fs::remove_dir_all(&upload_dir);
     }
 
     #[test]
