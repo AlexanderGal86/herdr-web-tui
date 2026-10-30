@@ -162,6 +162,9 @@
 
 ### Fixed
 
+- Vendored herdr-compat: `ApiClientError` now implements `source()`, so the underlying io or
+  serde_json cause stays reachable through the error chain for loggers and diagnostics (the
+  bridge binary picks this up without changes); `Display` output is unchanged.
 - Bridge: terminal-session pruning no longer fires on Herdr events whose payload text merely
   contains a substring like `pane.closed` (e.g. a pane cwd or label); the event envelope's exact
   `event` kind is now parsed and matched, and non-JSON payloads never prune.
