@@ -156,6 +156,12 @@
 
 ### Fixed
 
+- Bridge unit tests no longer flake when run in parallel: every `MachineManager` test
+  now gets its own machine socket root (injected through the manager config) instead of
+  racing `remove_file`/`bind` cycles on the shared default socket directory under
+  `~/.local/state/herdr-web/machines` (the `EADDRINUSE`/`Address already in use` flakes),
+  and the fake-CLI/fake-scp stub tests retry the transient `ETXTBSY` overlayfs window
+  after writing a stub script, matching the existing machine-disable test.
 - Saved-machine ssh connections now send fast keepalives (`ServerAliveInterval=5`,
   `ServerAliveCountMax=2`, matching the upload path) so a silently dead peer can no
   longer hold a bridge connection permit; when the ssh child exits, the local bridge

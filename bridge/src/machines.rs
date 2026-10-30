@@ -339,6 +339,10 @@ pub(crate) struct MachineManagerConfig {
     pub(crate) probe: ProbeFn,
     pub(crate) negative_cache_ttl: Duration,
     pub(crate) max_bridge_connections: usize,
+    /// Per-manager socket root override. Tests give every MachineManager its
+    /// own directory: parallel test managers would otherwise race their
+    /// remove_file→bind cycles on the shared default root (EADDRINUSE).
+    pub(crate) socket_dir: Option<PathBuf>,
 }
 
 impl Default for MachineManagerConfig {
@@ -347,6 +351,7 @@ impl Default for MachineManagerConfig {
             probe: Arc::new(probe_remote_support) as ProbeFn,
             negative_cache_ttl: DEFAULT_NEGATIVE_CACHE_TTL,
             max_bridge_connections: DEFAULT_MAX_BRIDGE_CONNECTIONS,
+            socket_dir: None,
         }
     }
 }
@@ -379,7 +384,10 @@ impl MachineManager {
     }
 
     pub(crate) fn with_config(config: MachineManagerConfig) -> io::Result<Self> {
-        let socket_dir = default_machine_socket_dir()?;
+        let socket_dir = match config.socket_dir {
+            Some(dir) => dir,
+            None => default_machine_socket_dir()?,
+        };
         ensure_machine_dir(&socket_dir)?;
         Ok(Self {
             socket_dir,
@@ -1660,17 +1668,25 @@ mod tests {
         std::fs::set_permissions(&script, permissions).unwrap();
         let program = script.to_str().unwrap();
 
-        // Success: the CLI receives exactly the constructed argv.
-        assert_eq!(
-            run_machine_add_program(
+        // Warm-up: exec'ing a just-written script can transiently fail with
+        // ETXTBSY on overlayfs while sibling stub tests run in parallel
+        // (see machine_disable_runner). A spawn failure never reaches the
+        // stub, so the args log still receives exactly one append.
+        for _ in 0..40 {
+            match run_machine_add_program(
                 program,
                 Duration::from_secs(MACHINE_ADD_TIMEOUT_SECONDS),
                 "root@198.51.100.20",
                 Some("farm"),
-                Some("gpu")
-            ),
-            Ok(())
-        );
+                Some("gpu"),
+            ) {
+                Ok(()) => break,
+                Err(message) if message.contains("Text file busy") => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(message) => panic!("unexpected stub failure: {message}"),
+            }
+        }
         let recorded = std::fs::read_to_string(&args_log).unwrap();
         assert_eq!(
             recorded,
@@ -1683,14 +1699,21 @@ mod tests {
         // target argv (no environment mutation: setenv races sibling threads
         // that read process env concurrently).
         let started = Instant::now();
-        let error = run_machine_add_program(
-            program,
-            Duration::from_secs(MACHINE_ADD_TIMEOUT_SECONDS),
-            "root@fail.test",
-            None,
-            None,
-        )
-        .unwrap_err();
+        let error = loop {
+            match run_machine_add_program(
+                program,
+                Duration::from_secs(MACHINE_ADD_TIMEOUT_SECONDS),
+                "root@fail.test",
+                None,
+                None,
+            ) {
+                Err(error) if error.contains("Text file busy") => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(error) => break error,
+                Ok(()) => panic!("stub reported success for the failure profile"),
+            }
+        };
         assert!(
             started.elapsed() < Duration::from_secs(10),
             "runner waited on the descendant: {:?}",
@@ -1822,14 +1845,23 @@ mod tests {
         std::fs::set_permissions(&script, permissions).unwrap();
 
         let started = Instant::now();
-        let error = run_machine_add_program(
-            script.to_str().unwrap(),
-            Duration::from_secs(1),
-            "root@host",
-            None,
-            None,
-        )
-        .unwrap_err();
+        // ETXTBSY warm-up (see machine_disable_runner): spawn failures fail
+        // instantly, so only the real run pays the 1 s timeout.
+        let error = loop {
+            match run_machine_add_program(
+                script.to_str().unwrap(),
+                Duration::from_secs(1),
+                "root@host",
+                None,
+                None,
+            ) {
+                Err(error) if error.contains("Text file busy") => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(error) => break error,
+                Ok(()) => panic!("stub reported success for the timeout profile"),
+            }
+        };
         assert_eq!(error, "machine add timed out");
         assert!(
             started.elapsed() < Duration::from_secs(10),
@@ -2098,6 +2130,7 @@ mod tests {
         });
         let manager = Arc::new(manager_with(MachineManagerConfig {
             probe,
+            socket_dir: Some(home_test_root("bp")),
             ..MachineManagerConfig::default()
         }));
 
@@ -2136,6 +2169,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let manager = Arc::new(manager_with(MachineManagerConfig {
             probe: counting_probe(Arc::clone(&calls), false),
+            socket_dir: Some(home_test_root("cs")),
             ..MachineManagerConfig::default()
         }));
         let endpoint = test_endpoint(&hex_id(3), "root@198.51.100.20");
@@ -2171,6 +2205,7 @@ mod tests {
         let manager = manager_with(MachineManagerConfig {
             probe: counting_probe(Arc::clone(&calls), true),
             negative_cache_ttl: Duration::from_millis(60),
+            socket_dir: Some(home_test_root("nc")),
             ..MachineManagerConfig::default()
         });
         let endpoint = test_endpoint(&hex_id(4), "root@198.51.100.20");
@@ -2201,6 +2236,7 @@ mod tests {
     fn endpoint_change_for_same_id_evicts_stale_bridge_and_moves_sockets() {
         let manager = manager_with(MachineManagerConfig {
             probe: ok_probe(),
+            socket_dir: Some(home_test_root("ec")),
             ..MachineManagerConfig::default()
         });
         let mut endpoint = test_endpoint(&hex_id(5), "root@198.51.100.20");
@@ -2505,6 +2541,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let manager = manager_with(MachineManagerConfig {
             probe: counting_probe(Arc::clone(&calls), false),
+            socket_dir: Some(home_test_root("or")),
             ..MachineManagerConfig::default()
         });
         for bad in [
