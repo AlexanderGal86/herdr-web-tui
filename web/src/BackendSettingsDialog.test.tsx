@@ -342,3 +342,56 @@ function requiredElement<T extends Element = HTMLElement>(
   }
   return element;
 }
+
+describe("BackendSettingsDialog save race", () => {
+  afterEach(() => {
+    (bridge.store as { backends: import("./bridge").BridgeBackendProfile[] }).backends = [];
+    bridge.store.enabledBridgeIds = [];
+    (bridge as { lastSelectedBridgeId: string | null }).lastSelectedBridgeId = null;
+  });
+
+  it("does not clobber a mode switch made while a save is in flight", async () => {
+    (bridge.store as { backends: import("./bridge").BridgeBackendProfile[] }).backends = [
+      { id: "b1", name: "Host", baseUrl: "http://host:1", color: "#112233" },
+    ];
+    (bridge as { lastSelectedBridgeId: string | null }).lastSelectedBridgeId = "b1";
+
+    const probe = deferred<void>();
+    const update = deferred<import("./bridge").BridgeBackendProfile>();
+    bridge.probeBackend.mockImplementation(() => probe.promise);
+    bridge.updateBackend.mockImplementation(() => update.promise);
+
+    const { container } = await render(<BackendSettingsDialog {...settingsProps()} />);
+    const urlInput = requiredElement<HTMLInputElement>(
+      container,
+      'input[placeholder^="https://herd.example"]',
+    );
+    expect(urlInput.value).toBe("http://host:1");
+
+    await act(async () =>
+      requiredElement<HTMLButtonElement>(container, ".modal-actions .btn-primary").click(),
+    );
+    // While the save request is still pending, the user starts adding a new bridge.
+    await act(async () =>
+      requiredElement<HTMLButtonElement>(container, ".backend-row-action").click(),
+    );
+
+    await act(async () => {
+      probe.resolve(undefined);
+      update.resolve({ id: "b1", name: "Host", baseUrl: "http://host:1", color: "#112233" });
+    });
+
+    expect(urlInput.value).toBe("");
+    expect(
+      requiredElement<HTMLButtonElement>(container, ".backend-row-action").dataset.active,
+    ).toBe("true");
+  });
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}

@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { NotesApiError, createNote, isNotesConflictError, notesForPane, supportsNotes } from "./notes";
+import {
+  NotesApiError,
+  createNote,
+  isNotesConflictError,
+  notesForPane,
+  parseNotesList,
+  parsePaneNote,
+  supportsNotes,
+} from "./notes";
 import type { PaneNote } from "./notes";
 
 describe("notes helpers", () => {
@@ -45,6 +53,40 @@ describe("notes helpers", () => {
     const error = new NotesApiError("note has changed", 409);
     expect(isNotesConflictError(error)).toBe(true);
     expect(isNotesConflictError(new NotesApiError("bad", 400))).toBe(false);
+  });
+
+  it("validates note list payloads and drops malformed note entries", () => {
+    const valid = note("n1", "p1", "linked", "200");
+    const malformed: Record<string, unknown> = { ...valid, revision: "one" };
+    expect(parseNotesList({ store_id: "store", session_key: "s", notes: [valid, malformed] }))
+      .toEqual({ store_id: "store", session_key: "s", notes: [valid] });
+    expect(parseNotesList({ store_id: "store", session_key: "s", notes: "none" })).toBeNull();
+    expect(parseNotesList({ store_id: "store", notes: [] })).toBeNull();
+    expect(parseNotesList("nope")).toBeNull();
+  });
+
+  it("validates single note payloads including optional attachments", () => {
+    expect(parsePaneNote(note("n1", "p1", "linked", "200"))).toMatchObject({ note_id: "n1" });
+    expect(parsePaneNote({ ...note("n1", "p1", "linked", "200"), attachment: { pane_id: "p1" } })).toBeNull();
+    expect(parsePaneNote({ ...note("n1", "p1", "linked", "200"), link_state: "floating" })).toBeNull();
+    expect(parsePaneNote({ ...note("n1", "p1", "linked", "200"), attachment_history: null })).toBeNull();
+    expect(parsePaneNote(42)).toBeNull();
+  });
+
+  it("rejects malformed note mutation responses with an explicit error", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify({ note_id: 7 }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+
+    await expect(createNote((path) => `http://bridge${path}`, {})).rejects.toThrow(
+      "note mutation failed: malformed response",
+    );
   });
 });
 

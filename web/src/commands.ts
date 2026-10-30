@@ -1,5 +1,6 @@
 // Mutating commands proxied through the bridge's allow-listed /api/command.
 
+import { apiErrorMessage } from "./bridgeApi";
 import type { BridgeHttpUrl } from "./bridgeApi";
 import type { LaunchSpec, SplitDirection } from "./launch";
 
@@ -32,16 +33,8 @@ async function runCommand(
     body: JSON.stringify({ method, params }),
   });
   if (!response.ok) {
-    let message = `command failed (${response.status})`;
-    try {
-      const body = (await response.json()) as { error?: string };
-      if (body?.error) {
-        message = body.error;
-      }
-    } catch {
-      // keep the default message
-    }
-    throw new Error(message);
+    const message = await apiErrorMessage(response);
+    throw new Error(message ?? `command failed (${response.status})`);
   }
   return (await response.json()) as CommandResult;
 }
@@ -56,16 +49,8 @@ async function runLaunchPreset(
     body: JSON.stringify(body),
   });
   if (!response.ok) {
-    let message = `launcher preset failed (${response.status})`;
-    try {
-      const parsed = (await response.json()) as { error?: string };
-      if (parsed?.error) {
-        message = parsed.error;
-      }
-    } catch {
-      // keep the default message
-    }
-    throw new Error(message);
+    const message = await apiErrorMessage(response);
+    throw new Error(message ?? `launcher preset failed (${response.status})`);
   }
   return (await response.json()) as LaunchPresetResult;
 }

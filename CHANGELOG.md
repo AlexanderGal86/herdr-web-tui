@@ -118,6 +118,12 @@
 
 ### Changed
 
+- The four duplicate `/ws/ui-events` parsers (selection/notes/agent-activity/agent-pins, each with
+  its own JSON.parse and try/catch) are consolidated into one exported `parseBridgeEvent` type-guard
+  returning a discriminated union; behavior of every event kind is preserved (covered by
+  characterization tests).
+- The sidebar `spaceEntries` computation is memoized (like the neighboring machine space entries),
+  avoiding an O(workspaces×panes) rebuild on every render.
 - Development model documented in `README.md` and `AGENTS.md`: upstream
   `kcosr/herdr-web` is a source of ideas only; this fork develops independently
   and does not track or layer on upstream releases (#1).
@@ -169,6 +175,28 @@
   `~/.local/state/herdr-web/machines` (the `EADDRINUSE`/`Address already in use` flakes),
   and the fake-CLI/fake-scp stub tests retry the transient `ETXTBSY` overlayfs window
   after writing a stub script, matching the existing machine-disable test.
+- Backend settings no longer clobber the dialog state when a save finishes after the user switched
+  to adding a new bridge or to the same-origin mode mid-flight: the saved profile only replaces the
+  form if the selection mode and form contents are still the ones the save started with.
+- Overlay focus traps now keep Tab inside the trap when the focused element became unfocusable
+  (e.g. `tabindex=-1` or disabled while focused): such elements are treated like focus outside the
+  focusable list and wrap to the first/last focusable element.
+- Bridge command and launcher-preset errors now go through the shared `apiErrorMessage` helper, so a
+  structured error body (e.g. `{"error":{...}}`) surfaces the HTTP status fallback instead of a
+  literal `[object Object]` message; plain string errors are still preferred.
+- `/api/notes` responses are validated instead of blindly cast: list and mutation payloads go through
+  `parseNotesList`/`parsePaneNote` guards (modeled on `parseMachinesList`), malformed note entries are
+  dropped from lists, and a malformed single-note response fails with an explicit error instead of
+  crashing note rendering later.
+- Pane selection sync (`/api/selection`) now uses the shared `fetchWithTimeout` helper, so a hung
+  bridge can no longer leave the selection request pending indefinitely.
+- Failed bridge snapshot refreshes now log the underlying error cause in the console instead of
+  silently swallowing it, while the connection state keeps its existing shape.
+- The bridge snapshot response is validated before use: a malformed payload (missing the
+  workspaces/tabs/panes/layouts collections) now fails the snapshot fetch with an explicit
+  error instead of being blindly cast and crashing later rendering.
+- Agent pin toggles no longer apply a stale response after the bridge reconnects mid-request: the
+  pin state update is dropped unless the connection key captured at request time still matches.
 - Saved-machine ssh connections now send fast keepalives (`ServerAliveInterval=5`,
   `ServerAliveCountMax=2`, matching the upload path) so a silently dead peer can no
   longer hold a bridge connection permit; when the ssh child exits, the local bridge

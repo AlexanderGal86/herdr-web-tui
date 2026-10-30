@@ -3388,7 +3388,10 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
         },
       }));
       return patched;
-    } catch {
+    } catch (caught) {
+      // Keep the reason visible in the console log; the connection state only
+      // carries a loadState, matching the existing contract.
+      console.warn("bridge snapshot refresh failed", caught);
       const currentRef = connectionRefs.current[runtime.id];
       if (currentRef?.connectionKey === requestConnectionKey) {
         setConnectionStates((current) => ({
@@ -3805,10 +3808,20 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
       return;
     }
     const requestConnectionKey = runtime.connectionKey;
+    // A reconnect during the request swaps the connection key; applying the
+    // stale response would clobber the fresh generation's pin state.
+    const isCurrentConnection = () =>
+      isConnectionResultCurrent(
+        connectionRefs.current[runtime.id]?.connectionKey ?? "",
+        requestConnectionKey,
+      );
     try {
       const response = pinned
         ? await unpinAgent(runtime.httpUrl, paneId)
         : await pinAgent(runtime.httpUrl, paneId);
+      if (!isCurrentConnection()) {
+        return;
+      }
       setAgentPinsStates((current) => ({
         ...current,
         [runtime.id]: {
@@ -3820,6 +3833,9 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
       }));
       setError(null);
     } catch (caught) {
+      if (!isCurrentConnection()) {
+        return;
+      }
       setError(caught instanceof Error ? caught.message : "Could not update agent pin");
     }
   }
@@ -5072,8 +5088,9 @@ export function BridgeConnectionController({
         if (!isCurrentConnection()) {
           return;
         }
-        const paneId = selectionPaneId(event);
-        if (paneId) {
+        const uiEvent = parseBridgeEvent(event);
+        if (uiEvent.type === "selection") {
+          const paneId = uiEvent.paneId;
           const currentRef = connectionRefs.current[runtime.id];
           if (!currentRef) {
             return;
@@ -5109,15 +5126,15 @@ export function BridgeConnectionController({
           refresh();
           return;
         }
-        if (isNotesChangedEvent(event)) {
+        if (uiEvent.type === "notes_changed") {
           onNotesChangedRef.current(runtime.id);
           return;
         }
-        if (isAgentActivityChangedEvent(event)) {
+        if (uiEvent.type === "agent_activity_changed") {
           onAgentActivityChangedRef.current(runtime.id);
           return;
         }
-        if (isAgentPinsChangedEvent(event)) {
+        if (uiEvent.type === "agent_pins_changed") {
           onAgentPinsChangedRef.current(runtime.id);
           return;
         }
@@ -6665,24 +6682,28 @@ function Switcher({
       selectedBridgeId,
     ],
   );
-  const spaceEntries = hostBridgeViews.flatMap((view) => {
-    const viewSnapshot = view.snapshot;
-    if (!viewSnapshot) {
-      return [];
-    }
-    const activeWorkspace = activeWorkspaceForView(view);
-    return viewSnapshot.workspaces.map((workspace) => {
-      const workspacePanes = viewSnapshot.panes.filter(
-        (pane) => pane.workspace_id === workspace.workspace_id,
-      );
-      return {
-        view,
-        workspace,
-        workspacePanes,
-        active: workspace.workspace_id === activeWorkspace?.workspace_id,
-      };
-    });
-  });
+  const spaceEntries = useMemo(
+    () =>
+      hostBridgeViews.flatMap((view) => {
+        const viewSnapshot = view.snapshot;
+        if (!viewSnapshot) {
+          return [];
+        }
+        const activeWorkspace = activeWorkspaceForView(view);
+        return viewSnapshot.workspaces.map((workspace) => {
+          const workspacePanes = viewSnapshot.panes.filter(
+            (pane) => pane.workspace_id === workspace.workspace_id,
+          );
+          return {
+            view,
+            workspace,
+            workspacePanes,
+            active: workspace.workspace_id === activeWorkspace?.workspace_id,
+          };
+        });
+      }),
+    [activeWorkspaceForView, hostBridgeViews],
+  );
   const reorderBridgeView = spaceReorderMode
     ? (hostBridgeViews.find((view) => view.runtime.id === spaceReorderMode.bridgeId) ?? null)
     : null;
@@ -10313,12 +10334,29 @@ function stageBreadcrumb(
   return [workspace?.label, tabLabel].filter(Boolean).join(" · ") || pane.pane_id;
 }
 
+export function isSnapshotPayload(value: unknown): value is Snapshot {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const { workspaces, tabs, panes, layouts } = value as Record<string, unknown>;
+  return (
+    Array.isArray(workspaces) &&
+    Array.isArray(tabs) &&
+    Array.isArray(panes) &&
+    Array.isArray(layouts)
+  );
+}
+
 async function fetchSnapshot(httpUrl: (path: string, query?: URLSearchParams) => string) {
   const response = await fetchWithTimeout(httpUrl("/api/snapshot"));
   if (!response.ok) {
     throw new Error(`snapshot failed: ${response.status}`);
   }
-  return (await response.json()) as Snapshot;
+  const payload: unknown = await response.json();
+  if (!isSnapshotPayload(payload)) {
+    throw new Error("snapshot failed: malformed payload");
+  }
+  return payload;
 }
 
 function disconnectedHttpUrl(): string {
@@ -10333,7 +10371,7 @@ async function syncSelectedPane(
   httpUrl: (path: string, query?: URLSearchParams) => string,
   paneId: string,
 ) {
-  const response = await fetch(httpUrl("/api/selection"), {
+  const response = await fetchWithTimeout(httpUrl("/api/selection"), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ pane_id: paneId }),
@@ -10343,54 +10381,41 @@ async function syncSelectedPane(
   }
 }
 
-function selectionPaneId(event: MessageEvent) {
-  if (typeof event.data !== "string") {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(event.data) as { type?: unknown; pane_id?: unknown };
-    return parsed.type === "herdr_web.selection_changed" && typeof parsed.pane_id === "string"
-      ? parsed.pane_id
-      : null;
-  } catch {
-    return null;
-  }
-}
+export type BridgeUiEvent =
+  | { type: "selection"; paneId: string }
+  | { type: "notes_changed" }
+  | { type: "agent_activity_changed" }
+  | { type: "agent_pins_changed" }
+  | { type: "unknown" };
 
-function isNotesChangedEvent(event: MessageEvent) {
+/** Parses one /ws/ui-events message; unrecognized payloads are "unknown". */
+export function parseBridgeEvent(event: { data: unknown }): BridgeUiEvent {
   if (typeof event.data !== "string") {
-    return false;
+    return { type: "unknown" };
   }
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(event.data) as { type?: unknown };
-    return parsed.type === "herdr_web.notes_changed";
+    parsed = JSON.parse(event.data);
   } catch {
-    return false;
+    return { type: "unknown" };
   }
-}
-
-function isAgentActivityChangedEvent(event: MessageEvent) {
-  if (typeof event.data !== "string") {
-    return false;
+  if (typeof parsed !== "object" || parsed === null) {
+    return { type: "unknown" };
   }
-  try {
-    const parsed = JSON.parse(event.data) as { type?: unknown };
-    return parsed.type === "herdr_web.agent_activity_changed";
-  } catch {
-    return false;
+  const { type, pane_id } = parsed as Record<string, unknown>;
+  if (type === "herdr_web.selection_changed") {
+    return typeof pane_id === "string" ? { type: "selection", paneId: pane_id } : { type: "unknown" };
   }
-}
-
-function isAgentPinsChangedEvent(event: MessageEvent) {
-  if (typeof event.data !== "string") {
-    return false;
+  if (type === "herdr_web.notes_changed") {
+    return { type: "notes_changed" };
   }
-  try {
-    const parsed = JSON.parse(event.data) as { type?: unknown };
-    return parsed.type === "herdr_web.agent_pins_changed";
-  } catch {
-    return false;
+  if (type === "herdr_web.agent_activity_changed") {
+    return { type: "agent_activity_changed" };
   }
+  if (type === "herdr_web.agent_pins_changed") {
+    return { type: "agent_pins_changed" };
+  }
+  return { type: "unknown" };
 }
 
 function blurActiveTextInput() {
