@@ -3215,6 +3215,40 @@ async fn upload_handler(
     Ok(Json(response))
 }
 
+/// Uploads land in a shared directory; keep the overwrite temp owner-only
+/// like the agent-pins and notes stores instead of the umask default (0644),
+/// from the moment of creation, and reserve it with `create_new` so a
+/// pre-planted symlink at the predictable temp name cannot redirect the
+/// write. `Ok(None)` means the name is taken; the caller tries the next one.
+async fn reserve_upload_temp(
+    upload_dir: &Path,
+    temp_name: &str,
+) -> io::Result<Option<tokio::fs::File>> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    match options.open(&upload_dir.join(temp_name)).await {
+        Ok(file) => Ok(Some(file)),
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+/// Try the candidate temp names in order and return the first reserved one;
+/// a stale temp from a previous run only costs one retry on the next name.
+async fn reserve_upload_temp_with_retry(
+    upload_dir: &Path,
+    temp_names: impl IntoIterator<Item = String>,
+) -> io::Result<Option<(PathBuf, tokio::fs::File)>> {
+    for temp_name in temp_names {
+        if let Some(file) = reserve_upload_temp(upload_dir, &temp_name).await? {
+            return Ok(Some((upload_dir.join(temp_name), file)));
+        }
+    }
+    Ok(None)
+}
+
 /// Shared local-upload storage used by both `/api/uploads` and the
 /// machine-scoped upload route for the local machine: reserve-or-rename with
 /// `create_new`, or explicit overwrite through a temp file + rename after
@@ -3244,33 +3278,16 @@ async fn store_local_upload(
                 ));
             }
         }
-        // Uploads land in a shared directory; keep the temp owner-only like
-        // the agent-pins and notes stores instead of the umask default (0644),
-        // and reserve it with create_new so a pre-planted symlink at the
-        // predictable temp name cannot redirect the write.
-        let mut reserved = None;
-        for _ in 0..2 {
-            let candidate = upload_dir.join(format!(
+        let temp_names = (0..2).map(|_| {
+            format!(
                 ".herdr-web-upload-{}-{}.tmp",
                 std::process::id(),
                 UPLOAD_TEMP_COUNTER.fetch_add(1, Ordering::AcqRel)
-            ));
-            let mut options = tokio::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            options.mode(0o600);
-            match options.open(&candidate).await {
-                Ok(file) => {
-                    reserved = Some((candidate, file));
-                    break;
-                }
-                // Stale temp from a previous run only costs one retry on the
-                // next counter value.
-                Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
-                Err(err) => return Err(UploadError::Io(err)),
-            }
-        }
-        let Some((temp_path, mut file)) = reserved else {
+            )
+        });
+        let Some((temp_path, mut file)) =
+            reserve_upload_temp_with_retry(upload_dir, temp_names).await?
+        else {
             return Err(UploadError::Io(io::Error::new(
                 ErrorKind::AlreadyExists,
                 "upload temp name collision",
@@ -9256,9 +9273,9 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn store_local_upload_refuses_to_write_through_a_preplanted_temp_symlink() {
+    async fn reserve_upload_temp_refuses_a_preplanted_symlink() {
         let unique = format!(
-            "herdr-web-upload-symlink-{}-{}",
+            "herdr-web-upload-reserve-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -9270,41 +9287,46 @@ mod tests {
         std::fs::create_dir_all(&upload_dir).unwrap();
         let victim = base.join("victim.txt");
         std::fs::write(&victim, b"original").unwrap();
-        std::fs::write(upload_dir.join("notes.txt"), b"first").unwrap();
+        let temp_name = ".herdr-web-upload-reserved.tmp";
+        std::os::unix::fs::symlink(&victim, upload_dir.join(temp_name)).unwrap();
 
-        // The temp counter is process-global and concurrent tests consume
-        // values, so poison a range wide enough to cover the drift and force
-        // both reservation attempts to collide.
-        let start = UPLOAD_TEMP_COUNTER.load(Ordering::Acquire);
-        for offset in 0..64 {
-            let name = format!(
-                ".herdr-web-upload-{}-{}.tmp",
-                std::process::id(),
-                start + offset
-            );
-            std::os::unix::fs::symlink(&victim, upload_dir.join(name)).unwrap();
-        }
-
-        let query = UploadQuery {
-            name: Some("notes.txt".to_string()),
-            overwrite: true,
-            rename_conflicts: false,
-        };
-        let result = store_local_upload(
-            &upload_dir,
-            &query,
-            Some("text/plain"),
-            &Bytes::from_static(b"replaced"),
-        )
-        .await;
-        assert!(result.is_err());
+        let reserved = reserve_upload_temp(&upload_dir, temp_name).await.unwrap();
+        assert!(reserved.is_none());
         assert_eq!(
             std::fs::read(&victim).unwrap(),
             b"original".to_vec(),
-            "upload body must not be written through a pre-planted symlink"
+            "reservation must not write through a pre-planted symlink"
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn reserve_upload_temp_with_retry_takes_the_first_free_name() {
+        let unique = format!(
+            "herdr-web-upload-retry-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let upload_dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&upload_dir).unwrap();
+        std::fs::write(upload_dir.join("first.tmp"), b"stale").unwrap();
+
+        let reserved = reserve_upload_temp_with_retry(
+            &upload_dir,
+            ["first.tmp".to_string(), "second.tmp".to_string()],
+        )
+        .await
+        .unwrap();
+        let (path, file) = reserved.expect("the free second name must be taken");
+        assert_eq!(path, upload_dir.join("second.tmp"));
+        assert!(path.is_file());
+        drop(file);
+
+        let _ = std::fs::remove_dir_all(&upload_dir);
     }
 
     #[test]
