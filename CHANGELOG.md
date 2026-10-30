@@ -181,6 +181,9 @@
 
 ### Fixed
 
+- `herdr-web:terminal-connection-lost` is now dispatched once per outage instead of on every
+  reason-less close: failed reconnect attempts close the same way, and each dispatch triggered an
+  app-wide resnapshot. A successful reopen re-arms the signal for the next outage.
 - Queued terminal input now drains up to 8 parts (or 4 KiB) per 35ms tick instead of exactly one
   part, so a submitted command and its Enter frame arrive together instead of Enter lagging one
   tick behind; the caps still pace a large reconnect backlog onto a freshly opened socket.

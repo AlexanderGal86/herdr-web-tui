@@ -767,6 +767,7 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
     let foregroundFastAttemptsRemaining = 0;
     let attachConflictRetries = 0;
     let lastCloseReason: string | null = null;
+    let connectionLostNotified = false;
     let socketGeneration = 0;
     let socketStartedAt = 0;
     let lastForegroundReconnectAt = Number.NEGATIVE_INFINITY;
@@ -885,6 +886,7 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
         foregroundFastAttemptsRemaining = 0;
         reconnectScheduledForSocket.delete(currentSocketGeneration);
         lastCloseReason = null;
+        connectionLostNotified = false;
         terminalInputBlockedRef.current = false;
         setCloseReason(null);
         terminalAttachCountRef.current += 1;
@@ -976,8 +978,14 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
         // without a terminal close handshake — the herdr server went away
         // (restart). Ask the app to resnapshot immediately so this pane
         // remounts on the rotated terminal_id instead of retrying the dead
-        // one until the periodic poll notices.
-        window.dispatchEvent(new CustomEvent(TERMINAL_CONNECTION_LOST_EVENT));
+        // one until the periodic poll notices. Only the first close of an
+        // outage signals: failed reconnect attempts close without a reason
+        // too, and repeated app-wide resnapshots are redundant until a
+        // successful reopen (which resets the flag above).
+        if (!connectionLostNotified) {
+          connectionLostNotified = true;
+          window.dispatchEvent(new CustomEvent(TERMINAL_CONNECTION_LOST_EVENT));
+        }
         scheduleSocketReconnect("close", currentSocketGeneration);
       });
       nextSocket.addEventListener("error", () => {
