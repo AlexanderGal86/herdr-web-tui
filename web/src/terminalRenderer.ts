@@ -583,68 +583,16 @@ export class GhosttyRenderer implements TerminalRenderer {
     if (!container) {
       return;
     }
-
-    const onContainerMouseDown = (event: MouseEvent) => {
-      if (!this.#appMouseActive() || !this.#isCurrentTerminal(terminal) || event.shiftKey || event.button > 2) {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      this.focusTextInput();
-      this.#mouseDragButton = event.button;
-      this.#sendMouse(terminal, "down", mouseButtonName(event.button), event);
-      document.addEventListener("mousemove", onDocumentMouseMove, true);
-      document.addEventListener("mouseup", onDocumentMouseUp, true);
-    };
-    const sendMove = (event: MouseEvent) => {
-      const kind = this.#mouseDragButton !== null ? "drag" : "moved";
-      this.#sendMouse(
-        terminal,
-        kind,
-        this.#mouseDragButton !== null ? mouseButtonName(this.#mouseDragButton) : null,
-        event,
-      );
-    };
-    const onContainerMouseMove = (event: MouseEvent) => {
-      if (!this.#appMouseActive() || !this.#isCurrentTerminal(terminal) || event.shiftKey) {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      sendMove(event);
-    };
-    const onDocumentMouseMove = (event: MouseEvent) => {
-      if (!this.#appMouseActive() || !this.#isCurrentTerminal(terminal) || event.shiftKey) {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      sendMove(event);
-    };
-    const onDocumentMouseUp = (event: MouseEvent) => {
-      if (this.#mouseDragButton === null) {
-        return;
-      }
-      const dragButton = this.#mouseDragButton;
-      this.#mouseDragButton = null;
-      document.removeEventListener("mousemove", onDocumentMouseMove, true);
-      document.removeEventListener("mouseup", onDocumentMouseUp, true);
-      // Release must reach the app once the press was forwarded, even if
-      // Shift appeared mid-drag — otherwise the app keeps a stuck selection.
-      if (this.#isCurrentTerminal(terminal)) {
-        this.#sendMouse(terminal, "up", mouseButtonName(dragButton), event);
-      }
-    };
-
-    container.addEventListener("mousedown", onContainerMouseDown, { capture: true });
-    container.addEventListener("mousemove", onContainerMouseMove, { capture: true });
-    this.#mouseReportingCleanup = () => {
-      this.#mouseDragButton = null;
-      container.removeEventListener("mousedown", onContainerMouseDown, { capture: true });
-      container.removeEventListener("mousemove", onContainerMouseMove, { capture: true });
-      document.removeEventListener("mousemove", onDocumentMouseMove, true);
-      document.removeEventListener("mouseup", onDocumentMouseUp, true);
-    };
+    this.#mouseReportingCleanup = installMouseDragReporting(container, {
+      appMouseActive: () => this.#appMouseActive(),
+      isCurrentTerminal: () => this.#isCurrentTerminal(terminal),
+      focusTextInput: () => this.focusTextInput(),
+      sendMouse: (kind, button, event) => this.#sendMouse(terminal, kind, button, event),
+      dragButton: () => this.#mouseDragButton,
+      setDragButton: (button) => {
+        this.#mouseDragButton = button;
+      },
+    });
   }
 
   #installScrollHandlers() {
@@ -1681,6 +1629,92 @@ export function refreshTerminalFontRendering(
     terminal.renderer.render(terminal.wasmTerm, true, terminal.viewportY, terminal, 0);
   }
   return size;
+}
+
+export type TerminalMouseDragForwarding = {
+  appMouseActive(): boolean;
+  isCurrentTerminal(): boolean;
+  focusTextInput(): void;
+  sendMouse(
+    kind: TerminalMouseReport["kind"],
+    button: TerminalMouseReport["button"],
+    event: MouseEvent,
+  ): void;
+  dragButton(): number | null;
+  setDragButton(button: number | null): void;
+};
+
+/**
+ * Wires container mousedown/mousemove plus a document-level drag pair that
+ * follows the pointer outside the terminal; returns the cleanup.
+ */
+export function installMouseDragReporting(
+  container: HTMLElement,
+  forwarding: TerminalMouseDragForwarding,
+): () => void {
+  const onContainerMouseDown = (event: MouseEvent) => {
+    if (!forwarding.appMouseActive() || !forwarding.isCurrentTerminal() || event.shiftKey || event.button > 2) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    forwarding.focusTextInput();
+    forwarding.setDragButton(event.button);
+    forwarding.sendMouse("down", mouseButtonName(event.button), event);
+    document.addEventListener("mousemove", onDocumentMouseMove, true);
+    document.addEventListener("mouseup", onDocumentMouseUp, true);
+  };
+  const sendMove = (event: MouseEvent) => {
+    const dragButton = forwarding.dragButton();
+    forwarding.sendMouse(
+      dragButton !== null ? "drag" : "moved",
+      dragButton !== null ? mouseButtonName(dragButton) : null,
+      event,
+    );
+  };
+  const onContainerMouseMove = (event: MouseEvent) => {
+    if (!forwarding.appMouseActive() || !forwarding.isCurrentTerminal() || event.shiftKey) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    sendMove(event);
+  };
+  const onDocumentMouseMove = (event: MouseEvent) => {
+    if (!forwarding.appMouseActive() || !forwarding.isCurrentTerminal() || event.shiftKey) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    sendMove(event);
+  };
+  const onDocumentMouseUp = (event: MouseEvent) => {
+    // The pair must come off even when the drag was reset mid-drag
+    // (setMouseCapture(false)) — otherwise it leaks until dispose() and
+    // reports phantom moves once capture returns.
+    document.removeEventListener("mousemove", onDocumentMouseMove, true);
+    document.removeEventListener("mouseup", onDocumentMouseUp, true);
+    const dragButton = forwarding.dragButton();
+    if (dragButton === null) {
+      return;
+    }
+    forwarding.setDragButton(null);
+    // Release must reach the app once the press was forwarded, even if
+    // Shift appeared mid-drag — otherwise the app keeps a stuck selection.
+    if (forwarding.isCurrentTerminal()) {
+      forwarding.sendMouse("up", mouseButtonName(dragButton), event);
+    }
+  };
+
+  container.addEventListener("mousedown", onContainerMouseDown, { capture: true });
+  container.addEventListener("mousemove", onContainerMouseMove, { capture: true });
+  return () => {
+    forwarding.setDragButton(null);
+    container.removeEventListener("mousedown", onContainerMouseDown, { capture: true });
+    container.removeEventListener("mousemove", onContainerMouseMove, { capture: true });
+    document.removeEventListener("mousemove", onDocumentMouseMove, true);
+    document.removeEventListener("mouseup", onDocumentMouseUp, true);
+  };
 }
 
 export function installTerminalInteractionRendering(

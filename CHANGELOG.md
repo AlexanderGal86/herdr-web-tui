@@ -191,6 +191,10 @@
 - Overlapping terminal commands no longer unlock the UI early: when two commands race
   (e.g. a keyboard shortcut fires while another command is still running), the busy state now
   stays set until the last command settles instead of being cleared by whichever finishes first.
+- Terminal mouse drags no longer leak document listeners: when a pane app disabled mouse
+  tracking mid-drag, the drag's document mousemove/mouseup listeners stayed installed until the
+  terminal was disposed and reported phantom moves once tracking came back; they are now removed
+  on every drag-ending mouseup.
 
 ### Removed
 

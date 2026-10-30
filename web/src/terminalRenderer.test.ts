@@ -1,7 +1,9 @@
+/** @vitest-environment jsdom */
 import { describe, expect, it, vi } from "vitest";
 import {
   disableGhosttySelectionClipboardWrites,
   handleTerminalCustomKeyEvent,
+  installMouseDragReporting,
   installTerminalInteractionRendering,
   renderGhosttyTerminalFrame,
   refreshTerminalFontRendering,
@@ -68,6 +70,99 @@ describe("terminal event-driven rendering", () => {
     expect(renderer.render).toHaveBeenCalledWith(wasmTerm, false, 8, terminal, 0.4);
   });
 });
+
+describe("terminal mouse drag reporting", () => {
+  it("ends a normal drag: drag listeners removed from the document and up reported", () => {
+    const container = document.createElement("div");
+    const state = dragForwarding();
+    const cleanup = installMouseDragReporting(container, state.forwarding);
+    const removeSpy = vi.spyOn(document, "removeEventListener");
+
+    container.dispatchEvent(new MouseEvent("mousedown", { button: 0, cancelable: true }));
+    document.dispatchEvent(new MouseEvent("mouseup", { button: 0 }));
+
+    expect(state.sent).toEqual([
+      { kind: "down", button: "left" },
+      { kind: "up", button: "left" },
+    ]);
+    expect(removeSpy).toHaveBeenCalledWith("mousemove", expect.any(Function), true);
+    expect(removeSpy).toHaveBeenCalledWith("mouseup", expect.any(Function), true);
+    removeSpy.mockRestore();
+    cleanup();
+  });
+
+  it("removes the drag listeners when mouse capture was reset mid-drag", () => {
+    const container = document.createElement("div");
+    const state = dragForwarding();
+    const cleanup = installMouseDragReporting(container, state.forwarding);
+
+    container.dispatchEvent(new MouseEvent("mousedown", { button: 0, cancelable: true }));
+    // setMouseCapture(false) mid-drag resets the drag state without ending the drag.
+    state.forwarding.setDragButton(null);
+    const removeSpy = vi.spyOn(document, "removeEventListener");
+    document.dispatchEvent(new MouseEvent("mouseup", { button: 0 }));
+
+    expect(removeSpy).toHaveBeenCalledWith("mousemove", expect.any(Function), true);
+    expect(removeSpy).toHaveBeenCalledWith("mouseup", expect.any(Function), true);
+    removeSpy.mockRestore();
+    cleanup();
+  });
+
+  it("does not report phantom moves after capture is re-enabled following an interrupted drag", () => {
+    const container = document.createElement("div");
+    const state = dragForwarding();
+    const cleanup = installMouseDragReporting(container, state.forwarding);
+
+    container.dispatchEvent(new MouseEvent("mousedown", { button: 0, cancelable: true }));
+    state.forwarding.setDragButton(null);
+    document.dispatchEvent(new MouseEvent("mouseup", { button: 0 }));
+    // Capture comes back later, without a new drag: plain document moves must stay silent.
+    document.dispatchEvent(new MouseEvent("mousemove", { button: 0 }));
+
+    expect(state.sent).toEqual([{ kind: "down", button: "left" }]);
+    cleanup();
+  });
+
+  it("starts a clean new drag after an interrupted one", () => {
+    const container = document.createElement("div");
+    const state = dragForwarding();
+    const cleanup = installMouseDragReporting(container, state.forwarding);
+
+    container.dispatchEvent(new MouseEvent("mousedown", { button: 0, cancelable: true }));
+    state.forwarding.setDragButton(null);
+    document.dispatchEvent(new MouseEvent("mouseup", { button: 0 }));
+
+    container.dispatchEvent(new MouseEvent("mousedown", { button: 0, cancelable: true }));
+    document.dispatchEvent(new MouseEvent("mousemove", { button: 0 }));
+    document.dispatchEvent(new MouseEvent("mouseup", { button: 0 }));
+
+    expect(state.sent).toEqual([
+      { kind: "down", button: "left" },
+      { kind: "down", button: "left" },
+      { kind: "drag", button: "left" },
+      { kind: "up", button: "left" },
+    ]);
+    cleanup();
+  });
+});
+
+function dragForwarding() {
+  let dragButton: number | null = null;
+  const sent: Array<{ kind: string; button: string | null }> = [];
+  const forwarding = {
+    appMouseActive: () => true,
+    isCurrentTerminal: () => true,
+    focusTextInput: vi.fn(),
+    sendMouse: (kind: string, button: string | null) => {
+      sent.push({ kind, button });
+    },
+    dragButton: () => dragButton,
+    setDragButton: (button: number | null) => {
+      dragButton = button;
+    },
+  };
+  return { forwarding, sent };
+}
 
 describe("terminal renderer font refresh", () => {
   it("forces the current viewport to redraw when font settings are unchanged", () => {
