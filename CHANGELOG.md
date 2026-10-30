@@ -156,6 +156,10 @@
 
 ### Fixed
 
+- Pane observation polls no longer serialize the whole observation store twice per call to
+  detect changes; mutations now report their own change flag (matching the notes store), which
+  also removes a spurious rewrite when serialization ever failed. Recovered stores are still
+  rewritten unconditionally.
 - Saved-machine bridge sockets no longer die silently on transient accept errors (EMFILE,
   ENFILE, ENOBUFS, ECONNABORTED): the accept loop now classifies errors, backs off with capped
   exponential delay while remaining stop-responsive, and only exits (with a visible `failed`

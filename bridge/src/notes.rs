@@ -468,7 +468,7 @@ impl NotesManager {
                 }
             }
             changed |= prune_observations(store, &now);
-            Ok(changed)
+            Ok((changed, changed))
         })
     }
 
@@ -520,7 +520,7 @@ impl NotesManager {
     fn capture_attachment_for_pane(&self, pane: &PaneInfo) -> NoteAttachment {
         let observed_generation = self
             .with_observation_store(|store, now, recovered| {
-                ensure_observation_for_pane(
+                let changed = ensure_observation_for_pane(
                     store,
                     &self.session_key,
                     pane,
@@ -531,10 +531,9 @@ impl NotesManager {
                         GenerationConfidence::Known
                     },
                 );
-                Ok(observation_generation_for_pane(
-                    store,
-                    &self.session_key,
-                    &pane.pane_id,
+                Ok((
+                    observation_generation_for_pane(store, &self.session_key, &pane.pane_id),
+                    changed,
                 ))
             })
             .ok()
@@ -611,14 +610,12 @@ impl NotesManager {
 
     fn with_observation_store<F, T>(&self, mutate: F) -> Result<T, NotesError>
     where
-        F: FnOnce(&mut ObservationStore, String, bool) -> Result<T, NotesError>,
+        F: FnOnce(&mut ObservationStore, String, bool) -> Result<(T, bool), NotesError>,
     {
         let _lock = LockFile::exclusive(&self.observations_lock_path)?;
         let loaded = self.load_observation_store_for_update();
         let mut store = loaded.store;
-        let before = serde_json::to_vec(&store).unwrap_or_default();
-        let result = mutate(&mut store, now_ms_string(), loaded.recovered)?;
-        let changed = result_changed(&before, &store);
+        let (result, changed) = mutate(&mut store, now_ms_string(), loaded.recovered)?;
         if changed || loaded.recovered {
             write_json_atomic(&self.observations_path, &store)?;
         }
@@ -683,10 +680,6 @@ impl NotesManager {
             },
         }
     }
-}
-
-fn result_changed<T: Serialize>(before: &[u8], value: &T) -> bool {
-    serde_json::to_vec(value).map_or(true, |after| before != after)
 }
 
 fn parse_notes_store(bytes: &[u8]) -> Result<NotesStore, NotesError> {
@@ -1332,6 +1325,75 @@ mod tests {
             .unwrap();
 
         assert!(manager.notes_path.with_extension("bak").exists());
+    }
+
+    #[test]
+    fn observation_store_not_rewritten_when_nothing_changed() {
+        let dir = test_dir("observation_store_not_rewritten_when_nothing_changed");
+        let manager = NotesManager::for_test(dir, "session:default").unwrap();
+        let panes = vec![pane("p1", "t1", "w1", "tab1", 1)];
+        assert!(
+            manager.observe_panes(&panes).unwrap(),
+            "first poll records the pane"
+        );
+        // Rewrite the store compact: write_json_atomic always writes pretty, so
+        // the compact bytes surviving proves the unchanged poll did not rewrite.
+        let store: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manager.observations_path).unwrap()).unwrap();
+        fs::write(
+            &manager.observations_path,
+            serde_json::to_vec(&store).unwrap(),
+        )
+        .unwrap();
+
+        let changed = manager.observe_panes(&panes).unwrap();
+
+        assert!(!changed, "re-observing the same pane must report no change");
+        let bytes = fs::read(&manager.observations_path).unwrap();
+        assert!(
+            !bytes.starts_with(b"{\n"),
+            "unchanged observation store must not be rewritten to pretty JSON"
+        );
+    }
+
+    #[test]
+    fn observation_store_rewritten_after_recovery_even_without_changes() {
+        let dir = test_dir("observation_store_rewritten_after_recovery_even_without_changes");
+        let manager = NotesManager::for_test(dir, "session:default").unwrap();
+        let panes = vec![pane("p1", "t1", "w1", "tab1", 1)];
+        manager
+            .create(
+                CreateNoteRequest {
+                    title: Some("Plan".to_string()),
+                    body: None,
+                    pane_id: Some("p1".to_string()),
+                },
+                &panes,
+            )
+            .unwrap();
+        fs::write(&manager.observations_path, b"not json").unwrap();
+
+        let changed = manager.observe_panes(&[]).unwrap();
+
+        assert!(!changed, "an empty poll mutates nothing");
+        let bytes = fs::read(&manager.observations_path).unwrap();
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).is_ok(),
+            "recovered store must be rewritten as valid JSON"
+        );
+    }
+
+    #[test]
+    fn observation_store_written_on_real_mutation() {
+        let dir = test_dir("observation_store_written_on_real_mutation");
+        let manager = NotesManager::for_test(dir, "session:default").unwrap();
+        let panes = vec![pane("p1", "t1", "w1", "tab1", 1)];
+
+        let changed = manager.observe_panes(&panes).unwrap();
+
+        assert!(changed, "recording a new pane observation is a change");
+        let bytes = fs::read(&manager.observations_path).unwrap();
+        assert!(bytes.windows(2).any(|w| w == b"p1"));
     }
 
     #[test]
