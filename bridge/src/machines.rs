@@ -260,6 +260,12 @@ pub fn ssh_remote_herdr_args(endpoint: &SavedEndpoint, remote_command: &str) -> 
         "BatchMode=yes".to_string(),
         "-o".to_string(),
         "ConnectTimeout=10".to_string(),
+        // Fast keepalives so a silently dead peer cannot hold a bridge
+        // connection permit; same values as the scp upload path.
+        "-o".to_string(),
+        "ServerAliveInterval=5".to_string(),
+        "-o".to_string(),
+        "ServerAliveCountMax=2".to_string(),
         endpoint.target.clone(),
         "herdr".to_string(),
     ];
@@ -917,6 +923,10 @@ fn serve_bridge_connection(
     });
     let _ = copy_pipe(&mut child_stdout, &mut write_stream);
     let _ = write_stream.flush();
+    // The ssh child is gone: close the socket so the local peer sees EOF and
+    // the stdin copier wakes, instead of holding the connection permit until
+    // the peer happens to send or disconnect.
+    let _ = write_stream.shutdown(Shutdown::Both);
     let _ = up.join();
     let _ = child.kill();
     let _ = child.wait();
@@ -1862,6 +1872,10 @@ mod tests {
                 "BatchMode=yes",
                 "-o",
                 "ConnectTimeout=10",
+                "-o",
+                "ServerAliveInterval=5",
+                "-o",
+                "ServerAliveCountMax=2",
                 "root@198.51.100.20",
                 "herdr",
                 "remote-api-bridge",
@@ -1878,6 +1892,10 @@ mod tests {
                 "BatchMode=yes",
                 "-o",
                 "ConnectTimeout=10",
+                "-o",
+                "ServerAliveInterval=5",
+                "-o",
+                "ServerAliveCountMax=2",
                 "root@198.51.100.20",
                 "herdr",
                 "--session",
@@ -2265,6 +2283,54 @@ mod tests {
         drop(second);
         drop(bridge);
         assert!(!socket_path.exists(), "socket removed on drop");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // A4 permit release: when the ssh child dies, a still-connected but
+    // silent local peer must get EOF and the connection permit back.
+    #[test]
+    fn bridge_releases_permit_and_signals_eof_when_ssh_child_dies() {
+        let permits = ConnectionPermits::new(1);
+        // Nothing speaks ssh on loopback in the test environment, so the child
+        // exits immediately (connection refused) instead of timing out.
+        let endpoint = test_endpoint(&hex_id(7), "root@127.0.0.1");
+        let root = home_test_root("pk");
+        let bridge =
+            SshSocketBridge::start(&endpoint, &root, BridgeKind::Api, permits.clone()).unwrap();
+        let socket_path = bridge.path.clone();
+
+        let mut client = std::os::unix::net::UnixStream::connect(&socket_path).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while permits.current() != 1 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            permits.current(),
+            1,
+            "connection holds the permit while ssh runs"
+        );
+
+        client
+            .set_read_timeout(Some(Duration::from_secs(15)))
+            .unwrap();
+        let mut byte = [0u8; 1];
+        let read = client.read(&mut byte);
+        assert!(
+            matches!(read, Ok(0)),
+            "dead ssh child must surface as EOF to the local peer, got {read:?}"
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while permits.current() != 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            permits.current(),
+            0,
+            "permit must be released once the ssh child died"
+        );
+
+        drop(client);
+        drop(bridge);
         let _ = std::fs::remove_dir_all(&root);
     }
 

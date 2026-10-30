@@ -156,6 +156,10 @@
 
 ### Fixed
 
+- Saved-machine ssh connections now send fast keepalives (`ServerAliveInterval=5`,
+  `ServerAliveCountMax=2`, matching the upload path) so a silently dead peer can no
+  longer hold a bridge connection permit; when the ssh child exits, the local bridge
+  socket is closed so the peer sees EOF and the permit is released promptly.
 - Pane observation polls no longer serialize the whole observation store twice per call to
   detect changes; mutations now report their own change flag (matching the notes store), which
   also removes a spurious rewrite when serialization ever failed. Recovered stores are still
