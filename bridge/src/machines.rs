@@ -303,6 +303,10 @@ const STDERR_DRAIN_GRACE: Duration = Duration::from_millis(500);
 const STDERR_WAIT: Duration = Duration::from_secs(3);
 const PROBE_POLL: Duration = Duration::from_millis(50);
 const ACCEPT_POLL: Duration = Duration::from_millis(20);
+/// Ceiling for the transient-accept-error backoff: keeps a resource-starved
+/// loop from spinning hot while still re-checking the listener every second.
+#[cfg(unix)]
+const ACCEPT_BACKOFF_MAX: Duration = Duration::from_millis(1_000);
 /// How long a failed remote probe is remembered before another attempt.
 const DEFAULT_NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(5);
 /// Hard ceiling on concurrently served machine bridge connections (and thus
@@ -623,10 +627,99 @@ impl Drop for PermitGuard {
 /// A private user-only local Unix socket that forwards every accepted
 /// connection to the remote Herdr hidden bridge command over `ssh` stdio —
 /// the same transport shape the native client uses for saved machines.
+/// What the machine bridge accept loop should do with an accept error.
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+enum AcceptErrorAction {
+    /// No pending connection or interrupted call: poll again after ACCEPT_POLL.
+    Poll,
+    /// Resource pressure that clears by itself (fd/memory limits, aborted
+    /// handshakes): warn, back off, keep serving.
+    Backoff,
+    /// The listener itself is broken; retrying can never succeed.
+    Fatal,
+}
+
+#[cfg(unix)]
+fn accept_error_action(err: &io::Error) -> AcceptErrorAction {
+    match err.kind() {
+        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => AcceptErrorAction::Poll,
+        _ => match err.raw_os_error() {
+            Some(libc::EMFILE)
+            | Some(libc::ENFILE)
+            | Some(libc::ENOBUFS)
+            | Some(libc::ECONNABORTED) => AcceptErrorAction::Backoff,
+            _ => AcceptErrorAction::Fatal,
+        },
+    }
+}
+
+/// Sleep `current` backoff in ACCEPT_POLL slices so `stop` stays prompt,
+/// returning the next (doubled, capped) backoff duration.
+#[cfg(unix)]
+fn accept_backoff_sleep(stop: &AtomicBool, current: Duration) -> Duration {
+    let mut remaining = current;
+    while remaining > Duration::ZERO && !stop.load(Ordering::Acquire) {
+        let slice = remaining.min(ACCEPT_POLL);
+        std::thread::sleep(slice);
+        remaining -= slice;
+    }
+    (current * 2).min(ACCEPT_BACKOFF_MAX)
+}
+
+/// The machine bridge accept loop. `accept` is the listener poll (real code
+/// passes `listener.accept()`), `on_connection` serves one accepted stream.
+/// Transient accept errors back off instead of killing the loop; listener-
+/// fatal errors record `fatal` and exit so a dead listener is never silently
+/// retried forever. Exits promptly whenever `stop` is observed.
+#[cfg(unix)]
+fn run_accept_loop(
+    mut accept: impl FnMut() -> io::Result<std::os::unix::net::UnixStream>,
+    mut on_connection: impl FnMut(std::os::unix::net::UnixStream),
+    stop: &AtomicBool,
+    fatal: &AtomicBool,
+) {
+    let mut backoff = ACCEPT_POLL;
+    let mut warned = false;
+    while !stop.load(Ordering::Acquire) {
+        match accept() {
+            Ok(stream) => {
+                backoff = ACCEPT_POLL;
+                warned = false;
+                on_connection(stream);
+            }
+            Err(err) => match accept_error_action(&err) {
+                AcceptErrorAction::Poll => {
+                    std::thread::sleep(ACCEPT_POLL);
+                }
+                AcceptErrorAction::Backoff => {
+                    if !warned {
+                        tracing::warn!(
+                            error = %err,
+                            "machine bridge accept failed; backing off"
+                        );
+                        warned = true;
+                    }
+                    backoff = accept_backoff_sleep(stop, backoff);
+                }
+                AcceptErrorAction::Fatal => {
+                    tracing::error!(
+                        error = %err,
+                        "machine bridge listener failed; accept loop exiting"
+                    );
+                    fatal.store(true, Ordering::Release);
+                    return;
+                }
+            },
+        }
+    }
+}
+
 pub struct SshSocketBridge {
     path: PathBuf,
     stop: Arc<AtomicBool>,
     finished: Arc<AtomicBool>,
+    fatal: Arc<AtomicBool>,
     accept_thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -660,8 +753,10 @@ impl SshSocketBridge {
                 .map_err(|err| format!("failed to restrict machine bridge socket: {err}"))?;
             let stop = Arc::new(AtomicBool::new(false));
             let finished = Arc::new(AtomicBool::new(false));
+            let fatal = Arc::new(AtomicBool::new(false));
             let thread_stop = Arc::clone(&stop);
             let thread_finished = Arc::clone(&finished);
+            let thread_fatal = Arc::clone(&fatal);
             let target = endpoint.target.clone();
             let session = endpoint.session.clone();
             let remote_command = match kind {
@@ -676,47 +771,45 @@ impl SshSocketBridge {
                 .set_nonblocking(true)
                 .map_err(|err| format!("failed to set machine bridge socket mode: {err}"))?;
             let accept_thread = std::thread::spawn(move || {
-                while !thread_stop.load(Ordering::Acquire) {
-                    match listener.accept() {
-                        Ok((stream, _)) => {
-                            // Some platforms propagate O_NONBLOCK to accepted
-                            // streams; the copy loops below are blocking.
-                            let _ = stream.set_nonblocking(false);
-                            if !permits.try_acquire() {
-                                tracing::warn!(
-                                    held = permits.current(),
-                                    limit = permits.max(),
-                                    "machine bridge connection limit reached; dropping connection"
-                                );
-                                drop(stream);
-                                continue;
-                            }
-                            let guard = PermitGuard(permits.clone());
-                            let endpoint = SavedEndpoint {
-                                id: String::new(),
-                                label: String::new(),
-                                target: target.clone(),
-                                session: session.clone(),
-                                enabled: true,
-                            };
-                            let remote_command = remote_command.clone();
-                            std::thread::spawn(move || {
-                                let _permit = guard;
-                                serve_bridge_connection(stream, &endpoint, &remote_command)
-                            });
+                let target = target;
+                run_accept_loop(
+                    || listener.accept().map(|(stream, _)| stream),
+                    move |stream| {
+                        // Some platforms propagate O_NONBLOCK to accepted
+                        // streams; the copy loops below are blocking.
+                        let _ = stream.set_nonblocking(false);
+                        if !permits.try_acquire() {
+                            tracing::warn!(
+                                held = permits.current(),
+                                limit = permits.max(),
+                                "machine bridge connection limit reached; dropping connection"
+                            );
+                            return;
                         }
-                        Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                            std::thread::sleep(ACCEPT_POLL);
-                        }
-                        Err(_) => break,
-                    }
-                }
+                        let guard = PermitGuard(permits.clone());
+                        let endpoint = SavedEndpoint {
+                            id: String::new(),
+                            label: String::new(),
+                            target: target.clone(),
+                            session: session.clone(),
+                            enabled: true,
+                        };
+                        let remote_command = remote_command.clone();
+                        std::thread::spawn(move || {
+                            let _permit = guard;
+                            serve_bridge_connection(stream, &endpoint, &remote_command)
+                        });
+                    },
+                    &thread_stop,
+                    &thread_fatal,
+                );
                 thread_finished.store(true, Ordering::Release);
             });
             Ok(Self {
                 path,
                 stop,
                 finished,
+                fatal,
                 accept_thread: Some(accept_thread),
             })
         }
@@ -732,6 +825,12 @@ impl SshSocketBridge {
         self.finished.load(Ordering::Acquire)
     }
 
+    /// True when the accept thread exited because the listener itself failed
+    /// (as opposed to a requested stop).
+    pub fn accept_thread_failed(&self) -> bool {
+        self.fatal.load(Ordering::Acquire)
+    }
+
     fn stop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(thread) = self.accept_thread.take() {
@@ -740,6 +839,7 @@ impl SshSocketBridge {
         tracing::debug!(
             path = ?self.path,
             stopped = self.accept_thread_finished(),
+            failed = self.accept_thread_failed(),
             "machine bridge stopped"
         );
         let _ = std::fs::remove_file(&self.path);
@@ -2168,6 +2268,134 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    // Machine bridge accept loop: transient accept errors must be classified
+    // apart from listener-fatal ones so the loop can back off instead of dying.
+    #[test]
+    fn accept_error_action_classifies_poll_backoff_and_fatal() {
+        let poll = [
+            io::Error::from(io::ErrorKind::WouldBlock),
+            io::Error::from_raw_os_error(libc::EINTR),
+        ];
+        for err in &poll {
+            assert_eq!(accept_error_action(err), AcceptErrorAction::Poll, "{err}");
+        }
+        let transient = [
+            libc::EMFILE,
+            libc::ENFILE,
+            libc::ENOBUFS,
+            libc::ECONNABORTED,
+        ];
+        for code in transient {
+            let err = io::Error::from_raw_os_error(code);
+            assert_eq!(
+                accept_error_action(&err),
+                AcceptErrorAction::Backoff,
+                "raw os error {code}"
+            );
+        }
+        let fatal = [libc::EBADF, libc::EINVAL];
+        for code in fatal {
+            let err = io::Error::from_raw_os_error(code);
+            assert_eq!(
+                accept_error_action(&err),
+                AcceptErrorAction::Fatal,
+                "raw os error {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn accept_backoff_sleep_doubles_up_to_the_cap_and_honors_stop() {
+        let stopped = AtomicBool::new(true);
+        // Stop already set: the sleep is skipped, but the next backoff still
+        // doubles and caps at ACCEPT_BACKOFF_MAX.
+        assert_eq!(accept_backoff_sleep(&stopped, ACCEPT_POLL), ACCEPT_POLL * 2);
+        assert_eq!(
+            accept_backoff_sleep(&stopped, ACCEPT_BACKOFF_MAX / 2),
+            ACCEPT_BACKOFF_MAX
+        );
+        assert_eq!(
+            accept_backoff_sleep(&stopped, ACCEPT_BACKOFF_MAX),
+            ACCEPT_BACKOFF_MAX
+        );
+    }
+
+    #[test]
+    fn accept_loop_serves_connections_after_transient_errors_and_exits_on_fatal() {
+        let stop = AtomicBool::new(false);
+        let fatal = AtomicBool::new(false);
+        let served = Arc::new(AtomicUsize::new(0));
+        let served_sink = Arc::clone(&served);
+        let (client_end, server_end) = std::os::unix::net::UnixStream::pair().unwrap();
+        drop(client_end);
+        let mut script = std::collections::VecDeque::from(vec![
+            Err(io::Error::from_raw_os_error(libc::EMFILE)),
+            Err(io::Error::from_raw_os_error(libc::ECONNABORTED)),
+            Ok(server_end),
+            Err(io::Error::from_raw_os_error(libc::EBADF)),
+        ]);
+
+        run_accept_loop(
+            move || {
+                script
+                    .pop_front()
+                    .unwrap_or_else(|| panic!("accept called after the fatal error"))
+            },
+            move |_stream| {
+                served_sink.fetch_add(1, Ordering::AcqRel);
+            },
+            &stop,
+            &fatal,
+        );
+
+        assert_eq!(served.load(Ordering::Acquire), 1);
+        assert!(
+            fatal.load(Ordering::Acquire),
+            "fatal error must be recorded"
+        );
+        assert!(!stop.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn accept_loop_exits_promptly_when_stop_is_set_during_backoff() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let fatal = Arc::new(AtomicBool::new(false));
+        let stopper = Arc::clone(&stop);
+        let setter = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            stopper.store(true, Ordering::Release);
+        });
+
+        let started = Instant::now();
+        run_accept_loop(
+            || Err(io::Error::from_raw_os_error(libc::EMFILE)),
+            |_| unreachable!("no connection can be accepted"),
+            &stop,
+            &fatal,
+        );
+
+        setter.join().unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "stop must interrupt the backoff promptly, took {:?}",
+            started.elapsed()
+        );
+        assert!(!fatal.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn accept_loop_never_polls_after_stop() {
+        let stop = AtomicBool::new(true);
+        let fatal = AtomicBool::new(false);
+        run_accept_loop(
+            || panic!("accept must not be called once stop is set"),
+            |_| unreachable!(),
+            &stop,
+            &fatal,
+        );
+        assert!(!fatal.load(Ordering::Acquire));
+    }
+
     // Cleanup: dropping a bridge must stop its accept thread deterministically
     // instead of leaving it blocked in accept().
     #[test]
@@ -2190,6 +2418,10 @@ mod tests {
         assert!(
             bridge.accept_thread_finished(),
             "accept thread must be observed exited after stop"
+        );
+        assert!(
+            !bridge.accept_thread_failed(),
+            "a requested stop is not a listener failure"
         );
         drop(bridge);
         assert!(!socket_path.exists(), "socket removed on stop/drop");

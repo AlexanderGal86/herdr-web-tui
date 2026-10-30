@@ -156,6 +156,10 @@
 
 ### Fixed
 
+- Saved-machine bridge sockets no longer die silently on transient accept errors (EMFILE,
+  ENFILE, ENOBUFS, ECONNABORTED): the accept loop now classifies errors, backs off with capped
+  exponential delay while remaining stop-responsive, and only exits (with a visible `failed`
+  state and an error log) when the listener itself is broken.
 - Local upload overwrites are now committed with a single atomic `rename` on Unix instead of
   unlink-then-rename, so a crash or a failed swap can no longer leave the upload directory
   without the previous file. Symlink and directory destinations are still refused.
