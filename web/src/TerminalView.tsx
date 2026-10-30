@@ -230,6 +230,8 @@ export function TerminalView({
   const rendererRef = useRef<TerminalRenderer | null>(null);
   const rendererGenerationRef = useRef(0);
   const rendererReadyRef = useRef<TerminalRendererReady | null>(null);
+  const rightClickPassthroughRef = useRef(rightClickPassthrough);
+  rightClickPassthroughRef.current = rightClickPassthrough;
   const socketRef = useRef<WebSocket | null>(null);
   const requestReconnectRef = useRef<(reason: ReconnectReason) => void>(() => {});
   const terminalInputBlockedRef = useRef(false);
@@ -898,6 +900,7 @@ export function TerminalView({
           const mouseMode = parseTerminalMouseMode(event.data);
           if (mouseMode !== null) {
             ready.renderer.setMouseCapture(mouseMode);
+            ready.renderer.setMousePassthrough(rightClickPassthroughRef.current);
             return;
           }
           lastCloseReason = parseTerminalCloseReason(event.data) ?? lastCloseReason;
@@ -1486,6 +1489,12 @@ export function TerminalView({
     if (pasteToken <= 0) return;
     void pasteClipboardRef.current();
   }, [pasteToken]);
+
+  // The pane's mouse-passthrough opt-in (TTT) can flip at runtime via the pane
+  // menu; keep the renderer's forwarding gate in sync.
+  useEffect(() => {
+    rendererRef.current?.setMousePassthrough(rightClickPassthrough);
+  }, [rightClickPassthrough]);
 
 
   const captureTerminalMouse = (event: ReactMouseEvent<HTMLDivElement>) => {

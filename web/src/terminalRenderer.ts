@@ -175,6 +175,8 @@ export type TerminalRenderer = {
   paste(text: string): void;
   /** Server-reported pane mouse state (daemon MouseCapture truth). */
   setMouseCapture(enabled: boolean): void;
+  /** Pane opt-in (TTT-style) that lets the tracked app receive mouse reports. */
+  setMousePassthrough(enabled: boolean): void;
   hasActiveMouseTracking(): boolean;
   onMouse(callback: (report: TerminalMouseReport) => void): () => void;
   setScrollSensitivity(value: number): void;
@@ -207,6 +209,10 @@ export class GhosttyRenderer implements TerminalRenderer {
   #selectionClipboardCleanup: (() => void) | null = null;
   #mouseHandlers: ((report: TerminalMouseReport) => void)[] = [];
   #mouseCapture = false;
+  // Only panes opted into right-click passthrough (e.g. TTT) forward mouse
+  // reports to the app; every other pane keeps native selection even while
+  // the app tracks the mouse.
+  #mousePassthrough = false;
   #mouseDragButton: number | null = null;
   #mouseReportingCleanup: (() => void) | null = null;
   #disposed = false;
@@ -521,6 +527,11 @@ export class GhosttyRenderer implements TerminalRenderer {
     }
   }
 
+  /** Pane opt-in (TTT-style) that lets the tracked app receive mouse reports. */
+  setMousePassthrough(enabled: boolean) {
+    this.#mousePassthrough = enabled;
+  }
+
   hasActiveMouseTracking(): boolean {
     return this.#mouseCapture;
   }
@@ -532,6 +543,11 @@ export class GhosttyRenderer implements TerminalRenderer {
     };
   }
 
+  /** True only when the pane app both tracks the mouse and owns it (passthrough). */
+  #appMouseActive(): boolean {
+    return this.#mouseCapture && this.#mousePassthrough;
+  }
+
   #sendMouse(
     terminal: Terminal,
     kind: TerminalMouseReport["kind"],
@@ -539,7 +555,7 @@ export class GhosttyRenderer implements TerminalRenderer {
     event: MouseEvent,
     lines = 0,
   ) {
-    if (!this.#mouseCapture) {
+    if (!this.#appMouseActive()) {
       return;
     }
     const position = touchCellPosition(terminal, event.clientX, event.clientY);
@@ -569,7 +585,7 @@ export class GhosttyRenderer implements TerminalRenderer {
     }
 
     const onContainerMouseDown = (event: MouseEvent) => {
-      if (!this.#mouseCapture || !this.#isCurrentTerminal(terminal) || event.shiftKey || event.button > 2) {
+      if (!this.#appMouseActive() || !this.#isCurrentTerminal(terminal) || event.shiftKey || event.button > 2) {
         return;
       }
       event.preventDefault();
@@ -590,7 +606,7 @@ export class GhosttyRenderer implements TerminalRenderer {
       );
     };
     const onContainerMouseMove = (event: MouseEvent) => {
-      if (!this.#mouseCapture || !this.#isCurrentTerminal(terminal) || event.shiftKey) {
+      if (!this.#appMouseActive() || !this.#isCurrentTerminal(terminal) || event.shiftKey) {
         return;
       }
       event.preventDefault();
@@ -598,7 +614,7 @@ export class GhosttyRenderer implements TerminalRenderer {
       sendMove(event);
     };
     const onDocumentMouseMove = (event: MouseEvent) => {
-      if (!this.#mouseCapture || !this.#isCurrentTerminal(terminal) || event.shiftKey) {
+      if (!this.#appMouseActive() || !this.#isCurrentTerminal(terminal) || event.shiftKey) {
         return;
       }
       event.preventDefault();
@@ -638,7 +654,7 @@ export class GhosttyRenderer implements TerminalRenderer {
       if (!this.#isCurrentTerminal(terminal)) {
         return false;
       }
-      if (this.#mouseCapture && !event.shiftKey) {
+      if (this.#appMouseActive() && !event.shiftKey) {
         event.preventDefault();
         event.stopPropagation();
         this.#sendMouse(

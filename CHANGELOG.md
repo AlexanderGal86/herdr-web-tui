@@ -156,6 +156,12 @@
 
 ### Fixed
 
+- Text selection is creatable with the mouse again in every pane, including ones whose app
+  tracks the mouse (agent TUIs like pi, vim, htop): structured mouse reports are now forwarded
+  to the pane app only in panes opted into right-click passthrough (TTT), so every other pane
+  keeps fully native drag-to-select, wheel scrollback, and the right-click copy/menu contract
+  (right-click with a selection copies and clears it; without a selection it opens the pane
+  menu; nothing is copied merely by selecting).
 - Right-click copy/menu and middle-click paste work again in panes whose app tracks the mouse
   (agent TUIs, TTT): pane-app mouse forwarding no longer swallows those browser gestures.
   Right-click passthrough now reroutes clicks only while the pane app actually tracks the

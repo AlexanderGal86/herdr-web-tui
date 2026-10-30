@@ -14,6 +14,7 @@ const renderer = vi.hoisted(() => ({
   setFontSize: vi.fn(),
   setScrollSensitivity: vi.fn(),
   setTapFocusHandler: vi.fn(),
+  setMousePassthrough: vi.fn(),
   setMobileTouchSelection: vi.fn(),
   setAccessibleScreenListener: vi.fn(),
   onInput: vi.fn(),

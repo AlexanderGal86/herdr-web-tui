@@ -50,7 +50,12 @@ class FakeTerminalRenderer implements TerminalRenderer {
     this.mouseCapture = enabled;
   }
 
+  setMousePassthrough(enabled: boolean) {
+    this.mousePassthrough = enabled;
+  }
+
   mouseCapture = false;
+  mousePassthrough = false;
 
   hasActiveMouseTracking() {
     return this.mouseCapture;
@@ -657,6 +662,26 @@ describe("TerminalView context menu capture", () => {
     expect(onContextMenu).not.toHaveBeenCalled();
     expect(readText).not.toHaveBeenCalled();
     expect(renderer.paste).not.toHaveBeenCalled();
+  });
+
+  it("leaves the renderer mouse-passthrough gate off for normal panes", async () => {
+    const { renderer } = await mountMenu();
+    expect(renderer.mousePassthrough).toBe(false);
+  });
+
+  it("turns the renderer mouse-passthrough gate on for opted-in panes", async () => {
+    const { renderer } = await mountMenu(true);
+    expect(renderer.mousePassthrough).toBe(true);
+  });
+
+  it("seeds the renderer mouse-passthrough gate from mouse_mode frames", async () => {
+    const { renderer, socket } = await mountMenu(true);
+    renderer.mousePassthrough = false;
+    await act(async () => {
+      socket.dispatchEvent(new MessageEvent("message", { data: '{"type":"mouse_mode","enabled":true}' }));
+    });
+    expect(renderer.mouseCapture).toBe(true);
+    expect(renderer.mousePassthrough).toBe(true);
   });
 
   it("keeps the whole gesture owned by the pane app when Shift appears mid-gesture", async () => {
