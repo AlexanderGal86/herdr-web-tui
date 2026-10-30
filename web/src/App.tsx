@@ -3805,10 +3805,20 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
       return;
     }
     const requestConnectionKey = runtime.connectionKey;
+    // A reconnect during the request swaps the connection key; applying the
+    // stale response would clobber the fresh generation's pin state.
+    const isCurrentConnection = () =>
+      isConnectionResultCurrent(
+        connectionRefs.current[runtime.id]?.connectionKey ?? "",
+        requestConnectionKey,
+      );
     try {
       const response = pinned
         ? await unpinAgent(runtime.httpUrl, paneId)
         : await pinAgent(runtime.httpUrl, paneId);
+      if (!isCurrentConnection()) {
+        return;
+      }
       setAgentPinsStates((current) => ({
         ...current,
         [runtime.id]: {
@@ -3820,6 +3830,9 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
       }));
       setError(null);
     } catch (caught) {
+      if (!isCurrentConnection()) {
+        return;
+      }
       setError(caught instanceof Error ? caught.message : "Could not update agent pin");
     }
   }

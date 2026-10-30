@@ -156,6 +156,8 @@
 
 ### Fixed
 
+- Agent pin toggles no longer apply a stale response after the bridge reconnects mid-request: the
+  pin state update is dropped unless the connection key captured at request time still matches.
 - Saved-machine ssh connections now send fast keepalives (`ServerAliveInterval=5`,
   `ServerAliveCountMax=2`, matching the upload path) so a silently dead peer can no
   longer hold a bridge connection permit; when the ssh child exits, the local bridge
