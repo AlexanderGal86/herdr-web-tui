@@ -42,6 +42,20 @@ describe("uploadWithOverwritePrompt", () => {
     expect(requestQuery(fetchMock, 1)).toEqual({ name: "image.png", overwrite: "true" });
   });
 
+  it("rejects a malformed upload payload instead of trusting the server's shape", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ file: "not-an-object" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      uploadWithOverwritePrompt(testHttpUrl, imageFile(), true, vi.fn()),
+    ).rejects.toThrow("Upload failed (200)");
+  });
+
   it("does not offer replacement when automatic suffixes are exhausted", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ error: "no available filename for image.png" }), {

@@ -61,22 +61,52 @@ async function uploadFile(
     headers: file.blob.type ? { "content-type": file.blob.type } : undefined,
     body: file.blob,
   });
-  const payload = (await response.json().catch(() => ({}))) as {
-    file?: UploadedFile;
-    error?: string;
-    name?: string;
-    path?: string;
-  };
+  const payload = parseUploadResponse(await response.json().catch(() => ({})));
   if (response.status === 409 && !renameConflicts) {
     throw new UploadConflictError(
-      typeof payload.name === "string" ? payload.name : file.name || "file",
-      typeof payload.path === "string" ? payload.path : "",
+      payload.name ?? (file.name || "file"),
+      payload.path ?? "",
     );
   }
   if (!response.ok || !payload.file) {
     throw new Error(payload.error || `Upload failed (${response.status})`);
   }
   return payload.file;
+}
+
+/** Parses an /api/uploads response; unknown shapes degrade to null fields. */
+function parseUploadResponse(value: unknown): {
+  file: UploadedFile | null;
+  error: string | null;
+  name: string | null;
+  path: string | null;
+} {
+  if (typeof value !== "object" || value === null) {
+    return { file: null, error: null, name: null, path: null };
+  }
+  const { file, error, name, path } = value as Record<string, unknown>;
+  return {
+    file: parseUploadedFile(file),
+    error: typeof error === "string" ? error : null,
+    name: typeof name === "string" ? name : null,
+    path: typeof path === "string" ? path : null,
+  };
+}
+
+function parseUploadedFile(value: unknown): UploadedFile | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const { name, path, size, mime } = value as Record<string, unknown>;
+  if (typeof name !== "string" || typeof path !== "string" || typeof size !== "number") {
+    return null;
+  }
+  return {
+    name,
+    path,
+    size,
+    mime: typeof mime === "string" || mime === null ? mime : null,
+  };
 }
 
 /**
