@@ -3388,7 +3388,10 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
         },
       }));
       return patched;
-    } catch {
+    } catch (caught) {
+      // Keep the reason visible in the console log; the connection state only
+      // carries a loadState, matching the existing contract.
+      console.warn("bridge snapshot refresh failed", caught);
       const currentRef = connectionRefs.current[runtime.id];
       if (currentRef?.connectionKey === requestConnectionKey) {
         setConnectionStates((current) => ({

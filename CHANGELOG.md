@@ -156,6 +156,8 @@
 
 ### Fixed
 
+- Failed bridge snapshot refreshes now log the underlying error cause in the console instead of
+  silently swallowing it, while the connection state keeps its existing shape.
 - The bridge snapshot response is validated before use: a malformed payload (missing the
   workspaces/tabs/panes/layouts collections) now fails the snapshot fetch with an explicit
   error instead of being blindly cast and crashing later rendering.
