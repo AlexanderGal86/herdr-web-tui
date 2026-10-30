@@ -470,14 +470,13 @@ describe("TerminalView context menu capture", () => {
     expect(socket.sent.filter((frame) => JSON.parse(frame).type === "input")).toEqual([]);
   });
 
-  it("passes ordinary right press and release but suppresses the browser menu in passthrough mode", async () => {
+  it("opens the Herdr menu in passthrough mode when no pane app tracks the mouse", async () => {
     const { renderer, onContextMenu } = await mountMenu(true);
-    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup"]) {
-      expect(mouse(renderer.input, type).defaultPrevented).toBe(false);
+    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "contextmenu"]) {
+      expect(mouse(renderer.input, type).defaultPrevented).toBe(true);
     }
-    expect(renderer.childEvents).toHaveBeenCalledTimes(4);
-    expect(mouse(renderer.input, "contextmenu").defaultPrevented).toBe(true);
-    expect(onContextMenu).not.toHaveBeenCalled();
+    expect(renderer.childEvents).not.toHaveBeenCalled();
+    expect(onContextMenu).toHaveBeenCalledExactlyOnceWith(91, 72);
   });
 
   it("opens Shift right-click even without a browser contextmenu event and does not open twice", async () => {

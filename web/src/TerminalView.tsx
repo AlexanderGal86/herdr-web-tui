@@ -1554,12 +1554,23 @@ export function TerminalView({
     }
     if (down) {
       if (event.type === "pointerdown" || !gesture.pointerDown) {
-        gesture.blocked = !rightClickPassthrough || event.shiftKey;
+        // Passthrough only reroutes the click when the pane app actually
+        // tracks the mouse; a non-tracking pane keeps the Herdr menu.
+        const appOwnsRightClick =
+          rightClickPassthrough && Boolean(rendererRef.current?.hasActiveMouseTracking());
+        gesture.blocked = !appOwnsRightClick || event.shiftKey;
         gesture.opened = false;
       }
       gesture.pointerDown = event.type === "pointerdown";
     }
-    if (!gesture.blocked && rightClickPassthrough && !event.shiftKey) return;
+    if (
+      !gesture.blocked &&
+      rightClickPassthrough &&
+      rendererRef.current?.hasActiveMouseTracking() &&
+      !event.shiftKey
+    ) {
+      return;
+    }
     event.preventDefault();
     event.stopPropagation();
     // Firefox does not emit contextmenu for Shift+right-click.
@@ -1593,7 +1604,12 @@ export function TerminalView({
     }
     event.preventDefault();
     event.stopPropagation();
-    if (contextGestureRef.current.opened || (rightClickPassthrough && !event.shiftKey)) return;
+    if (
+      contextGestureRef.current.opened ||
+      (rightClickPassthrough && rendererRef.current?.hasActiveMouseTracking() && !event.shiftKey)
+    ) {
+      return;
+    }
     openTerminalContextMenu(event.clientX, event.clientY);
   };
 
