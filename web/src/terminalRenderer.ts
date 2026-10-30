@@ -112,15 +112,6 @@ type GhosttySelectionManagerAccess = {
     fire?: () => void;
   };
 };
-type GhosttyIdleRenderLoopAccess = {
-  animationFrameId?: number;
-};
-type GhosttyRenderAccess = {
-  renderer?: Terminal["renderer"];
-  wasmTerm?: Terminal["wasmTerm"];
-  viewportY: number;
-  scrollbarOpacity?: number;
-};
 type TerminalBufferLine = {
   readonly length: number;
   getCell(x: number):
@@ -1738,6 +1729,26 @@ export function installTerminalInteractionRendering(
   };
 }
 
+/**
+ * SAFETY: ghostty-web keeps animationFrameId, scrollbarOpacity, and
+ * selectionManager private (absent from typings). All runtime access to those
+ * fields goes through this single view; callers null-check before use
+ * (selectionManager is additionally shape-validated by isGhosttySelectionManager).
+ */
+function ghosttyTerminalPrivateFields(terminal: Terminal): {
+  animationFrameId?: number;
+  scrollbarOpacity?: number;
+  selectionManager?: unknown;
+} {
+  // SAFETY: the runtime terminal object carries these private fields; the
+  // view type above documents exactly what callers may touch.
+  return terminal as unknown as {
+    animationFrameId?: number;
+    scrollbarOpacity?: number;
+    selectionManager?: unknown;
+  };
+}
+
 export function suspendGhosttyIdleRenderLoop(
   terminal: Terminal,
   cancelFrame: (frameId: number) => void = (frameId) => window.cancelAnimationFrame(frameId),
@@ -1745,14 +1756,12 @@ export function suspendGhosttyIdleRenderLoop(
   // ghostty-web 0.4.0 starts a permanent requestAnimationFrame loop even when
   // cursor blinking is disabled. A large high-DPI canvas is particularly costly
   // on Windows, so event-driven mode cancels the pending continuation after open().
-  // SAFETY: ghostty Terminal exposes the private animationFrameId field at
-  // runtime (absent from typings); the undefined check below guards access.
-  const access = terminal as unknown as GhosttyIdleRenderLoopAccess;
-  if (access.animationFrameId === undefined) {
+  const internals = ghosttyTerminalPrivateFields(terminal);
+  if (internals.animationFrameId === undefined) {
     return false;
   }
-  cancelFrame(access.animationFrameId);
-  delete access.animationFrameId;
+  cancelFrame(internals.animationFrameId);
+  delete internals.animationFrameId;
   return true;
 }
 
@@ -1764,19 +1773,14 @@ export function shouldUseEventDrivenTerminalRendering(
 }
 
 export function renderGhosttyTerminalFrame(terminal: Terminal) {
-  // SAFETY: ghostty Terminal carries private renderer/wasmTerm internals
-  // (not in typings); both are null-checked immediately below before use.
-  const access = terminal as unknown as GhosttyRenderAccess;
-  if (!access.renderer || !access.wasmTerm) {
+  // renderer/wasmTerm/viewportY are public optional fields; only scrollbarOpacity
+  // needs the private-field view. renderer/wasmTerm are null-checked before use.
+  const { renderer, wasmTerm, viewportY } = terminal;
+  if (!renderer || !wasmTerm) {
     return false;
   }
-  access.renderer.render(
-    access.wasmTerm,
-    false,
-    access.viewportY,
-    terminal,
-    access.scrollbarOpacity ?? 0,
-  );
+  const { scrollbarOpacity } = ghosttyTerminalPrivateFields(terminal);
+  renderer.render(wasmTerm, false, viewportY, terminal, scrollbarOpacity ?? 0);
   return true;
 }
 
@@ -2042,9 +2046,7 @@ function selectTerminalViewportRange(
 }
 
 function terminalSelectionManager(terminal: Terminal) {
-  // SAFETY: ghostty Terminal exposes an internal selectionManager (not in
-  // typings); isGhosttySelectionManager() below validates its shape.
-  const selectionManager = (terminal as unknown as { selectionManager?: unknown }).selectionManager;
+  const { selectionManager } = ghosttyTerminalPrivateFields(terminal);
   if (!isGhosttySelectionManager(selectionManager)) {
     return null;
   }
@@ -2106,7 +2108,7 @@ function terminalSelectedTextFromViewportRange(
   const selectedLines: string[] = [];
   for (let row = range.from.row; row <= range.to.row; row += 1) {
     const bufferRow = terminalBufferRow(terminal, row);
-    const line = terminal.buffer.active.getLine(bufferRow) as TerminalBufferLine | undefined;
+    const line = terminalBufferLine(terminal.buffer.active, bufferRow);
     const startCol = row === range.from.row ? range.from.col : 0;
     const endCol = row === range.to.row ? range.to.col : terminal.cols - 1;
     selectedLines.push(
@@ -2165,9 +2167,19 @@ function terminalBufferLineCellText(
   return text;
 }
 
+// SAFETY: typings omit cell.cell.grapheme_len (multi-codepoint cluster marker)
+// on buffer cells; the runtime line shape is a superset of IBufferLine. This
+// single helper keeps that cast out of the call sites.
+function terminalBufferLine(
+  buffer: Terminal["buffer"]["active"],
+  y: number,
+): TerminalBufferLine | undefined {
+  return buffer.getLine(y) as TerminalBufferLine | undefined;
+}
+
 function terminalLinkAt(terminal: Terminal, position: TerminalCellPosition) {
   const row = terminalBufferRow(terminal, position.row);
-  const line = terminal.buffer.active.getLine(row) as TerminalBufferLine | undefined;
+  const line = terminalBufferLine(terminal.buffer.active, row);
   if (!line || position.col < 0 || position.col >= line.length) {
     return null;
   }

@@ -118,6 +118,12 @@
 
 ### Changed
 
+- The five scattered `as` casts reaching ghostty-web's private runtime fields are consolidated:
+  one `ghosttyTerminalPrivateFields` view (animationFrameId/scrollbarOpacity/selectionManager) and
+  one `terminalBufferLine` helper (the grapheme_len superset of `IBufferLine`) now carry the only
+  remaining assertions, and `renderGhosttyTerminalFrame` reads the public renderer/wasmTerm/
+  viewportY fields directly. Covered by the existing suspend/render/selection tests; no behavior
+  change.
 - `TERMINAL_INPUT_BATCH_DELAY_OPTIONS_MS` is typed as `readonly number[]` at its definition, so
   the batch-delay preference check uses plain `Array.includes` instead of a cast to the literal
   tuple's element type.
