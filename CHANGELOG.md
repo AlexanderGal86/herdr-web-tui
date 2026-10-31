@@ -197,6 +197,11 @@
   tears the group down then, instead of holding the connection permit until the client acts.
   the save began, and saves are now serialized so overlapping saves write to the backend store
   in start order and the latest save's profile is the one that persists.
+- Web: saving a newly added bridge twice in a row (a second save queued while the first was still
+  probing) no longer creates two identical backends: the backend store is replaced immutably on
+  every save, so the queued save's duplicate check read a stale store copy and missed the backend
+  the first save had just created. The check now reads the live store, and the second save stops
+  with the existing "This URL is already saved as …" message instead of adding a duplicate.
 - Vendored herdr-compat: `ApiClientError` now implements `source()`, so the underlying io or
   serde_json cause stays reachable through the error chain for loggers and diagnostics (the
   bridge binary picks this up without changes); `Display` output is unchanged.
