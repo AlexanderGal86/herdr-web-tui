@@ -159,6 +159,10 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
   const [probeRetryTokens, setProbeRetryTokens] = useState<Record<string, number>>({});
   const [resumeToken, setResumeToken] = useState(0);
   const storeEditedRef = useRef(false);
+  // Adds are idempotent per base URL without waiting for a re-render: a second
+  // add can start after the first resolves but before the updated store state
+  // has rendered, so pending adds bridge that gap.
+  const pendingBackendAddsRef = useRef(new Map<string, Promise<BridgeBackendProfile>>());
 
   const sameOriginAvailable = defaultBridgeMode() === "same-origin";
 
@@ -376,6 +380,14 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
 
   const addBackend = useCallback(async (input: BackendInput, enable = false) => {
     const baseUrl = normalizeBridgeBaseUrl(input.baseUrl);
+    const saved = store.backends.find((backend) => backend.baseUrl === baseUrl);
+    if (saved) {
+      return saved;
+    }
+    const pending = pendingBackendAddsRef.current.get(baseUrl);
+    if (pending) {
+      return pending;
+    }
     const id = createBackendId();
     const profile: BridgeBackendProfile = {
       id,
@@ -384,23 +396,27 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
       color: normalizeBackendColor(input.color) ?? suggestBackendColor(store.backends, id),
       lastConnectedAt: undefined,
     };
-    storeEditedRef.current = true;
-    setStore((current) => {
-      const enabledBridgeIds = enable
-        ? normalizeEnabledBridgeIds(
-            [...current.enabledBridgeIds, profile.id],
-            [...current.backends, profile],
-            defaultBridgeMode() === "same-origin",
-          )
-        : current.enabledBridgeIds;
-      return {
-        version: STORE_VERSION,
-        enabledBridgeIds,
-        lastSelectedBridgeId: enable ? profile.id : current.lastSelectedBridgeId,
-        backends: [...current.backends, profile],
-      };
-    });
-    return profile;
+    const add = (async () => {
+      storeEditedRef.current = true;
+      setStore((current) => {
+        const enabledBridgeIds = enable
+          ? normalizeEnabledBridgeIds(
+              [...current.enabledBridgeIds, profile.id],
+              [...current.backends, profile],
+              defaultBridgeMode() === "same-origin",
+            )
+          : current.enabledBridgeIds;
+        return {
+          version: STORE_VERSION,
+          enabledBridgeIds,
+          lastSelectedBridgeId: enable ? profile.id : current.lastSelectedBridgeId,
+          backends: [...current.backends, profile],
+        };
+      });
+      return profile;
+    })();
+    pendingBackendAddsRef.current.set(baseUrl, add);
+    return add;
   }, [store.backends]);
 
   const updateBackend = useCallback(async (id: string, input: BackendInput) => {
@@ -412,6 +428,8 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
     const baseUrl = normalizeBridgeBaseUrl(input.baseUrl);
     if (baseUrl !== existing.baseUrl) {
       removeNoteDraftsForBridgeConnection(id, configuredBridgeConnectionKey(id, existing.baseUrl));
+      // The old URL is free to add again after this rename.
+      pendingBackendAddsRef.current.delete(existing.baseUrl);
     }
     const otherBackends = store.backends.filter((backend) => backend.id !== id);
     const updated: BridgeBackendProfile = {
@@ -437,6 +455,8 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
     const existing = store.backends.find((backend) => backend.id === id);
     if (existing) {
       removeNoteDraftsForBridgeConnection(id, configuredBridgeConnectionKey(id, existing.baseUrl));
+      // A deleted URL must be addable again as a fresh backend.
+      pendingBackendAddsRef.current.delete(existing.baseUrl);
     }
     storeEditedRef.current = true;
     setStore((current) => {
