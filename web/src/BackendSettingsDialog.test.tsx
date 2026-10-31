@@ -444,9 +444,17 @@ describe("BackendSettingsDialog save race", () => {
     bridge.probeBackend
       .mockImplementationOnce(() => probe1.promise)
       .mockImplementationOnce(() => probe2.promise);
-    bridge.updateBackend.mockResolvedValue({
-      id: "b1", name: "Host", baseUrl: "http://host:1", color: "#112233",
-    });
+    // Stateful mock: each update writes through to the saved profile so the
+    // final store payload can be asserted, not just the call order.
+    const savedProfiles: Record<string, import("./bridge").BridgeBackendProfile> = {
+      b1: { id: "b1", name: "Host", baseUrl: "http://host:1", color: "#112233" },
+    };
+    bridge.updateBackend.mockImplementation(
+      (id: string, patch: import("./bridge").BackendInput) => {
+        savedProfiles[id] = { ...savedProfiles[id], ...patch };
+        return Promise.resolve(savedProfiles[id]);
+      },
+    );
 
     const { container } = await render(<BackendSettingsDialog {...settingsProps()} />);
     const nameInput = requiredElement<HTMLInputElement>(
@@ -489,6 +497,79 @@ describe("BackendSettingsDialog save race", () => {
     expect(
       bridge.updateBackend.mock.calls.map(([, patch]) => patch.name),
     ).toEqual(["First Save", "Second Save"]);
+    // And the saved profile itself ends up with the second save's name: the
+    // slow first save never overwrites it after the fact.
+    expect(savedProfiles.b1?.name).toBe("Second Save");
+  });
+
+  it("does not add a duplicate when two queued saves create the same new backend", async () => {
+    const backends: import("./bridge").BridgeBackendProfile[] = [];
+    (bridge.store as { backends: import("./bridge").BridgeBackendProfile[] }).backends = backends;
+
+    const probe1 = deferred<void>();
+    bridge.probeBackend.mockImplementationOnce(() => probe1.promise);
+    // Stateful mock: addBackend really creates the backend in the live store
+    // array the component reads at save-execution time.
+    bridge.addBackend.mockImplementation((input: import("./bridge").BackendInput) => {
+      const created: import("./bridge").BridgeBackendProfile = {
+        id: "new-1",
+        name: input.name ?? "",
+        baseUrl: input.baseUrl,
+        color: input.color ?? "#112233",
+      };
+      backends.push(created);
+      return Promise.resolve(created);
+    });
+
+    const { container } = await render(<BackendSettingsDialog {...settingsProps()} />);
+    // An empty store starts on the same-origin panel; switch to adding a new bridge.
+    await act(async () =>
+      requiredElement<HTMLButtonElement>(container, ".backend-row-action").click(),
+    );
+    const nameInput = requiredElement<HTMLInputElement>(
+      container,
+      'input[placeholder="Home workstation"]',
+    );
+    const urlInput = requiredElement<HTMLInputElement>(
+      container,
+      'input[placeholder^="https://herd.example"]',
+    );
+
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+      setter?.call(nameInput, "First Add");
+      nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+      setter?.call(urlInput, "http://host:9");
+      urlInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () =>
+      requiredElement<HTMLButtonElement>(container, ".modal-actions .btn-primary").click(),
+    );
+    // Queue a second save of the same new backend (form.id is null in both
+    // saves) under a different name while the first save is still probing.
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+      setter?.call(nameInput, "Second Add");
+      nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () =>
+      requiredElement<HTMLFormElement>(container, "form.modal").dispatchEvent(
+        new Event("submit", { bubbles: true, cancelable: true }),
+      ),
+    );
+
+    await act(async () => {
+      probe1.resolve(undefined);
+    });
+    await act(async () => {});
+
+    // The first save creates the backend; the second save reads the live
+    // store when it executes, sees the just-created URL, and stops at the
+    // duplicate branch instead of adding a second profile.
+    expect(bridge.addBackend).toHaveBeenCalledTimes(1);
+    expect(bridge.addBackend.mock.calls[0]?.[0].name).toBe("First Add");
+    expect(backends.filter((backend) => backend.baseUrl === "http://host:9")).toHaveLength(1);
+    expect(container.textContent).toContain("This URL is already saved as First Add.");
   });
 });
 
