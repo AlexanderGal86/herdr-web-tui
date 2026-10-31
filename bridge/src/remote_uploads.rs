@@ -804,7 +804,12 @@ async fn run_owned_process(
     let group_guard = GroupKillGuard::new(child.id());
     if let Some(payload) = proc.stdin {
         use tokio::io::AsyncWriteExt;
-        let mut stdin = child.stdin.take().expect("piped stdin present");
+        let mut stdin = match child.stdin.take() {
+            Some(stdin) => stdin,
+            // Unreachable when stdin is piped above, but a missing pipe
+            // here must error, never panic in the request path.
+            None => return Err("stdin pipe unavailable".to_string()),
+        };
         let write = tokio::time::timeout(STDIN_WRITE_TIMEOUT, stdin.write_all(&payload)).await;
         let _ = stdin.shutdown().await;
         drop(stdin);
