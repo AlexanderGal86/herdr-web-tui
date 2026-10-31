@@ -380,6 +380,10 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
 
   const addBackend = useCallback(async (input: BackendInput, enable = false) => {
     const baseUrl = normalizeBridgeBaseUrl(input.baseUrl);
+    // Both checks below read render-time state; a same-tick delete/rename
+    // followed by add (no render between) could resolve a stale profile, but
+    // no caller can produce that sequence today (dialog paths are separate
+    // events guarded by duplicateBackend). A sync URL registry stays deferred.
     const saved = store.backends.find((backend) => backend.baseUrl === baseUrl);
     if (saved) {
       return saved;
