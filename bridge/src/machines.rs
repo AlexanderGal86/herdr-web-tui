@@ -955,7 +955,7 @@ fn serve_bridge_connection(
     // both directions), and an ssh child that ignores stdin EOF and stays
     // silent would otherwise hold the permit until it exits on its own.
     // The PID is read before the child moves into the shared mutex: the
-    // watchdog below polls it and never needs the mutex at all.
+    // watchdog below signals the group by PID inside that mutex's window.
     #[cfg(unix)]
     let leader_pid = child.id();
     let child = Arc::new(std::sync::Mutex::new(child));
@@ -972,23 +972,27 @@ fn serve_bridge_connection(
     // gone) while a descendant still holds the stdout pipe and a silent
     // client never EOFs — then only the leader's death can trigger the
     // teardown. The watchdog watches the leader WITHOUT reaping it
-    // (waitid WNOWAIT): a reaping poll (try_wait) would free the PID while
-    // the loop keeps signaling its group, and a recycled PID could then
-    // receive the kill. On exit it kills the group exactly once and stops:
-    // the descendant's pipes close, the copy loop below sees EOF, and the
-    // regular teardown follows. Until the main thread's final wait() the
-    // zombie keeps owning the PID, so every group signal provably targets
-    // the leader's own group.
+    // (waitid WNOWAIT), and both the check and the group kill hold the
+    // child mutex: the main teardown's final wait() (the only reap) needs
+    // the same mutex, so the PID cannot be freed between the watchdog's
+    // detection and its signal — and after the reap the check reads ECHILD
+    // and never signals. try_lock keeps the main teardown unblocked, and
+    // the guard drops before the sleep below. Until the final wait() the
+    // zombie owns the PID, so every group signal provably targets the
+    // leader's own group.
     #[cfg(unix)]
     let teardown_done = Arc::new(AtomicBool::new(false));
     #[cfg(unix)]
     {
         let watchdog_done = Arc::clone(&teardown_done);
+        let watchdog_child = Arc::clone(&child);
         std::thread::spawn(move || {
             while !watchdog_done.load(Ordering::Acquire) {
-                if leader_exited_without_reaping(leader_pid) {
-                    kill_process_group(leader_pid);
-                    break;
+                if let Ok(_guard) = watchdog_child.try_lock() {
+                    if leader_exited_without_reaping(leader_pid) {
+                        kill_process_group(leader_pid);
+                        break;
+                    }
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
@@ -2771,6 +2775,79 @@ mod tests {
         }
 
         drop(bridge);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Wave-3 watchdog race, no-descendants side: a leader that exits on its
+    // own with nothing holding the stdout pipe unblocks the main copy loop
+    // directly, so the main teardown (kill → kill → reap) runs concurrently
+    // with the watchdog's detect-and-signal window — the lock must keep the
+    // reap and the signal ordered. Each iteration re-rolls that window; the
+    // permit must come back every time.
+    #[cfg(unix)]
+    #[test]
+    fn bridge_leader_exit_without_children_releases_permit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let endpoint = test_endpoint(&hex_id(13), "root@127.0.0.1");
+        let root = home_test_root("pw");
+        let script = root.join("fast-exit.sh");
+        // No descendants: the leader's own pipes close at its exit, and the
+        // short delay only keeps the held permit observable before it.
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n[ \"$1\" = warmup ] && exit 0\nsleep 0.3\nexit 0\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+        // ETXTBSY warm-up (see machine_disable_runner): exec the just-written
+        // stub until the overlayfs window passes, so the bridge's own spawns
+        // below are proven good and cannot silently shortcut the scenario.
+        for _ in 0..40 {
+            match std::process::Command::new(&script).arg("warmup").status() {
+                Ok(status) if status.success() => break,
+                Err(err) if err.to_string().contains("Text file busy") => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                other => panic!("warmup failed: {other:?}"),
+            }
+        }
+        for iteration in 0..10 {
+            let permits = ConnectionPermits::new(1);
+            let bridge = SshSocketBridge::start(
+                &endpoint,
+                &root,
+                BridgeKind::Api,
+                permits.clone(),
+                script.to_str().unwrap(),
+            )
+            .unwrap();
+            let socket_path = bridge.path.clone();
+            // The client stays connected and silent: only the leader's own
+            // exit may release the permit.
+            let _client = std::os::unix::net::UnixStream::connect(&socket_path).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while permits.current() != 1 && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(
+                permits.current(),
+                1,
+                "iteration {iteration} must hold the permit while the leader lives"
+            );
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while permits.current() != 0 && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(
+                permits.current(),
+                0,
+                "iteration {iteration} must release the permit after the leader exited alone"
+            );
+            drop(bridge);
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 
