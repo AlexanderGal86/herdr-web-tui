@@ -193,7 +193,10 @@
   probing) no longer creates two identical backends: the backend store is replaced immutably on
   every save, so the queued save's duplicate check read a stale store copy and missed the backend
   the first save had just created. The check now reads the live store, and the second save stops
-  with the existing "This URL is already saved as …" message instead of adding a duplicate.
+  with the existing "This URL is already saved as …" message instead of adding a duplicate. The
+  bridge store's add is now also idempotent per base URL, so a racing second add that starts after
+  the first add resolves but before the store re-renders resolves to the same backend profile
+  instead of creating a duplicate.
 - Vendored herdr-compat: `ApiClientError` now implements `source()`, so the underlying io or
   serde_json cause stays reachable through the error chain for loggers and diagnostics (the
   bridge binary picks this up without changes); `Display` output is unchanged.
