@@ -533,10 +533,16 @@ impl MachineManager {
     }
 
     fn machine_gate(&self, id: &str) -> Arc<Mutex<()>> {
-        self.inflight
-            .lock()
-            .map(|mut inflight| inflight.entry(id.to_string()).or_default().clone())
-            .unwrap_or_else(|_| Arc::new(Mutex::new(())))
+        let mut inflight = match self.inflight.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                // Recover the registry instead of orphaning it: a fresh gate
+                // would silently break same-machine serialization.
+                tracing::warn!("machine inflight registry lock was poisoned; recovering");
+                poisoned.into_inner()
+            }
+        };
+        inflight.entry(id.to_string()).or_default().clone()
     }
 
     fn negative_cache_hit(&self, endpoint: &SavedEndpoint) -> bool {
@@ -2140,6 +2146,33 @@ mod tests {
 
     fn manager_with(config: MachineManagerConfig) -> MachineManager {
         MachineManager::with_config(config).expect("test manager")
+    }
+
+    // P3: a poisoned inflight registry must be recovered (not orphaned) so
+    // same-machine requests still serialize on the same gate afterwards.
+    #[test]
+    fn machine_gate_recovers_registry_after_poison() {
+        let root = home_test_root("gate-poison");
+        let manager = manager_with(MachineManagerConfig {
+            socket_dir: Some(root),
+            probe: ok_probe(),
+            ..MachineManagerConfig::default()
+        });
+        let before = manager.machine_gate("m1");
+
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = manager.inflight.lock().expect("test inflight lock");
+            panic!("poison the inflight registry");
+        }));
+        std::panic::set_hook(previous_hook);
+
+        let after = manager.machine_gate("m1");
+        assert!(
+            Arc::ptr_eq(&before, &after),
+            "recovered registry must hand out the same gate for the same machine"
+        );
     }
 
     // P1: default socket dir must be the app-owned state root, never /tmp,
