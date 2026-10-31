@@ -515,12 +515,19 @@ fn resolve_config_preset(
 }
 
 fn default_launcher_presets_path() -> PathBuf {
-    env::var_os("XDG_CONFIG_HOME")
+    let base = env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("herdr-web")
-        .join("launcher-presets.json")
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
+    let base = match base {
+        Some(base) => base,
+        None => {
+            tracing::warn!(
+                "neither XDG_CONFIG_HOME nor HOME is set; launcher presets fall back to the process working directory"
+            );
+            PathBuf::from(".")
+        }
+    };
+    base.join("herdr-web").join("launcher-presets.json")
 }
 
 fn validate_slug(value: &str, label: &str) -> Result<(), String> {

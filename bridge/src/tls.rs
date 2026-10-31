@@ -18,6 +18,9 @@ pub(crate) fn default_tls_state_dir() -> PathBuf {
             .join("herdr-web")
             .join("tls");
     }
+    tracing::warn!(
+        "no TLS state directory configured (HERDR_WEB_TLS_DIR, XDG_STATE_HOME, HOME unset); TLS state falls back to the process working directory"
+    );
     PathBuf::from("herdr-web-tls")
 }
 
