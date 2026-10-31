@@ -1090,10 +1090,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         );
     }
     ensure_upload_dir(&options.upload_dir)?;
-    crate::remote_uploads::cleanup_stale_staging(
-        &options.upload_dir,
-        std::time::SystemTime::now(),
-    );
+    crate::remote_uploads::cleanup_stale_staging(&options.upload_dir, std::time::SystemTime::now());
     let agent_activity = Arc::new(AgentActivityManager::new());
     let agent_pins = Arc::new(AgentPinsManager::new()?);
     let workspace_zones = Arc::new(WorkspaceZonesManager::new()?);
@@ -5842,7 +5839,6 @@ mod tests {
     // WebSocket drop.
     #[tokio::test]
     async fn terminal_socket_with_empty_terminal_id_receives_close_message() {
-        use futures_util::SinkExt as _;
         use futures_util::StreamExt as _;
 
         let target = MachineRouteTarget {
@@ -5871,15 +5867,15 @@ mod tests {
             })
             .into_response()
         }
-        let app = Router::new()
-            .route("/ws", get(upgrade))
-            .with_state(target);
+        let app = Router::new().route("/ws", get(upgrade)).with_state(target);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("test WebSocket listener");
         let address = listener.local_addr().expect("test WebSocket address");
         tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("test WebSocket server");
+            axum::serve(listener, app)
+                .await
+                .expect("test WebSocket server");
         });
 
         let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{address}/ws"))

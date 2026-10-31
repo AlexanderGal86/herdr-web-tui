@@ -421,7 +421,9 @@ pub(crate) fn cleanup_stale_staging(upload_root: &Path, now: std::time::SystemTi
             continue;
         }
         let stale = match entry.metadata().and_then(|meta| meta.modified()) {
-            Ok(mtime) => now.duration_since(mtime).is_ok_and(|age| age >= STALE_STAGING_MAX_AGE),
+            Ok(mtime) => now
+                .duration_since(mtime)
+                .is_ok_and(|age| age >= STALE_STAGING_MAX_AGE),
             Err(err) => {
                 warn!(
                     path = %entry.path().display(),
@@ -433,7 +435,9 @@ pub(crate) fn cleanup_stale_staging(upload_root: &Path, now: std::time::SystemTi
         };
         if stale {
             match std::fs::remove_file(entry.path()) {
-                Ok(()) => info!(path = %entry.path().display(), "removed stale upload staging fragment"),
+                Ok(()) => {
+                    info!(path = %entry.path().display(), "removed stale upload staging fragment")
+                }
                 Err(err) => warn!(
                     path = %entry.path().display(),
                     error = %err,
@@ -1089,7 +1093,8 @@ mod tests {
         assert!(stale.exists(), "fresh fragments must survive the sweep");
         assert!(incoming.exists());
 
-        let far_future = std::time::SystemTime::now() + STALE_STAGING_MAX_AGE + Duration::from_secs(1);
+        let far_future =
+            std::time::SystemTime::now() + STALE_STAGING_MAX_AGE + Duration::from_secs(1);
         cleanup_stale_staging(&env.upload_root, far_future);
         assert!(!stale.exists(), "stale fragment must be removed");
         assert!(!incoming.exists());
