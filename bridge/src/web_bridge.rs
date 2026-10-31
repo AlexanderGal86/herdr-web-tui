@@ -4496,7 +4496,16 @@ async fn handle_terminal_socket(
     query: TerminalQuery,
     target: MachineRouteTarget,
 ) {
+    let (mut ws_sender, mut ws_receiver) = socket.split();
     if query.terminal_id.trim().is_empty() {
+        // A bare drop would reset the socket with no frame; tell the client
+        // why the terminal attach ended.
+        let _ = send_websocket_message(
+            &mut ws_sender,
+            Message::Text(close_message("terminal_id is required").into()),
+            "terminal",
+        )
+        .await;
         return;
     }
 
@@ -4507,7 +4516,6 @@ async fn handle_terminal_socket(
     let output_encoding = query
         .output_encoding
         .unwrap_or(TerminalOutputWireEncoding::Identity);
-    let (mut ws_sender, mut ws_receiver) = socket.split();
     let (session, reserved_rx) = match acquire_terminal_session(
         target.clone(),
         terminal_id.clone(),
@@ -5829,6 +5837,65 @@ mod tests {
     use std::pin::Pin;
     use std::task::{Context, Poll};
     use tokio::sync::Notify;
+
+    // P3: an empty terminal_id must yield a close message frame, not a bare
+    // WebSocket drop.
+    #[tokio::test]
+    async fn terminal_socket_with_empty_terminal_id_receives_close_message() {
+        use futures_util::SinkExt as _;
+        use futures_util::StreamExt as _;
+
+        let target = MachineRouteTarget {
+            api: ApiClient::for_socket_path(PathBuf::from("/nonexistent-herdr-api.sock")),
+            client_socket_path: PathBuf::from("/nonexistent-herdr-client.sock"),
+            terminal_sessions: Arc::new(Mutex::new(TerminalSessions::default())),
+            selected_pane_id: Arc::new(Mutex::new(None)),
+        };
+        async fn upgrade(
+            ws: WebSocketUpgrade,
+            State(target): State<MachineRouteTarget>,
+        ) -> Response {
+            ws.on_upgrade(move |socket| {
+                handle_terminal_socket(
+                    socket,
+                    TerminalQuery {
+                        terminal_id: "   ".to_string(),
+                        cols: None,
+                        rows: None,
+                        coalesce_ms: None,
+                        output_encoding: None,
+                        takeover: false,
+                    },
+                    target,
+                )
+            })
+            .into_response()
+        }
+        let app = Router::new()
+            .route("/ws", get(upgrade))
+            .with_state(target);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test WebSocket listener");
+        let address = listener.local_addr().expect("test WebSocket address");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("test WebSocket server");
+        });
+
+        let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{address}/ws"))
+            .await
+            .expect("test WebSocket client");
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), client.next())
+            .await
+            .expect("frame within timeout")
+            .expect("a close message frame, not a bare disconnect");
+        let text = match frame {
+            Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => text,
+            other => panic!("expected a text close message, got {other:?}"),
+        };
+        assert!(text.contains("\"closed\""), "unexpected frame: {text}");
+        let _ = client.close(None).await;
+    }
 
     #[derive(Clone)]
     struct ActivitySocketTestState {
