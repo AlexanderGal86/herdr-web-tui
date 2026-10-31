@@ -87,11 +87,22 @@ impl MachineCatalog {
     pub fn load_from(path: &Path) -> MachineCatalog {
         let bytes = match std::fs::read(path) {
             Ok(bytes) => bytes,
-            Err(_) => return MachineCatalog::default(),
+            // NotFound is the normal fresh-install state; anything else loses
+            // saved machines silently without a warning.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return MachineCatalog::default()
+            }
+            Err(err) => {
+                tracing::warn!(path = %path.display(), error = %err, "machine catalog read failed");
+                return MachineCatalog::default();
+            }
         };
         let saved = match serde_json::from_slice::<SavedEndpointsFile>(&bytes) {
             Ok(saved) => saved,
-            Err(_) => return MachineCatalog::default(),
+            Err(err) => {
+                tracing::warn!(path = %path.display(), error = %err, "machine catalog parse failed; saved machines ignored");
+                return MachineCatalog::default();
+            }
         };
         MachineCatalog {
             ssh: saved
