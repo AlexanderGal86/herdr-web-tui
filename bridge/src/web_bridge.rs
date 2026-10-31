@@ -936,7 +936,7 @@ pub(crate) fn run_command(args: &[String]) -> io::Result<i32> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .expect("failed to create tokio runtime");
+        .map_err(|err| io::Error::other(format!("failed to create tokio runtime: {err}")))?;
 
     match runtime.block_on(run_server(options)) {
         Ok(()) => Ok(0),
@@ -1114,13 +1114,20 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
     };
     let api = ApiClient::for_socket_path(crate::session::active_api_socket_path());
     let daemon_status = startup_daemon_status(&api)?;
-    let daemon_protocol = daemon_status
-        .protocol
-        .expect("startup_daemon_status validates protocol");
-    let daemon_version = daemon_status
-        .version
-        .as_deref()
-        .expect("startup_daemon_status validates version");
+    // Unreachable while startup_daemon_status keeps validating both fields,
+    // but startup must fail with an error, not a panic.
+    let daemon_protocol = daemon_status.protocol.ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::InvalidData,
+            "Herdr daemon status did not include a protocol",
+        )
+    })?;
+    let daemon_version = daemon_status.version.as_deref().ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::InvalidData,
+            "Herdr daemon status did not include a version",
+        )
+    })?;
     info!(
         version = daemon_version,
         protocol = daemon_protocol,
