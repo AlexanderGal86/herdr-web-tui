@@ -441,44 +441,54 @@ describe("BackendSettingsDialog save race", () => {
 
     const probe1 = deferred<void>();
     const probe2 = deferred<void>();
-    const updateFirst = deferred<import("./bridge").BridgeBackendProfile>();
-    const updateSecond = deferred<import("./bridge").BridgeBackendProfile>();
     bridge.probeBackend
       .mockImplementationOnce(() => probe1.promise)
       .mockImplementationOnce(() => probe2.promise);
-    // updateBackend is called in completion order: the later save (save 2)
-    // resolves its probe first and therefore consumes the first mock slot.
-    bridge.updateBackend
-      .mockImplementationOnce(() => updateSecond.promise)
-      .mockImplementationOnce(() => updateFirst.promise);
+    bridge.updateBackend.mockResolvedValue({
+      id: "b1", name: "Host", baseUrl: "http://host:1", color: "#112233",
+    });
 
     const { container } = await render(<BackendSettingsDialog {...settingsProps()} />);
-    // Save #1 via the Save button; save #2 via form submit while busy.
+    const nameInput = requiredElement<HTMLInputElement>(
+      container,
+      'input[placeholder="Home workstation"]',
+    );
+
+    // Save #1 under one name via the Save button; save #2 under a new name via
+    // form submit while busy.
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+      setter?.call(nameInput, "First Save");
+      nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
     await act(async () =>
       requiredElement<HTMLButtonElement>(container, ".modal-actions .btn-primary").click(),
     );
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+      setter?.call(nameInput, "Second Save");
+      nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
     await act(async () =>
       requiredElement<HTMLFormElement>(container, "form.modal").dispatchEvent(
         new Event("submit", { bubbles: true, cancelable: true }),
       ),
     );
 
-    // The later save finishes first; the earlier save finishing afterwards
-    // must not overwrite its result.
+    // The first save is slow: its probe finishes after the second save's, so
+    // without serialization the stale first save writes to the store last.
     await act(async () => {
       probe2.resolve(undefined);
-      updateSecond.resolve({ id: "b1", name: "Second", baseUrl: "http://host:1", color: "#112233" });
     });
-
     await act(async () => {
       probe1.resolve(undefined);
-      updateFirst.resolve({ id: "b1", name: "First", baseUrl: "http://host:1", color: "#112233" });
     });
 
-
+    // Store mutations must follow save start order: the last updateBackend
+    // call carries the second save's payload, not the slow first save's.
     expect(
-      requiredElement<HTMLInputElement>(container, 'input[placeholder="Home workstation"]').value,
-    ).toBe("Second");
+      bridge.updateBackend.mock.calls.map(([, patch]) => patch.name),
+    ).toEqual(["First Save", "Second Save"]);
   });
 });
 

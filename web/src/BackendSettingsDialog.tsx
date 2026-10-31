@@ -199,6 +199,9 @@ export function BackendSettingsDialog({
     setSelectionModeState(update);
   };
   const [busy, setBusy] = useState(false);
+  // Saves chain onto this promise so store mutations land in save start order;
+  // a slow earlier save cannot overwrite the profile of a newer save.
+  const saveChainRef = useRef<Promise<void>>(Promise.resolve());
   const [message, setMessage] = useState<string | null>(null);
   const [duplicate, setDuplicate] = useState<BridgeBackendProfile | null>(null);
   const [activeArea, setActiveArea] = useState<SettingsArea>("bridge");
@@ -279,10 +282,9 @@ export function BackendSettingsDialog({
     }
   };
 
-  const saveBackend = async () => {
+  const saveBackendNow = async (requestGeneration: number) => {
     setBusy(true);
     setMessage(null);
-    const requestGeneration = ++formGeneration.current;
     try {
       const baseUrl = normalizeBridgeBaseUrl(form.baseUrl);
       const found = duplicateBackend(bridge.store.backends, baseUrl, form.id ?? undefined);
@@ -313,6 +315,12 @@ export function BackendSettingsDialog({
     } finally {
       setBusy(false);
     }
+  };
+
+  const saveBackend = () => {
+    const requestGeneration = ++formGeneration.current;
+    saveChainRef.current = saveChainRef.current.then(() => saveBackendNow(requestGeneration));
+    return saveChainRef.current;
   };
 
   const deleteBackend = () => {

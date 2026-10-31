@@ -195,6 +195,8 @@
   watchdog now also notices the ssh leader dying early — e.g. connection refused — while a
   descendant still holds the stdout pipe and the local client stays connected but silent, and
   tears the group down then, instead of holding the connection permit until the client acts.
+  the save began, and saves are now serialized so overlapping saves write to the backend store
+  in start order and the latest save's profile is the one that persists.
 - Vendored herdr-compat: `ApiClientError` now implements `source()`, so the underlying io or
   serde_json cause stays reachable through the error chain for loggers and diagnostics (the
   bridge binary picks this up without changes); `Display` output is unchanged.
