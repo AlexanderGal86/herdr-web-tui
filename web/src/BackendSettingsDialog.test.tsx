@@ -24,7 +24,10 @@ vi.mock("./bridge", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./bridge")>();
   return {
     ...actual,
-    useBridge: () => bridge,
+    // Mirror the real provider (a new context value whenever the store is
+    // replaced): each render sees the store as it exists at that render, so
+    // closures from earlier renders stay stale like they do in the app.
+    useBridge: () => ({ ...bridge, store: bridge.store }),
   };
 });
 
@@ -503,13 +506,11 @@ describe("BackendSettingsDialog save race", () => {
   });
 
   it("does not add a duplicate when two queued saves create the same new backend", async () => {
-    const backends: import("./bridge").BridgeBackendProfile[] = [];
-    (bridge.store as { backends: import("./bridge").BridgeBackendProfile[] }).backends = backends;
-
     const probe1 = deferred<void>();
     bridge.probeBackend.mockImplementationOnce(() => probe1.promise);
-    // Stateful mock: addBackend really creates the backend in the live store
-    // array the component reads at save-execution time.
+    // Stateful mock with the real bridge's immutable store semantics: addBackend
+    // replaces the store object (setStore does the same), so only a render that
+    // happens after the save observes the created backend.
     bridge.addBackend.mockImplementation((input: import("./bridge").BackendInput) => {
       const created: import("./bridge").BridgeBackendProfile = {
         id: "new-1",
@@ -517,7 +518,12 @@ describe("BackendSettingsDialog save race", () => {
         baseUrl: input.baseUrl,
         color: input.color ?? "#112233",
       };
-      backends.push(created);
+      (bridge as unknown as {
+        store: { backends: import("./bridge").BridgeBackendProfile[] };
+      }).store = {
+        ...bridge.store,
+        backends: [...bridge.store.backends, created],
+      };
       return Promise.resolve(created);
     });
 
@@ -563,12 +569,16 @@ describe("BackendSettingsDialog save race", () => {
     });
     await act(async () => {});
 
-    // The first save creates the backend; the second save reads the live
-    // store when it executes, sees the just-created URL, and stops at the
+    // The first save creates the backend; the second save must read the live
+    // store when it executes, see the just-created URL, and stop at the
     // duplicate branch instead of adding a second profile.
     expect(bridge.addBackend).toHaveBeenCalledTimes(1);
     expect(bridge.addBackend.mock.calls[0]?.[0].name).toBe("First Add");
-    expect(backends.filter((backend) => backend.baseUrl === "http://host:9")).toHaveLength(1);
+    expect(
+      (bridge.store as { backends: import("./bridge").BridgeBackendProfile[] }).backends.filter(
+        (backend) => backend.baseUrl === "http://host:9",
+      ),
+    ).toHaveLength(1);
     expect(container.textContent).toContain("This URL is already saved as First Add.");
   });
 });

@@ -202,6 +202,11 @@ export function BackendSettingsDialog({
   // Saves chain onto this promise so store mutations land in save start order;
   // a slow earlier save cannot overwrite the profile of a newer save.
   const saveChainRef = useRef<Promise<void>>(Promise.resolve());
+  // The bridge store is replaced immutably on every save, so a saveBackendNow
+  // closure created in an earlier render would duplicate-check a stale copy;
+  // keep the latest store reachable for that check.
+  const bridgeStoreRef = useRef(bridge.store);
+  bridgeStoreRef.current = bridge.store;
   const [message, setMessage] = useState<string | null>(null);
   const [duplicate, setDuplicate] = useState<BridgeBackendProfile | null>(null);
   const [activeArea, setActiveArea] = useState<SettingsArea>("bridge");
@@ -287,7 +292,7 @@ export function BackendSettingsDialog({
     setMessage(null);
     try {
       const baseUrl = normalizeBridgeBaseUrl(form.baseUrl);
-      const found = duplicateBackend(bridge.store.backends, baseUrl, form.id ?? undefined);
+      const found = duplicateBackend(bridgeStoreRef.current.backends, baseUrl, form.id ?? undefined);
       if (found) {
         setDuplicate(found);
         setMessage(`This URL is already saved as ${found.name}.`);
