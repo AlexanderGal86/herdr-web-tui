@@ -1090,6 +1090,10 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         );
     }
     ensure_upload_dir(&options.upload_dir)?;
+    crate::remote_uploads::cleanup_stale_staging(
+        &options.upload_dir,
+        std::time::SystemTime::now(),
+    );
     let agent_activity = Arc::new(AgentActivityManager::new());
     let agent_pins = Arc::new(AgentPinsManager::new()?);
     let workspace_zones = Arc::new(WorkspaceZonesManager::new()?);

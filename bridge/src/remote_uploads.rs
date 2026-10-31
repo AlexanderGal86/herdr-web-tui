@@ -389,6 +389,61 @@ fn staging_root(upload_root: &Path) -> PathBuf {
     upload_root.join(STAGING_DIR_NAME)
 }
 
+/// Crash leftovers in the staging directory older than this are removed at
+/// startup. In-flight uploads are never older than the bridge process, so a
+/// live upload can never reach this age while its bridge is running.
+const STALE_STAGING_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// One-time best-effort startup sweep: remove `.stage-*`/`.incoming-*`
+/// fragments older than `STALE_STAGING_MAX_AGE` from the local staging
+/// directory. `now` is a parameter so tests can fake file age (std cannot
+/// set mtime). Every failure is logged and skipped, never fatal.
+pub(crate) fn cleanup_stale_staging(upload_root: &Path, now: std::time::SystemTime) {
+    let staging_dir = staging_root(upload_root);
+    let entries = match std::fs::read_dir(&staging_dir) {
+        Ok(entries) => entries,
+        // No staging directory yet is the normal fresh-install state.
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return,
+        Err(err) => {
+            warn!(
+                path = %staging_dir.display(),
+                error = %err,
+                "stale staging sweep could not list the staging directory"
+            );
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if !name.starts_with(".stage-") && !name.starts_with(".incoming-") {
+            continue;
+        }
+        let stale = match entry.metadata().and_then(|meta| meta.modified()) {
+            Ok(mtime) => now.duration_since(mtime).is_ok_and(|age| age >= STALE_STAGING_MAX_AGE),
+            Err(err) => {
+                warn!(
+                    path = %entry.path().display(),
+                    error = %err,
+                    "stale staging sweep could not read fragment mtime"
+                );
+                continue;
+            }
+        };
+        if stale {
+            match std::fs::remove_file(entry.path()) {
+                Ok(()) => info!(path = %entry.path().display(), "removed stale upload staging fragment"),
+                Err(err) => warn!(
+                    path = %entry.path().display(),
+                    error = %err,
+                    "stale staging cleanup failed"
+                ),
+            }
+        }
+    }
+}
+
 /// Write `body` to a generated 0600 staging file inside a 0700 staging
 /// directory under the bridge's upload root. Blocking filesystem work runs
 /// on the blocking pool, never on the async workers. Permissions are only
@@ -1017,6 +1072,28 @@ mod tests {
         assert_eq!(base64_encode(b"ab"), "YWI=");
         assert_eq!(base64_encode(b"abc"), "YWJj");
         assert_eq!(base64_encode(&[0xff, 0x00, 0x10]), "/wAQ");
+    }
+
+    #[test]
+    fn startup_sweep_removes_only_stale_staging_fragments() {
+        let env = TestEnv::new();
+        let staging_dir = env.staging_dir();
+        std::fs::create_dir_all(&staging_dir).unwrap();
+        let stale = staging_dir.join(".stage-000000000000dead");
+        let incoming = staging_dir.join(".incoming-0000000000dead");
+        std::fs::write(&stale, b"leftover").unwrap();
+        std::fs::write(&incoming, b"leftover").unwrap();
+
+        // std cannot set mtime; shift "now" past the age threshold instead.
+        cleanup_stale_staging(&env.upload_root, std::time::SystemTime::now());
+        assert!(stale.exists(), "fresh fragments must survive the sweep");
+        assert!(incoming.exists());
+
+        let far_future = std::time::SystemTime::now() + STALE_STAGING_MAX_AGE + Duration::from_secs(1);
+        cleanup_stale_staging(&env.upload_root, far_future);
+        assert!(!stale.exists(), "stale fragment must be removed");
+        assert!(!incoming.exists());
+        env.cleanup();
     }
 
     #[test]
