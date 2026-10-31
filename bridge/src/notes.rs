@@ -960,8 +960,9 @@ fn normalized_note_id(note_id: &str) -> Result<String, NotesError> {
 }
 
 fn push_attachment_history(note: &mut NoteRecord, now: String) {
-    if let Some(attachment) = note.attachment.clone() {
-        let mut attachment = attachment;
+    // Every caller reassigns note.attachment right after, so taking the
+    // current value avoids cloning the snapshot it archives.
+    if let Some(mut attachment) = note.attachment.take() {
         attachment.captured_at = now;
         note.attachment_history.push(attachment);
         if note.attachment_history.len() > MAX_ATTACHMENT_HISTORY {
