@@ -180,6 +180,17 @@
   [Will Hampson (@Whamp)](https://github.com/Whamp).
 
 ### Fixed
+- Bridge: an unreadable or corrupt saved-machines file (`endpoints.json`) no longer fails
+  silently — the bridge logs a warning with the path and cause instead of quietly dropping the
+  saved SSH machines.
+- Bridge: a corrupt observations store now logs a warning when the bridge serves an empty store
+  in its place, so link-state loss is visible in the logs instead of silent.
+- Bridge: a missing stdin pipe in the remote-upload runner now returns an error to the request
+  instead of panicking the bridge task.
+- Bridge: upload staging fragments (`.stage-*`) left behind by a crash are now swept at startup
+  once they are older than 24 hours, so aborted uploads no longer litter the upload directory.
+- Bridge: a terminal attach with a blank `terminal_id` now receives a close message over the
+  WebSocket instead of a silent connection reset.
 - Web: reject malformed snapshot and note payloads element-by-element instead of accepting
   arrays with non-object entries, so a malformed bridge response is treated as a retryable error
   rather than crashing the workspace view or echoing bad attachment history back to the bridge.
