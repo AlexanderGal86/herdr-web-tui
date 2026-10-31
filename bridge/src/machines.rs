@@ -1380,7 +1380,10 @@ fn take_captured_stderr(child: &mut Child) -> CapturedStderr {
                     }
                     std::thread::sleep(PROBE_POLL);
                 }
-                Err(_) => break,
+                Err(err) => {
+                    tracing::warn!(error = %err, "machine-add stderr drain stopped on read error");
+                    break;
+                }
             }
         }
         let _ = sender.send(String::from_utf8_lossy(&captured).into_owned());
