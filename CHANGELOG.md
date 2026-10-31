@@ -187,7 +187,8 @@
 - Web: a backend save that is still in flight no longer clobbers the settings form when the
   user leaves a bridge and returns to it (editing the name or color) or starts a second
   overlapping save — the saved profile is only restored while nothing touched the form since
-  the save began.
+  the save began, and saves are now serialized so overlapping saves write to the backend store
+  in start order and the latest save's profile is the one that persists.
 - Vendored herdr-compat: `ApiClientError` now implements `source()`, so the underlying io or
   serde_json cause stays reachable through the error chain for loggers and diagnostics (the
   bridge binary picks this up without changes); `Display` output is unchanged.
