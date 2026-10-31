@@ -976,10 +976,12 @@ fn serve_bridge_connection(
     // child mutex: the main teardown's final wait() (the only reap) needs
     // the same mutex, so the PID cannot be freed between the watchdog's
     // detection and its signal — and after the reap the check reads ECHILD
-    // and never signals. try_lock keeps the main teardown unblocked, and
-    // the guard drops before the sleep below. Until the final wait() the
-    // zombie owns the PID, so every group signal provably targets the
-    // leader's own group.
+    // and never signals. The done flag is re-read inside the lock too (the
+    // teardown stores it before releasing the mutex), so the watchdog can
+    // never signal after a completed teardown. try_lock keeps the main
+    // teardown unblocked, and the guard drops before the sleep below.
+    // Until the final wait() the zombie owns the PID, so every group
+    // signal provably targets the leader's own group.
     #[cfg(unix)]
     let teardown_done = Arc::new(AtomicBool::new(false));
     #[cfg(unix)]
@@ -989,6 +991,9 @@ fn serve_bridge_connection(
         std::thread::spawn(move || {
             while !watchdog_done.load(Ordering::Acquire) {
                 if let Ok(_guard) = watchdog_child.try_lock() {
+                    if watchdog_done.load(Ordering::Acquire) {
+                        break;
+                    }
                     if leader_exited_without_reaping(leader_pid) {
                         kill_process_group(leader_pid);
                         break;
