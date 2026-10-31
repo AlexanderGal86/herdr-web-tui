@@ -964,6 +964,26 @@ fn serve_bridge_connection(
             let _ = child.kill();
         }
     });
+    // The ssh leader can die early (connection refused, remote command
+    // gone) while a descendant still holds the stdout pipe and a silent
+    // client never EOFs — then only the leader's death can trigger the
+    // teardown. Poll it and kill the group: the descendant's pipes close,
+    // the copy loop below sees EOF, and the regular teardown follows. The
+    // kill is idempotent (ESRCH after a dead group is ignored), and the
+    // lock is never held across the sleep.
+    let teardown_done = Arc::new(AtomicBool::new(false));
+    let watchdog_child = Arc::clone(&child);
+    let watchdog_done = Arc::clone(&teardown_done);
+    std::thread::spawn(move || {
+        while !watchdog_done.load(Ordering::Acquire) {
+            if let Ok(mut child) = watchdog_child.try_lock() {
+                if child.try_wait().is_ok_and(|status| status.is_some()) {
+                    kill_process_group(child.id());
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    });
     let _ = copy_pipe(&mut child_stdout, &mut write_stream);
     let _ = write_stream.flush();
     // The ssh child is gone: close the socket so the local peer sees EOF and
@@ -977,6 +997,7 @@ fn serve_bridge_connection(
     kill_process_group(child.id());
     let _ = child.kill();
     let _ = child.wait();
+    teardown_done.store(true, Ordering::Release);
 }
 
 /// Chunked pipe copy between a socket half and an ssh stdio pipe.
@@ -2599,6 +2620,114 @@ mod tests {
             assert!(
                 Instant::now() < deadline,
                 "grandchild pid {grandchild_pid} survived the teardown"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        drop(bridge);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Wave-3 teardown, leader-death side: the ssh leader can exit early
+    // (connection refused, remote command gone) while a descendant holds
+    // the stdout pipe and the local client stays connected and silent —
+    // the permit must not sit on the group until the client finally acts.
+    #[cfg(unix)]
+    #[test]
+    fn bridge_teardown_kills_grandchildren_when_ssh_leader_dies() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let permits = ConnectionPermits::new(1);
+        let endpoint = test_endpoint(&hex_id(12), "root@127.0.0.1");
+        let root = home_test_root("pd");
+        let script = root.join("fake-ssh.sh");
+        let pid_file = root.join("grandchild.pid");
+        // The stub spawns the long-lived grandchild, then the leader exits
+        // on its own after a short delay — the client never acts, so the
+        // death is still "early" relative to it, and the delay only keeps
+        // the held permit observable before the teardown. The grandchild
+        // keeps the stdout pipe open, so the main copy loop cannot see EOF
+        // from the leader's death alone.
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n[ \"$1\" = warmup ] && exit 0\nsleep 300 & echo $! > {}\nsleep 2\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+        // ETXTBSY warm-up (see machine_disable_runner): exec the just-written
+        // stub until the overlayfs window passes, so the bridge's own spawn
+        // below is proven good and cannot silently shortcut the scenario.
+        for _ in 0..40 {
+            match std::process::Command::new(&script).arg("warmup").status() {
+                Ok(status) if status.success() => break,
+                Err(err) if err.to_string().contains("Text file busy") => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                other => panic!("warmup failed: {other:?}"),
+            }
+        }
+        let bridge = SshSocketBridge::start(
+            &endpoint,
+            &root,
+            BridgeKind::Api,
+            permits.clone(),
+            script.to_str().unwrap(),
+        )
+        .unwrap();
+        let socket_path = bridge.path.clone();
+
+        // The client stays connected and silent for the whole test: the
+        // leader's early death alone must trigger the teardown.
+        let _client = std::os::unix::net::UnixStream::connect(&socket_path).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while permits.current() != 1 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(permits.current(), 1, "connection must hold the permit");
+        let grandchild_pid: i32 = {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                    if let Ok(pid) = text.trim().parse() {
+                        break pid;
+                    }
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "fake ssh never wrote its grandchild pid"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        assert!(
+            process_alive(grandchild_pid),
+            "grandchild must be alive before the leader dies"
+        );
+
+        // No client action happens here: the leader already exited, so the
+        // group must be torn down and the permit released promptly.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while permits.current() != 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            permits.current(),
+            0,
+            "permit must be released once the ssh leader died"
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if !process_alive(grandchild_pid) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "grandchild pid {grandchild_pid} survived the leader-death teardown"
             );
             std::thread::sleep(Duration::from_millis(10));
         }
