@@ -648,9 +648,17 @@ impl NotesManager {
 
     fn load_observation_store_best_effort(&self) -> ObservationStore {
         match fs::read(&self.observations_path) {
-            Ok(bytes) => {
-                parse_observation_store(&bytes).unwrap_or_else(|_| default_observation_store())
-            }
+            // Reads deliberately skip copy_corrupt_once (pinned by
+            // corrupt_observation_reads_do_not_create_repeated_copies); only
+            // the recovery path on update copies the broken file aside.
+            Ok(bytes) => parse_observation_store(&bytes).unwrap_or_else(|err| {
+                tracing::warn!(
+                    path = %self.observations_path.display(),
+                    error = %err,
+                    "observation store unreadable; serving an empty store"
+                );
+                default_observation_store()
+            }),
             Err(_) => default_observation_store(),
         }
     }
