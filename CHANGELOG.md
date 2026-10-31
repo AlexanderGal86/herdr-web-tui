@@ -183,7 +183,10 @@
 
 - Bridge: teardown of a machine's ssh connection now kills the ssh process's whole process
   group instead of only the ssh leader, so ssh descendants (e.g. ProxyCommand helpers) can no
-  longer outlive the connection teardown and keep running with the permit already released.
+  longer outlive the connection teardown and keep running with the permit already released. A
+  watchdog now also notices the ssh leader dying early — e.g. connection refused — while a
+  descendant still holds the stdout pipe and the local client stays connected but silent, and
+  tears the group down then, instead of holding the connection permit until the client acts.
 - Vendored herdr-compat: `ApiClientError` now implements `source()`, so the underlying io or
   serde_json cause stays reachable through the error chain for loggers and diagnostics (the
   bridge binary picks this up without changes); `Display` output is unchanged.
