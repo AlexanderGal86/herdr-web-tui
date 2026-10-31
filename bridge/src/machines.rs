@@ -954,6 +954,10 @@ fn serve_bridge_connection(
     // half-closes — API requests drop the stream, terminal detach shuts down
     // both directions), and an ssh child that ignores stdin EOF and stays
     // silent would otherwise hold the permit until it exits on its own.
+    // The PID is read before the child moves into the shared mutex: the
+    // watchdog below polls it and never needs the mutex at all.
+    #[cfg(unix)]
+    let leader_pid = child.id();
     let child = Arc::new(std::sync::Mutex::new(child));
     let kill_on_client_eof = Arc::clone(&child);
     let up = std::thread::spawn(move || {
@@ -967,23 +971,29 @@ fn serve_bridge_connection(
     // The ssh leader can die early (connection refused, remote command
     // gone) while a descendant still holds the stdout pipe and a silent
     // client never EOFs — then only the leader's death can trigger the
-    // teardown. Poll it and kill the group: the descendant's pipes close,
-    // the copy loop below sees EOF, and the regular teardown follows. The
-    // kill is idempotent (ESRCH after a dead group is ignored), and the
-    // lock is never held across the sleep.
+    // teardown. The watchdog watches the leader WITHOUT reaping it
+    // (waitid WNOWAIT): a reaping poll (try_wait) would free the PID while
+    // the loop keeps signaling its group, and a recycled PID could then
+    // receive the kill. On exit it kills the group exactly once and stops:
+    // the descendant's pipes close, the copy loop below sees EOF, and the
+    // regular teardown follows. Until the main thread's final wait() the
+    // zombie keeps owning the PID, so every group signal provably targets
+    // the leader's own group.
+    #[cfg(unix)]
     let teardown_done = Arc::new(AtomicBool::new(false));
-    let watchdog_child = Arc::clone(&child);
-    let watchdog_done = Arc::clone(&teardown_done);
-    std::thread::spawn(move || {
-        while !watchdog_done.load(Ordering::Acquire) {
-            if let Ok(mut child) = watchdog_child.try_lock() {
-                if child.try_wait().is_ok_and(|status| status.is_some()) {
-                    kill_process_group(child.id());
+    #[cfg(unix)]
+    {
+        let watchdog_done = Arc::clone(&teardown_done);
+        std::thread::spawn(move || {
+            while !watchdog_done.load(Ordering::Acquire) {
+                if leader_exited_without_reaping(leader_pid) {
+                    kill_process_group(leader_pid);
+                    break;
                 }
+                std::thread::sleep(Duration::from_millis(100));
             }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-    });
+        });
+    }
     let _ = copy_pipe(&mut child_stdout, &mut write_stream);
     let _ = write_stream.flush();
     // The ssh child is gone: close the socket so the local peer sees EOF and
@@ -997,6 +1007,7 @@ fn serve_bridge_connection(
     kill_process_group(child.id());
     let _ = child.kill();
     let _ = child.wait();
+    #[cfg(unix)]
     teardown_done.store(true, Ordering::Release);
 }
 
@@ -1244,6 +1255,30 @@ fn kill_process_group(pid: u32) {
 
 #[cfg(not(unix))]
 fn kill_process_group(_pid: u32) {}
+
+/// Reports whether the process exited WITHOUT reaping it: waitid with
+/// WNOWAIT leaves the zombie in place, so the PID stays reserved for a
+/// later group signal or the final wait — a reaping check (try_wait)
+/// would free the PID for reuse while the caller still acts on it.
+/// si_pid stays 0 when nothing is waitable (POSIX), nonzero once the
+/// process exited. Zero-init is the documented idiom: a WNOHANG miss
+/// leaves the caller's zeros, which read as "not exited yet".
+#[cfg(unix)]
+fn leader_exited_without_reaping(pid: u32) -> bool {
+    let mut siginfo: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let options = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
+    // ECHILD means the teardown's final wait() already reaped the leader —
+    // reading "not exited" is fine, the teardown_done flag ends the loop.
+    if unsafe { libc::waitid(libc::P_PID, pid, &mut siginfo, options) } != 0 {
+        return false;
+    }
+    // glibc packs siginfo behind an accessor method; apple/bsd expose a field.
+    #[cfg(target_os = "linux")]
+    let matched = unsafe { siginfo.si_pid() } != 0;
+    #[cfg(not(target_os = "linux"))]
+    let matched = siginfo.si_pid != 0;
+    matched
+}
 
 /// Bounds stderr collection: capture keeps only the latest bytes (the CLI's
 /// diagnostics put the reason last) but draining never stops while the CLI
@@ -2632,6 +2667,9 @@ mod tests {
     // (connection refused, remote command gone) while a descendant holds
     // the stdout pipe and the local client stays connected and silent —
     // the permit must not sit on the group until the client finally acts.
+    // The watchdog signals the group exactly once and stops polling: it
+    // never reaps the leader, so the zombie owns its PID until the main
+    // thread's final wait and the kill can never hit a recycled PGID.
     #[cfg(unix)]
     #[test]
     fn bridge_teardown_kills_grandchildren_when_ssh_leader_dies() {
