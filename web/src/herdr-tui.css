@@ -114,6 +114,11 @@
   animation: none;
 }
 
+:root[data-appearance="tui"] .pane-select {
+  grid-template-columns: 8px minmax(0, 1fr);
+  gap: 8px;
+}
+
 :root[data-appearance="tui"] :is(.space-row, .pane-row)[data-active="true"] {
   box-shadow: none;
   background: var(--base);

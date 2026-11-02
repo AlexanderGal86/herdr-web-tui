@@ -9883,38 +9883,19 @@ export function DisconnectedBridgeRow({
   onRetry: () => void;
 }) {
   return (
-    <div
-      className="pane-row"
-      role="button"
-      tabIndex={0}
-      data-status="unknown"
-      onClick={onSelect}
-      onKeyDown={(event) => {
-        // The nested retry button activates natively; row keys must not double-fire.
-        if (event.target !== event.currentTarget) {
-          return;
-        }
-        if (event.key !== "Enter" && event.key !== " ") {
-          return;
-        }
-        event.preventDefault();
-        onSelect();
-      }}
-    >
-      <span className="dot" data-status="unknown" />
-      <span className="pane-body">
-        <span className="pane-name">{label}</span>
-        <span className="pane-meta mono">{message}</span>
-      </span>
+    <div className="pane-row" data-status="unknown">
+      <button className="pane-select" type="button" onClick={onSelect}>
+        <span className="dot" data-status="unknown" />
+        <span className="pane-body">
+          <span className="pane-name">{label}</span>
+          <span className="pane-meta mono">{message}</span>
+        </span>
+      </button>
       <button
         className="pane-word"
         type="button"
         data-status="working"
-        onClick={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          onRetry();
-        }}
+        onClick={onRetry}
       >
         retry
       </button>

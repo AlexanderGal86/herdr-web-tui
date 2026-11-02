@@ -797,7 +797,6 @@ button {
 
 .pane-row {
   display: grid;
-  cursor: pointer;
   grid-template-columns: 16px minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
@@ -809,6 +808,20 @@ button {
   text-align: left;
   animation: rowIn 0.32s cubic-bezier(0.2, 0.7, 0.2, 1) both;
   transition: background 120ms ease, border-color 120ms ease;
+}
+
+.pane-row .pane-select {
+  /* Spans the dot and body columns so the row grid stays unchanged. */
+  display: grid;
+  grid-column: 1 / 3;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
 }
 
 .pane-row:hover {

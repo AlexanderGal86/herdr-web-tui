@@ -42,71 +42,63 @@ async function renderRow() {
       />,
     );
   });
-}
-
-function row() {
-  const row = container.querySelector<HTMLElement>('.pane-row[role="button"]');
-  if (!row) {
-    throw new Error("missing disconnected row");
-  }
-  return row;
-}
-
-function retryButton() {
-  const button = container.querySelector<HTMLButtonElement>("button.pane-word");
-  if (!button) {
-    throw new Error("missing retry button");
-  }
-  return button;
-}
-
-function pressKey(target: HTMLElement, key: string) {
-  target.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+  return container.firstElementChild as HTMLElement;
 }
 
 describe("DisconnectedBridgeRow", () => {
-  it("renders the retry affordance as a real button inside a row button role", async () => {
-    await renderRow();
-    const rowElement = row();
-    expect(rowElement.tagName).toBe("DIV");
-    expect(rowElement.tabIndex).toBe(0);
-    const button = retryButton();
-    expect(button.tagName).toBe("BUTTON");
-    expect(button.type).toBe("button");
-    // No nested interactive element inside a native button: the row must not be one.
-    expect(rowElement.querySelector("button")).not.toBeNull();
+  it("renders a non-interactive row with a select button and a retry button", async () => {
+    const row = await renderRow();
+
+    expect(row.tagName).toBe("DIV");
+    expect(row.className).toBe("pane-row");
+    expect(row.getAttribute("role")).toBeNull();
+    expect(row.getAttribute("tabindex")).toBeNull();
+
+    const select = row.querySelector<HTMLButtonElement>("button.pane-select");
+    expect(select?.type).toBe("button");
+    expect(select?.querySelector(".dot[data-status='unknown']")).not.toBeNull();
+    expect(select?.querySelector(".pane-name")?.textContent).toBe("Bridge A");
+    expect(select?.querySelector(".pane-meta")?.textContent).toBe(
+      "Bridge disconnected",
+    );
+
+    const retry = row.querySelector<HTMLButtonElement>("button.pane-word");
+    expect(retry?.type).toBe("button");
+    expect(retry?.dataset.status).toBe("working");
+    expect(retry?.textContent).toBe("retry");
   });
 
-  it("selects the row on Enter and Space keys", async () => {
-    await renderRow();
+  it("selects the pane when the select button is clicked", async () => {
+    const row = await renderRow();
+    const select = row.querySelector<HTMLButtonElement>("button.pane-select");
+
     await act(async () => {
-      pressKey(row(), "Enter");
+      select?.click();
     });
+
     expect(onSelect).toHaveBeenCalledTimes(1);
-    await act(async () => {
-      pressKey(row(), " ");
-    });
-    expect(onSelect).toHaveBeenCalledTimes(2);
-    await act(async () => {
-      pressKey(row(), "a");
-    });
-    expect(onSelect).toHaveBeenCalledTimes(2);
+    expect(onRetry).not.toHaveBeenCalled();
   });
 
   it("retries without selecting when the retry button is clicked", async () => {
-    await renderRow();
+    const row = await renderRow();
+    const retry = row.querySelector<HTMLButtonElement>("button.pane-word");
+
     await act(async () => {
-      retryButton().click();
+      retry?.click();
     });
+
     expect(onRetry).toHaveBeenCalledTimes(1);
     expect(onSelect).not.toHaveBeenCalled();
   });
 
-  it("does not select the row when keys pressed on the retry button bubble up", async () => {
-    await renderRow();
-    await act(async () => {
-      pressKey(retryButton(), "Enter");
-    });
-    expect(onSelect).not.toHaveBeenCalled();
+  it("keeps the select button ahead of retry in tab order", async () => {
+    const row = await renderRow();
+    // Both are native buttons without tabIndex overrides, so DOM order is tab order.
+    const select = row.querySelector("button.pane-select") as HTMLElement;
+    const retry = row.querySelector("button.pane-word") as HTMLElement;
+    expect(
+      select.compareDocumentPosition(retry) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 });
