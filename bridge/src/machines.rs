@@ -3215,7 +3215,7 @@ mod tests {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\necho {}\n",
+                "#!/bin/sh\n[ \"$1\" = warmup ] && exit 0\nprintf '%s\\n' \"$@\" > {}\necho {}\n",
                 argv_file.display(),
                 REMOTE_API_BRIDGE_CAPABILITY
             ),
@@ -3224,6 +3224,18 @@ mod tests {
         let mut permissions = std::fs::metadata(&script).unwrap().permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&script, permissions).unwrap();
+        // ETXTBSY warm-up (see machine_disable_runner): exec the just-written
+        // stub until the overlayfs window passes — sibling probe tests write
+        // and exec their own stubs in parallel, which widens it.
+        for _ in 0..40 {
+            match std::process::Command::new(&script).arg("warmup").status() {
+                Ok(status) if status.success() => break,
+                Err(err) if err.to_string().contains("Text file busy") => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                other => panic!("warmup failed: {other:?}"),
+            }
+        }
 
         probe_remote_support(&endpoint, script.to_str().unwrap())
             .expect("probe must succeed via the injected program");
