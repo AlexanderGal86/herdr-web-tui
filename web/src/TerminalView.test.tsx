@@ -420,8 +420,8 @@ describe("TerminalView reconnect timing", () => {
       });
       document.dispatchEvent(new Event("visibilitychange"));
     });
-    // The in-flight attempt keeps its own 10s connect timeout: the 1.2s
-    // foreground fast timeout only governs attempts the signal starts.
+    // The in-flight attempt runs to the 10s timeout every attempt gets:
+    // a foreground signal must not re-arm a slow upgrade mid-flight.
     await act(async () => {
       await vi.advanceTimersByTimeAsync(2000);
     });
@@ -460,6 +460,40 @@ describe("TerminalView bridge-back wake", () => {
       await vi.advanceTimersByTimeAsync(450);
     });
     expect(FakeWebSocket.instances).toHaveLength(instancesBeforeWake + 1);
+  });
+
+  it("gives the bridge-back foreground attempt the full 10s connect timeout", async () => {
+    const closedSocket = await renderClosedTerminal("terminal-bridge-back-slow-open");
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent(BRIDGE_BACK_EVENT, {
+          detail: { bridgeId: "bridge-1", connectionKey: "test-connection" },
+        }),
+      );
+      // The 0–300ms jitter always lands before the 500ms backoff would.
+      await vi.advanceTimersByTimeAsync(450);
+    });
+    const socket = FakeWebSocket.instances.at(-1)!;
+    expect(socket).not.toBe(closedSocket);
+    // Old behavior: the 1.2s foreground fast timeout killed this attempt
+    // while the restarting bridge was still completing the HTTP upgrade.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    expect(socket.readyState).toBe(FakeWebSocket.CONNECTING);
+    await act(async () => {
+      socket.open(); // the slow upgrade completes, well past 1.2s
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(socket.readyState).toBe(FakeWebSocket.OPEN);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    // The open socket kept its place: no attempt got rescheduled past it.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(8000);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    expect(socket.readyState).toBe(FakeWebSocket.OPEN);
   });
 
   it("ignores bridge-back for other bridges and connections", async () => {

@@ -184,7 +184,8 @@
 - Web: terminal panes reconnect to a restarted bridge in seconds instead of staying dead for
   ~23 seconds: connect attempts now wait up to 10s for a slow websocket upgrade instead of being
   burned after 3.5s, normal backoff caps at 3s, a foreground signal no longer shortens an
-  in-flight attempt, and a pane waiting in backoff wakes immediately (with jitter) when the
+  in-flight attempt (and the attempts it starts get the same full 10s connect timeout instead
+  of a 1.2s fast one), and a pane waiting in backoff wakes immediately (with jitter) when the
   app-level bridge connection recovers.
 - Web: a terminal pane stopped by a repeated "attached elsewhere" conflict now shows a Retry
   attach button in its overlay instead of requiring a tab switch to recover.

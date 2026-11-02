@@ -64,12 +64,10 @@ import {
 } from "./terminalOutputEncoding";
 import { DEFAULT_TERMINAL_FONT_SIZE_PX } from "./terminalPrefs";
 import {
-  TERMINAL_FOREGROUND_FAST_ATTEMPTS,
   TERMINAL_FOREGROUND_SIGNAL_COALESCE_MS,
   TERMINAL_BRIDGE_BACK_JITTER_MAX_MS,
   terminalReconnectPolicy,
 } from "./terminalReconnectPolicy";
-import type { TerminalReconnectMode } from "./terminalReconnectPolicy";
 import { DEFAULT_MOBILE_TOUCH_SELECTION_ENDPOINT_TIMEOUT_MS } from "./mobileTerminalPrefs";
 import type {
   MobileLongPressBehavior,
@@ -774,7 +772,6 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
     let bridgeBackTimer: number | null = null;
     let foregroundCoalesceTimer: number | null = null;
     let reconnectAttempts = 0;
-    let foregroundFastAttemptsRemaining = 0;
     let attachConflictRetries = 0;
     let lastCloseReason: string | null = null;
     let connectionLostNotified = false;
@@ -895,7 +892,6 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
         clearConnectTimer();
         clearReconnectTimer();
         reconnectAttempts = 0;
-        foregroundFastAttemptsRemaining = 0;
         reconnectScheduledForSocket.delete(currentSocketGeneration);
         lastCloseReason = null;
         connectionLostNotified = false;
@@ -1011,11 +1007,7 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
       });
     };
 
-    const scheduleConnect = (
-      reason: ReconnectReason,
-      mode: TerminalReconnectMode,
-      immediate: boolean,
-    ) => {
+    const scheduleConnect = (reason: ReconnectReason, immediate: boolean) => {
       if (disposed || reconnectStopped) {
         return;
       }
@@ -1027,16 +1019,12 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
       }
       const policy = terminalReconnectPolicy({
         attempt: reconnectAttempts,
-        mode,
         immediate,
-        foregroundFastAttemptsRemaining,
       });
       reconnectAttempts = policy.nextAttempt;
-      foregroundFastAttemptsRemaining = policy.nextForegroundFastAttemptsRemaining;
       setConnectionState("connecting");
       debugReconnect("scheduled", {
         reason,
-        mode,
         delayMs: policy.delayMs,
         connectTimeoutMs: policy.connectTimeoutMs,
       });
@@ -1052,9 +1040,7 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
     };
 
     function scheduleReconnect(reason: ReconnectReason) {
-      const mode: TerminalReconnectMode =
-        foregroundFastAttemptsRemaining > 0 ? "foreground" : "normal";
-      scheduleConnect(reason, mode, false);
+      scheduleConnect(reason, false);
     }
 
     function scheduleSocketReconnect(reason: ReconnectReason, socketId: number) {
@@ -1101,19 +1087,17 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
         return;
       }
       if (currentSocket?.readyState === WebSocket.CONNECTING) {
-        // An in-flight attempt keeps the connect timeout its policy gave it
-        // (10s for normal attempts): a foreground signal must not shorten a
-        // slow upgrade mid-flight. The 1.2s foreground fast timeout only
-        // governs attempts the foreground path itself starts below.
+        // An in-flight attempt runs to the timeout its own policy gave it
+        // (10s): re-arming a slow upgrade mid-flight would only discard a
+        // socket that is about to open against the rising bridge.
         return;
       }
       reconnectAttempts = 0;
-      foregroundFastAttemptsRemaining = TERMINAL_FOREGROUND_FAST_ATTEMPTS;
       clearReconnectTimer();
       if (currentSocket) {
         closeActiveSocket();
       }
-      scheduleConnect(reason, "foreground", true);
+      scheduleConnect(reason, true);
     };
 
     const requestForegroundReconnect = (reason: ReconnectReason) => {
@@ -1160,7 +1144,7 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
         scheduleReconnect(reason);
         return;
       }
-      scheduleConnect(reason, "normal", reason === "initial" || reason === "manual");
+      scheduleConnect(reason, reason === "initial" || reason === "manual");
     };
 
     const handleBridgeBack = (event: Event) => {
