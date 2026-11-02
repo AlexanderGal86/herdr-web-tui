@@ -1226,6 +1226,17 @@ describe("TerminalView right-click passthrough transport", () => {
     `{"type":"right_click_passthrough","mode":"${mode}","revision":${revision}${extra}}`;
   const setFrames = (socket: { sent: string[] }) =>
     socket.sent.filter((frame) => frame.includes("set_right_click_passthrough"));
+  const contextMenuOn = (input: HTMLElement) => {
+    const event = new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+      button: 2,
+      clientX: 91,
+      clientY: 72,
+    });
+    input.dispatchEvent(event);
+    return event;
+  };
 
   async function mountPassthroughPane(overrides: Partial<ComponentProps<typeof TerminalView>> = {}) {
     const drafts = createCommandDraftStore();
@@ -1252,6 +1263,83 @@ describe("TerminalView right-click passthrough transport", () => {
     expect(renderer.mousePassthrough).toBe(false);
     expect(document.querySelector(".passthrough-exit-button")).toBeNull();
     expect(onPassthroughChange).not.toHaveBeenCalled();
+  });
+
+  it("keeps a bridge off frame in charge over the legacy opt-in at both gates", async () => {
+    const onContextMenu = vi.fn();
+    const onToggleRightClickPassthrough = vi.fn();
+    const { renderer, socket, deliver } = await mountPassthroughPane({
+      rightClickPassthrough: true,
+      onContextMenu,
+      onToggleRightClickPassthrough,
+    });
+    await deliver(passthroughFrame("off", 0));
+    await deliver('{"type":"mouse_mode","enabled":true}');
+    // Renderer gate: mouse tracking alone must not reopen forwarding the bridge turned off.
+    expect(renderer.mousePassthrough).toBe(false);
+    // Menu gate: the right click answers with the Herdr menu, not the pane app.
+    let menuEvent: MouseEvent | undefined;
+    await act(async () => {
+      menuEvent = contextMenuOn(renderer.input);
+    });
+    expect(menuEvent!.defaultPrevented).toBe(true);
+    expect(onContextMenu).toHaveBeenCalledOnce();
+    expect(document.querySelector(".passthrough-exit-button")).toBeNull();
+    expect(setFrames(socket)).toEqual([]);
+  });
+
+  it("opens forwarding when the bridge says auto despite a legacy opt-out", async () => {
+    const onContextMenu = vi.fn();
+    const { renderer, deliver } = await mountPassthroughPane({
+      rightClickPassthrough: false,
+      onContextMenu,
+    });
+    await deliver(passthroughFrame("auto", 0));
+    await deliver('{"type":"mouse_mode","enabled":true}');
+    expect(renderer.mousePassthrough).toBe(true);
+    let menuEvent: MouseEvent | undefined;
+    await act(async () => {
+      menuEvent = contextMenuOn(renderer.input);
+    });
+    // The pane app owns the right click: no Herdr menu on top of it.
+    expect(menuEvent!.defaultPrevented).toBe(true);
+    expect(onContextMenu).not.toHaveBeenCalled();
+    expect(document.querySelector(".passthrough-exit-button")).not.toBeNull();
+  });
+
+  it("keeps a bridge off sticky across reconnects until the next seed", async () => {
+    const onContextMenu = vi.fn();
+    const { renderer, socket, deliver } = await mountPassthroughPane({
+      rightClickPassthrough: true,
+      onContextMenu,
+    });
+    await deliver(passthroughFrame("off", 0));
+    await act(async () => {
+      socket.close();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    const nextSocket = FakeWebSocket.instances.at(-1)!;
+    expect(nextSocket).not.toBe(socket);
+    await act(async () => {
+      nextSocket.open();
+    });
+    // The bridge said off before the drop: mouse tracking on the new connection
+    // must not reopen forwarding through the legacy opt-in before the fresh seed.
+    await act(async () => {
+      nextSocket.dispatchEvent(new MessageEvent("message", { data: '{"type":"mouse_mode","enabled":true}' }));
+    });
+    expect(renderer.mouseCapture).toBe(true);
+    expect(renderer.mousePassthrough).toBe(false);
+    let menuEvent: MouseEvent | undefined;
+    await act(async () => {
+      menuEvent = contextMenuOn(renderer.input);
+    });
+    expect(menuEvent!.defaultPrevented).toBe(true);
+    expect(onContextMenu).toHaveBeenCalledOnce();
+    expect(document.querySelector(".passthrough-exit-button")).toBeNull();
+    expect(setFrames(nextSocket)).toEqual([]);
   });
 
   it("applies the bridge mode frame and shows the exit button while forwarding", async () => {

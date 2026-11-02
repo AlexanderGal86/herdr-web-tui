@@ -253,6 +253,11 @@ export function TerminalView({
   // Bridge-tracked right-click passthrough: null until the bridge's first
   // right_click_passthrough frame (legacy bridges never send one).
   const [bridgePassthroughMode, setBridgePassthroughMode] = useState<TerminalPassthroughMode | null>(null);
+  // Sticky between connections: the mode survives reconnects (only revisions
+  // re-arm per socket), so a bridge off stays off until the next seed. The
+  // legacy localStorage fallback below only exists for bridges that never
+  // send the frame at all — contract-C wire order sends the seed before any
+  // mouse_mode frame.
   const bridgePassthroughModeRef = useRef<TerminalPassthroughMode | null>(null);
   // Revisions are per-connection: the bridge restarts them at 0.
   const passthroughRevisionRef = useRef<number | null>(null);
