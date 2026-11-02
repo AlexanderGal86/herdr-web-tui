@@ -1365,19 +1365,34 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
     spaceReorderMode,
   ]);
 
+  // addMachine can resolve after AppContent unmounts; guards post-unmount setState.
+  const machineAddAliveRef = useRef(true);
+  useEffect(
+    () => () => {
+      machineAddAliveRef.current = false;
+    },
+    [],
+  );
+
   const submitMachineAdd = (input: MachineAddSubmit) => {
     setMachineAddBusy(true);
     setMachineAddError(null);
     bridge
       .addMachine(input)
       .then(() => {
-        setMachineAddOpen(false);
+        if (machineAddAliveRef.current) {
+          setMachineAddOpen(false);
+        }
       })
       .catch((error: unknown) => {
-        setMachineAddError(error instanceof Error ? error.message : String(error));
+        if (machineAddAliveRef.current) {
+          setMachineAddError(error instanceof Error ? error.message : String(error));
+        }
       })
       .finally(() => {
-        setMachineAddBusy(false);
+        if (machineAddAliveRef.current) {
+          setMachineAddBusy(false);
+        }
       });
   };
 
