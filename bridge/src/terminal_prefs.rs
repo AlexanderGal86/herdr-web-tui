@@ -26,6 +26,10 @@ use crate::store_util::{
 const TERMINAL_PREFS_STORE_VERSION: u32 = 1;
 /// Records not seen for 90 days are pruned on save.
 pub(crate) const TERMINAL_PREFS_MAX_AGE_SECS: u64 = 90 * 24 * 60 * 60;
+/// A successful read re-persists `last_seen` at most this often, so an
+/// actively re-attached terminal survives the 90-day prune without a write
+/// on every attach.
+pub(crate) const TERMINAL_PREFS_REFRESH_SECS: u64 = 60 * 60;
 
 pub(crate) const MODE_AUTO: &str = "auto";
 const MODE_OFF: &str = "off";
@@ -77,7 +81,8 @@ struct TerminalPrefRecord {
     machine_key: String,
     terminal_id: String,
     mode: String,
-    /// Unix seconds of the last write; drives the 90-day prune.
+    /// Unix seconds of the last successful read or write; drives the 90-day
+    /// prune. Reads only re-stamp after [`TERMINAL_PREFS_REFRESH_SECS`].
     last_seen: u64,
 }
 
@@ -109,13 +114,43 @@ impl TerminalPrefsManager {
         machine_key: &str,
         terminal_id: &str,
     ) -> Result<Option<String>, TerminalPrefsError> {
+        self.get_at(machine_key, terminal_id, crate::store_util::now_unix_secs())
+    }
+
+    /// [`Self::get`] with an injectable clock for tests. A successful read
+    /// whose persisted `last_seen` is at least
+    /// [`TERMINAL_PREFS_REFRESH_SECS`] old re-stamps and re-persists it right
+    /// away — directly, not lazily at the next `set` — so the refresh
+    /// survives a bridge restart, needs no cross-process pending state, and
+    /// costs at most one rewrite per record per hour. A refresh write
+    /// failure only warns: a preference must never block a terminal.
+    pub fn get_at(
+        &self,
+        machine_key: &str,
+        terminal_id: &str,
+        now_secs: u64,
+    ) -> Result<Option<String>, TerminalPrefsError> {
         let _lock = LockFile::exclusive(&self.prefs_lock_path)?;
-        let store = self.load_store()?;
-        Ok(store
-            .prefs
-            .into_iter()
-            .find(|record| record.matches(machine_key, terminal_id))
-            .map(|record| record.mode))
+        let mut store = self.load_store()?;
+        let mode = {
+            let Some(record) = store
+                .prefs
+                .iter_mut()
+                .find(|record| record.matches(machine_key, terminal_id))
+            else {
+                return Ok(None);
+            };
+            let mode = record.mode.clone();
+            if now_secs.saturating_sub(record.last_seen) >= TERMINAL_PREFS_REFRESH_SECS {
+                record.last_seen = now_secs;
+                store.updated_at = now_secs.to_string();
+                if let Err(err) = write_json_atomic(&self.prefs_path, &store) {
+                    warn!("failed to refresh terminal prefs last_seen: {err}");
+                }
+            }
+            mode
+        };
+        Ok(Some(mode))
     }
 
     /// Persists `mode` for (machine_key, terminal_id), stamps `last_seen`
@@ -390,6 +425,65 @@ mod tests {
     }
 
     #[test]
+    fn get_refreshes_last_seen_and_keeps_active_records_alive() {
+        let dir = test_dir("read-refresh");
+        let manager = TerminalPrefsManager::for_test(dir.clone()).unwrap();
+        let base = 2_000_000_000u64;
+        let day = 24 * 60 * 60;
+
+        // Two same-age records; only one is ever read.
+        manager.set("local", "read-term", MODE_OFF, base).unwrap();
+        manager.set("local", "unread-term", MODE_OFF, base).unwrap();
+
+        // A read 89 days later re-stamps the record on disk (its persisted
+        // stamp is more than an hour old).
+        let mode = manager
+            .get_at("local", "read-term", base + 89 * day)
+            .unwrap();
+        assert_eq!(mode.as_deref(), Some(MODE_OFF));
+        let store = read_store(&dir);
+        assert_eq!(
+            store
+                .prefs
+                .iter()
+                .find(|r| r.terminal_id == "read-term")
+                .unwrap()
+                .last_seen,
+            base + 89 * day
+        );
+        assert_eq!(
+            store
+                .prefs
+                .iter()
+                .find(|r| r.terminal_id == "unread-term")
+                .unwrap()
+                .last_seen,
+            base
+        );
+
+        // A read within the refresh window rewrites nothing.
+        manager
+            .get_at("local", "read-term", base + 89 * day + 60)
+            .unwrap();
+        let store = read_store(&dir);
+        assert_eq!(
+            store.updated_at,
+            (base + 89 * day).to_string(),
+            "a fresh-enough read must not persist again"
+        );
+
+        // A later save prunes only the never-read record: read-term survives
+        // on its refreshed stamp, unread-term (91 days old, never read) dies.
+        manager
+            .set("local", "trigger-term", MODE_AUTO, base + 91 * day)
+            .unwrap();
+        let store = read_store(&dir);
+        assert!(store.prefs.iter().any(|r| r.terminal_id == "read-term"));
+        assert!(!store.prefs.iter().any(|r| r.terminal_id == "unread-term"));
+        assert_eq!(store.prefs.len(), 2);
+    }
+
+    #[test]
     fn write_failure_is_reported_and_keeps_old_contents() {
         let dir = test_dir("write-failure");
         let manager = TerminalPrefsManager::for_test(dir.clone()).unwrap();
@@ -408,7 +502,11 @@ mod tests {
             .is_err());
         fs::remove_dir(&temp_path).unwrap();
 
-        let mode = manager.get("local", "term-1").unwrap();
+        // Within the refresh window a read must not rewrite the file, so the
+        // failed write's contents stay untouched on disk.
+        let mode = manager
+            .get_at("local", "term-1", 1_000_000_000 + 60)
+            .unwrap();
         assert_eq!(mode.as_deref(), Some(MODE_OFF));
         let store = read_store(&dir);
         assert_eq!(store.prefs.len(), 1);

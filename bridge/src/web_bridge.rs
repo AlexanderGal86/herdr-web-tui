@@ -6437,6 +6437,20 @@ mod tests {
             "second client sees revision 2, got: {second_update}"
         );
 
+        // A third client attaching after the change is seeded with the
+        // fresh mode and revision straight from the session state.
+        let mut third = connect_terminal_prefs_client(address).await;
+        let late_seed = next_terminal_prefs_text(&mut third).await;
+        assert!(
+            late_seed.contains("\"right_click_passthrough\"")
+                && late_seed.contains("\"mode\":\"auto\"")
+                && late_seed.contains("\"revision\":2"),
+            "late joiner must seed the changed mode, got: {late_seed}"
+        );
+        assert!(next_terminal_prefs_text(&mut third)
+            .await
+            .contains("\"mouse_mode\""));
+
         assert_eq!(
             prefs
                 .get("local", "term-prefs-broadcast")
