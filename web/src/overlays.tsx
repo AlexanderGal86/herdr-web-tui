@@ -285,6 +285,10 @@ export function RenameDialog({
 
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
+    // The action buttons disable while busy, but Enter still submits the form.
+    if (busy) {
+      return;
+    }
     const trimmed = value.trim();
     if (trimmed) {
       onSubmit(trimmed);

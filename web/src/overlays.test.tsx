@@ -170,6 +170,25 @@ describe("RenameDialog", () => {
     await act(async () => root.render(null));
     expect(document.activeElement).toBe(opener);
   });
+
+  it("ignores Enter-key form submits while busy", async () => {
+    const onSubmit = vi.fn();
+    const { container } = await render(
+      <RenameDialog
+        title="Rename pane"
+        initial="Build"
+        busy
+        onCancel={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+    await act(async () =>
+      requiredElement<HTMLFormElement>(container, "form.modal").dispatchEvent(
+        new Event("submit", { bubbles: true, cancelable: true }),
+      ),
+    );
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
 });
 
 describe("ConfirmDialog", () => {
