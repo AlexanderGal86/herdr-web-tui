@@ -4884,17 +4884,13 @@ async fn handle_terminal_client_message(
 }
 
 /// One serialized transaction per set: the session state lock is held
-/// across persist → revision bump → memory → broadcast → ack, so parallel
-/// sets apply to disk and memory in the same order and a persist failure
-/// leaves the in-memory state untouched (error frame only). The initiator
-/// also receives the broadcast like every other client (the frames are
-/// equivalent up to `requestId`; clients key off `revision`).
-/// One serialized transaction per set: the session state lock is held
-/// across persist → revision bump → memory → broadcast → ack, so parallel
-/// sets apply to disk and memory in the same order and a persist failure
-/// leaves the in-memory state untouched (error frame only). The initiator
-/// also receives the broadcast like every other client (the frames are
-/// equivalent up to `requestId`; clients key off `revision`).
+/// across persist → revision bump → memory → broadcast, so parallel sets
+/// apply to disk and memory in the same order and a persist failure
+/// leaves the in-memory state untouched (error frame only). The lock is
+/// released before the ack/error reply is sent: a slow client socket must
+/// never hold the transaction lock. The broadcast still precedes the ack
+/// in source order, but delivery order is not guaranteed — the frames are
+/// equivalent up to `requestId` and clients key off `revision`.
 async fn handle_set_right_click_passthrough(
     ws_sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     session: &SharedTerminalSession,
@@ -4934,6 +4930,7 @@ async fn handle_set_right_click_passthrough(
         )))
     });
     if let Err(err) = persisted {
+        // Reply outside the lock: a slow client must not hold it.
         drop(state);
         return send_right_click_error(ws_sender, request_id, &err.to_string()).await;
     }
@@ -4946,6 +4943,8 @@ async fn handle_set_right_click_passthrough(
             mode: mode.clone(),
             revision,
         });
+    // Slow-client hygiene: reply outside the lock (broadcast already sent).
+    drop(state);
     let ack = serde_json::json!({
         "type": "right_click_passthrough",
         "mode": mode,
@@ -6604,6 +6603,29 @@ mod tests {
         }
 
         assert_eq!(revision_modes.len(), (2 * rounds) as usize);
+
+        // Final agreement, checked directly rather than per round: the disk
+        // mode, the in-memory state (read back via a fresh client's seed),
+        // and the mode of the highest revision must all be the same value.
+        let expected = revision_modes
+            .get(&(2 * rounds))
+            .expect("highest revision observed")
+            .clone();
+        assert_eq!(
+            prefs
+                .get("local", "term-prefs-concurrent")
+                .expect("store read"),
+            Some(expected.clone()),
+            "final disk mode diverged from the highest revision"
+        );
+        let mut auditor = connect_terminal_prefs_client(address).await;
+        let auditor_seed = next_terminal_prefs_text(&mut auditor).await;
+        assert!(
+            auditor_seed.contains("\"right_click_passthrough\"")
+                && auditor_seed.contains(&format!("\"mode\":\"{expected}\""))
+                && auditor_seed.contains(&format!("\"revision\":{}", 2 * rounds)),
+            "final in-memory state must match disk and the highest revision, got: {auditor_seed}"
+        );
         server.abort();
         let _ = daemon.join();
         let _ = std::fs::remove_file(&api_socket_path);
