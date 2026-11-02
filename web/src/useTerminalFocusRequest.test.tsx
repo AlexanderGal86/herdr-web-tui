@@ -66,6 +66,16 @@ describe("terminal focus requests", () => {
     expect(document.activeElement).toBe(composer);
   });
 
+  it("stops scheduling retries after retry is disabled", async () => {
+    await render(1, true);
+    await render(2, false);
+    const terminal = container.querySelector("input")!;
+    await advance(20);
+    terminal.focus();
+    await advance(250);
+    expect(document.activeElement).toBe(terminal);
+  });
+
   it("cancels pending focus when a pane loses the focus request", async () => {
     await render(1, true);
     await render(0, true);
