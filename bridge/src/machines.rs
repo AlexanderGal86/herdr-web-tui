@@ -2100,9 +2100,33 @@ mod tests {
         crate::store_util::non_empty_env_path("HOME")
     }
 
-    /// Private test root under HOME (never /tmp — the validator must accept
+    /// Test root under HOME (never /tmp — the validator must accept
     /// every component of the path, and /tmp is world-writable by design).
-    fn home_test_root(name: &str) -> PathBuf {
+    /// Removes itself on drop (best-effort) so per-test scratch dirs do not
+    /// accumulate under ~/.hw-mt; derefs to its path for call sites that
+    /// expect `&Path`.
+    struct TestRoot(PathBuf);
+
+    impl std::ops::Deref for TestRoot {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<Path> for TestRoot {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn home_test_root(name: &str) -> TestRoot {
         use std::os::unix::fs::PermissionsExt as _;
         let home = test_home().expect("HOME required for machine dir tests");
         // Keep the absolute socket path well under sun_path (108 bytes).
@@ -2111,7 +2135,7 @@ mod tests {
             .join(format!("{name}-{}", crate::store_util::now_ms_string()));
         std::fs::create_dir_all(&root).unwrap();
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-        root
+        TestRoot(root)
     }
 
     fn ok_probe() -> ProbeFn {
@@ -2254,9 +2278,10 @@ mod tests {
                 Ok(())
             }
         });
+        let root = home_test_root("bp");
         let manager = Arc::new(manager_with(MachineManagerConfig {
             probe,
-            socket_dir: Some(home_test_root("bp")),
+            socket_dir: Some(root.to_path_buf()),
             ..MachineManagerConfig::default()
         }));
 
@@ -2293,9 +2318,10 @@ mod tests {
     #[test]
     fn concurrent_same_machine_requests_share_one_probe() {
         let calls = Arc::new(AtomicUsize::new(0));
+        let root = home_test_root("cs");
         let manager = Arc::new(manager_with(MachineManagerConfig {
             probe: counting_probe(Arc::clone(&calls), false),
-            socket_dir: Some(home_test_root("cs")),
+            socket_dir: Some(root.to_path_buf()),
             ..MachineManagerConfig::default()
         }));
         let endpoint = test_endpoint(&hex_id(3), "root@198.51.100.20");
@@ -2328,10 +2354,11 @@ mod tests {
     #[test]
     fn failed_probe_is_negative_cached_then_expires_after_ttl() {
         let calls = Arc::new(AtomicUsize::new(0));
+        let root = home_test_root("nc");
         let manager = manager_with(MachineManagerConfig {
             probe: counting_probe(Arc::clone(&calls), true),
             negative_cache_ttl: Duration::from_millis(60),
-            socket_dir: Some(home_test_root("nc")),
+            socket_dir: Some(root.to_path_buf()),
             ..MachineManagerConfig::default()
         });
         let endpoint = test_endpoint(&hex_id(4), "root@198.51.100.20");
@@ -2360,9 +2387,10 @@ mod tests {
     // old bridge, and the old sockets must be released safely.
     #[test]
     fn endpoint_change_for_same_id_evicts_stale_bridge_and_moves_sockets() {
+        let root = home_test_root("ec");
         let manager = manager_with(MachineManagerConfig {
             probe: ok_probe(),
-            socket_dir: Some(home_test_root("ec")),
+            socket_dir: Some(root.to_path_buf()),
             ..MachineManagerConfig::default()
         });
         let mut endpoint = test_endpoint(&hex_id(5), "root@198.51.100.20");
@@ -3084,9 +3112,10 @@ mod tests {
     #[test]
     fn option_like_or_control_char_targets_are_rejected_before_any_probe() {
         let calls = Arc::new(AtomicUsize::new(0));
+        let root = home_test_root("or");
         let manager = manager_with(MachineManagerConfig {
             probe: counting_probe(Arc::clone(&calls), false),
-            socket_dir: Some(home_test_root("or")),
+            socket_dir: Some(root.to_path_buf()),
             ..MachineManagerConfig::default()
         });
         for bad in [
