@@ -4883,10 +4883,18 @@ async fn handle_terminal_client_message(
     }
 }
 
-/// Strict persist → memory → broadcast order. A persist failure leaves the
-/// in-memory state untouched and answers the initiator with an error frame;
-/// the initiator also receives the broadcast like every other client (the
-/// frames are equivalent up to `requestId`; clients key off `revision`).
+/// One serialized transaction per set: the session state lock is held
+/// across persist → revision bump → memory → broadcast → ack, so parallel
+/// sets apply to disk and memory in the same order and a persist failure
+/// leaves the in-memory state untouched (error frame only). The initiator
+/// also receives the broadcast like every other client (the frames are
+/// equivalent up to `requestId`; clients key off `revision`).
+/// One serialized transaction per set: the session state lock is held
+/// across persist → revision bump → memory → broadcast → ack, so parallel
+/// sets apply to disk and memory in the same order and a persist failure
+/// leaves the in-memory state untouched (error frame only). The initiator
+/// also receives the broadcast like every other client (the frames are
+/// equivalent up to `requestId`; clients key off `revision`).
 async fn handle_set_right_click_passthrough(
     ws_sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     session: &SharedTerminalSession,
@@ -4903,6 +4911,10 @@ async fn handle_set_right_click_passthrough(
         )
         .await;
     }
+    // Take the session state lock before touching the disk: holding it
+    // across the blocking persist keeps the disk/memory order identical
+    // for concurrent sets and blocks joining-client seeds on the outcome.
+    let mut state = session.right_click_passthrough.lock().await;
     let prefs = Arc::clone(&target.terminal_prefs);
     let machine_key = target.machine_key.clone();
     let terminal_id = terminal_id.to_string();
@@ -4922,9 +4934,9 @@ async fn handle_set_right_click_passthrough(
         )))
     });
     if let Err(err) = persisted {
+        drop(state);
         return send_right_click_error(ws_sender, request_id, &err.to_string()).await;
     }
-    let mut state = session.right_click_passthrough.lock().await;
     state.revision += 1;
     state.mode = mode.clone();
     let revision = state.revision;
@@ -6458,6 +6470,253 @@ mod tests {
             Some("auto".to_string())
         );
 
+        server.abort();
+        let _ = daemon.join();
+        let _ = std::fs::remove_file(&api_socket_path);
+        let _ = std::fs::remove_file(&client_socket_path);
+        let _ = std::fs::remove_dir(&prefs_dir);
+    }
+
+    // Extracts (revision, mode) from a right_click_passthrough frame;
+    // None for any other frame kind (mouse_mode seed, close, ...).
+    fn passthrough_frame_revision_mode(frame: &str) -> Option<(u64, String)> {
+        let value: serde_json::Value = serde_json::from_str(frame).ok()?;
+        if value["type"] != "right_click_passthrough" {
+            return None;
+        }
+        Some((
+            value["revision"].as_u64()?,
+            value["mode"].as_str()?.to_string(),
+        ))
+    }
+
+    // Concurrent sets must apply to disk and memory in one order: the disk
+    // mode always equals the mode of the highest broadcast revision, every
+    // revision carries exactly one mode across ack and broadcast frames, and
+    // each round of two racing sets bumps the revision by exactly two.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_ws_concurrent_sets_apply_disk_and_memory_in_one_order() {
+        use futures_util::SinkExt;
+        use std::collections::HashMap;
+
+        let prefs_dir = terminal_prefs_unique_dir("concurrent-sets");
+        let prefs = TerminalPrefsManager::for_test(prefs_dir.clone()).expect("prefs manager");
+        let dir = terminal_prefs_unique_dir("sock");
+        let api_socket_path = dir.join("api.sock");
+        let client_socket_path = dir.join("client.sock");
+        let api_listener =
+            std::os::unix::net::UnixListener::bind(&api_socket_path).expect("bind api socket");
+        let client_listener = std::os::unix::net::UnixListener::bind(&client_socket_path)
+            .expect("bind client socket");
+        let daemon = spawn_terminal_prefs_fake_daemon(api_listener, client_listener);
+        let (address, server) = spawn_terminal_prefs_ws_app(
+            Arc::new(prefs.clone()),
+            api_socket_path.clone(),
+            client_socket_path.clone(),
+            "term-prefs-concurrent",
+        )
+        .await;
+
+        let mut first = connect_terminal_prefs_client(address).await;
+        assert!(next_terminal_prefs_text(&mut first)
+            .await
+            .contains("\"right_click_passthrough\""));
+        assert!(next_terminal_prefs_text(&mut first)
+            .await
+            .contains("\"mouse_mode\""));
+        let mut second = connect_terminal_prefs_client(address).await;
+        assert!(next_terminal_prefs_text(&mut second)
+            .await
+            .contains("\"right_click_passthrough\""));
+        assert!(next_terminal_prefs_text(&mut second)
+            .await
+            .contains("\"mouse_mode\""));
+
+        let rounds = 25u64;
+        let mut revision_modes: HashMap<u64, String> = HashMap::new();
+        for round in 1..=rounds {
+            let (left_mode, right_mode) = if round % 2 == 1 {
+                ("off", "auto")
+            } else {
+                ("auto", "off")
+            };
+            for (client, mode, request_id) in [
+                (&mut first, left_mode, 2 * round - 1),
+                (&mut second, right_mode, 2 * round),
+            ] {
+                client
+                    .send(tokio_tungstenite::tungstenite::Message::text(
+                        serde_json::json!({
+                            "type": "set_right_click_passthrough",
+                            "mode": mode,
+                            "requestId": request_id,
+                        })
+                        .to_string(),
+                    ))
+                    .await
+                    .expect("send concurrent set request");
+            }
+
+            // Drain both clients until each saw both revisions of this round.
+            for client in [&mut first, &mut second] {
+                let mut seen: Vec<u64> = Vec::new();
+                while !(seen.contains(&(2 * round - 1)) && seen.contains(&(2 * round))) {
+                    let frame = next_terminal_prefs_text(client).await;
+                    assert!(
+                        !frame.contains("right_click_passthrough_error"),
+                        "unexpected error frame: {frame}"
+                    );
+                    let Some((revision, mode)) = passthrough_frame_revision_mode(&frame) else {
+                        continue;
+                    };
+                    assert!(
+                        revision <= 2 * round,
+                        "revision jumped ahead of the round: {frame}"
+                    );
+                    match revision_modes.get(&revision) {
+                        Some(previous) => {
+                            assert_eq!(previous, &mode, "revision {revision} carried two modes")
+                        }
+                        None => {
+                            revision_modes.insert(revision, mode);
+                        }
+                    }
+                    if !seen.contains(&revision) {
+                        seen.push(revision);
+                    }
+                }
+            }
+
+            // Disk must agree with the newest revision after every round.
+            let expected = revision_modes
+                .get(&(2 * round))
+                .expect("highest round revision observed")
+                .clone();
+            assert_eq!(
+                prefs
+                    .get("local", "term-prefs-concurrent")
+                    .expect("store read"),
+                Some(expected),
+                "disk mode diverged from revision {} after round {round}",
+                2 * round
+            );
+        }
+
+        assert_eq!(revision_modes.len(), (2 * rounds) as usize);
+        server.abort();
+        let _ = daemon.join();
+        let _ = std::fs::remove_file(&api_socket_path);
+        let _ = std::fs::remove_file(&client_socket_path);
+        let _ = std::fs::remove_dir(&prefs_dir);
+    }
+
+    // A client attaching while a set is parked inside its persist must queue
+    // on the session state lock and be seeded with the committed state, then
+    // still receive the buffered broadcast - no lost frames, no stale mode.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_ws_attach_during_blocked_set_sees_consistent_state() {
+        use futures_util::SinkExt;
+
+        let prefs_dir = terminal_prefs_unique_dir("overlap");
+        let prefs = TerminalPrefsManager::for_test(prefs_dir.clone()).expect("prefs manager");
+        prefs
+            .set("local", "term-prefs-overlap", "auto", 1_000_000_000)
+            .expect("initial stored mode");
+        let dir = terminal_prefs_unique_dir("sock");
+        let api_socket_path = dir.join("api.sock");
+        let client_socket_path = dir.join("client.sock");
+        let api_listener =
+            std::os::unix::net::UnixListener::bind(&api_socket_path).expect("bind api socket");
+        let client_listener = std::os::unix::net::UnixListener::bind(&client_socket_path)
+            .expect("bind client socket");
+        let daemon = spawn_terminal_prefs_fake_daemon(api_listener, client_listener);
+        let (address, server) = spawn_terminal_prefs_ws_app(
+            Arc::new(prefs.clone()),
+            api_socket_path.clone(),
+            client_socket_path.clone(),
+            "term-prefs-overlap",
+        )
+        .await;
+
+        let mut initiator = connect_terminal_prefs_client(address).await;
+        let seed = next_terminal_prefs_text(&mut initiator).await;
+        assert!(
+            seed.contains("\"mode\":\"auto\"") && seed.contains("\"revision\":0"),
+            "initial seed, got: {seed}"
+        );
+        assert!(next_terminal_prefs_text(&mut initiator)
+            .await
+            .contains("\"mouse_mode\""));
+
+        // Hold the store file lock so the next set parks inside its persist
+        // while already holding the session state lock.
+        let blocker =
+            crate::store_util::LockFile::exclusive(&prefs_dir.join("terminal-prefs.lock"))
+                .expect("hold store lock");
+        initiator
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                serde_json::json!({
+                    "type": "set_right_click_passthrough",
+                    "mode": "off",
+                    "requestId": 42,
+                })
+                .to_string(),
+            ))
+            .await
+            .expect("send set request");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        // Attach mid-transaction: the seed read queues on the state lock.
+        let mut late = connect_terminal_prefs_client(address).await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        drop(blocker);
+
+        // Initiator gets its ack for revision 1 without any error frame.
+        let mut acked = false;
+        while !acked {
+            let frame = next_terminal_prefs_text(&mut initiator).await;
+            assert!(
+                !frame.contains("right_click_passthrough_error"),
+                "unexpected error frame: {frame}"
+            );
+            if frame.contains("\"requestId\":42") {
+                assert!(
+                    frame.contains("\"mode\":\"off\"") && frame.contains("\"revision\":1"),
+                    "initiator ack, got: {frame}"
+                );
+                acked = true;
+            }
+        }
+
+        // The late client is seeded with the already-committed state, gets
+        // the mouse seed, then the buffered broadcast of the same revision.
+        let late_seed = next_terminal_prefs_text(&mut late).await;
+        assert!(
+            late_seed.contains("\"right_click_passthrough\"")
+                && late_seed.contains("\"mode\":\"off\"")
+                && late_seed.contains("\"revision\":1"),
+            "late joiner must seed the committed mode, got: {late_seed}"
+        );
+        assert!(next_terminal_prefs_text(&mut late)
+            .await
+            .contains("\"mouse_mode\""));
+        let late_broadcast = next_terminal_prefs_text(&mut late).await;
+        assert!(
+            late_broadcast.contains("\"mode\":\"off\"")
+                && late_broadcast.contains("\"revision\":1")
+                && !late_broadcast.contains("requestId"),
+            "late joiner must still receive the broadcast, got: {late_broadcast}"
+        );
+        assert_no_terminal_prefs_text(&mut late).await;
+
+        assert_eq!(
+            prefs
+                .get("local", "term-prefs-overlap")
+                .expect("store read"),
+            Some("off".to_string())
+        );
         server.abort();
         let _ = daemon.join();
         let _ = std::fs::remove_file(&api_socket_path);
