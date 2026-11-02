@@ -59,6 +59,7 @@ use crate::notes::{
     AttachNoteRequest, CreateNoteRequest, NoteResponse, NotesError, NotesListQuery,
     NotesListResponse, NotesManager, RevisionRequest, UpdateNoteRequest,
 };
+use crate::terminal_prefs::{is_valid_mode, TerminalPrefsManager, MODE_AUTO};
 use crate::websocket_heartbeat::{WebSocketHeartbeat, WebSocketHeartbeatAction};
 use crate::workspace_zones::{WorkspaceZonesError, WorkspaceZonesManager, WorkspaceZonesResponse};
 
@@ -119,6 +120,7 @@ struct BridgeState {
     selected_pane_id: Arc<Mutex<Option<String>>>,
     agent_activity: Arc<AgentActivityManager>,
     agent_pins: Arc<AgentPinsManager>,
+    terminal_prefs: Arc<TerminalPrefsManager>,
     workspace_zones: Arc<WorkspaceZonesManager>,
     machines: Arc<crate::machines::MachineManager>,
     launcher_presets: Arc<LauncherPresetStore>,
@@ -265,6 +267,13 @@ enum TerminalClientFrame {
         #[serde(default = "default_scroll_lines")]
         lines: u16,
     },
+    /// Browser-side preference frame; handled by the socket loop before
+    /// daemon-bound dispatch, so it never reaches `dispatch_terminal_frame`.
+    SetRightClickPassthrough {
+        mode: String,
+        #[serde(rename = "requestId")]
+        request_id: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -303,6 +312,12 @@ enum TerminalOutput {
     Close(String),
     /// Daemon-reported pane mouse state (`ServerMessage::MouseCapture`).
     MouseCapture(bool),
+    /// Bridge-stored right-click passthrough preference change for the
+    /// pane, fanned out to every attached client.
+    RightClickPassthrough {
+        mode: String,
+        revision: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -719,6 +734,16 @@ struct SharedTerminalSession {
     /// Latest daemon-reported mouse state, so a joining client learns the
     /// current flag even when the last MouseCapture broadcast predates it.
     mouse_capture: Arc<AtomicBool>,
+    /// Bridge-side "Send right-clicks to the pane" state (mode + monotonic
+    /// revision). A tokio Mutex because a set persists to disk (blocking IO)
+    /// while holding it, which serializes concurrent sets end to end.
+    right_click_passthrough: Arc<tokio::sync::Mutex<RightClickPassthroughState>>,
+}
+
+#[derive(Debug, Clone)]
+struct RightClickPassthroughState {
+    mode: String,
+    revision: u64,
 }
 
 /// Sender for daemon-bound terminal messages that bounds how many input
@@ -1138,6 +1163,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         selected_pane_id: Arc::new(Mutex::new(None)),
         agent_activity,
         agent_pins,
+        terminal_prefs: Arc::new(TerminalPrefsManager::new()?),
         workspace_zones,
         machines: Arc::new(crate::machines::MachineManager::new()?),
         launcher_presets,
@@ -3997,6 +4023,10 @@ struct MachineRouteTarget {
     client_socket_path: PathBuf,
     terminal_sessions: Arc<Mutex<TerminalSessions>>,
     selected_pane_id: Arc<Mutex<Option<String>>>,
+    terminal_prefs: Arc<TerminalPrefsManager>,
+    /// Namespace for per-terminal preferences: "local" or the saved SSH
+    /// machine id (terminal ids are only unique within one daemon).
+    machine_key: String,
 }
 
 impl BridgeState {
@@ -4006,6 +4036,8 @@ impl BridgeState {
             client_socket_path: self.client_socket_path.clone(),
             terminal_sessions: Arc::clone(&self.terminal_sessions),
             selected_pane_id: Arc::clone(&self.selected_pane_id),
+            terminal_prefs: Arc::clone(&self.terminal_prefs),
+            machine_key: "local".to_string(),
         }
     }
 
@@ -4034,6 +4066,8 @@ impl BridgeState {
                         client_socket_path: state.client_socket_path.clone(),
                         terminal_sessions: Arc::clone(&state.terminal_sessions),
                         selected_pane_id: Arc::clone(&state.selected_pane_id),
+                        terminal_prefs: Arc::clone(&self.terminal_prefs),
+                        machine_key: machine_id.to_string(),
                     },
                     false,
                 ))
@@ -4549,6 +4583,28 @@ async fn handle_terminal_socket(
             return;
         }
     }
+    // Seed the joining client with the persisted right-click passthrough
+    // preference before the mouse_mode seed, so the client renders the
+    // correct context-menu behavior from the very first frame.
+    let passthrough_seed = {
+        let state = session.right_click_passthrough.lock().await;
+        serde_json::json!({
+            "type": "right_click_passthrough",
+            "mode": state.mode,
+            "revision": state.revision,
+        })
+    };
+    if send_websocket_message(
+        &mut ws_sender,
+        Message::Text(passthrough_seed.to_string().into()),
+        "terminal",
+    )
+    .await
+    .is_err()
+    {
+        release_terminal_session(&target.terminal_sessions, &terminal_id, &session);
+        return;
+    }
     // Seed the joining client with the latest known pane mouse state; the
     // daemon only rebroadcasts MouseCapture on focus changes, so a client
     // attaching to an already-captured pane would otherwise stay un-gated
@@ -4607,7 +4663,16 @@ async fn handle_terminal_socket(
                 }
                 Some(message) = ws_receiver.next() => {
                     record_websocket_peer_activity(&mut heartbeat, &message);
-                    if !handle_terminal_client_message(&write_tx, message) {
+                    if !handle_terminal_client_message(
+                        &write_tx,
+                        message,
+                        &mut ws_sender,
+                        &session,
+                        &target,
+                        &terminal_id,
+                    )
+                    .await
+                    {
                         break;
                     }
                 }
@@ -4654,7 +4719,16 @@ async fn handle_terminal_socket(
                 }
                 Some(message) = ws_receiver.next() => {
                     record_websocket_peer_activity(&mut heartbeat, &message);
-                    if !handle_terminal_client_message(&write_tx, message) {
+                    if !handle_terminal_client_message(
+                        &write_tx,
+                        message,
+                        &mut ws_sender,
+                        &session,
+                        &target,
+                        &terminal_id,
+                    )
+                    .await
+                    {
                         break;
                     }
                 }
@@ -4752,6 +4826,20 @@ async fn handle_terminal_output_message(
             .await;
             true
         }
+        Ok(TerminalOutput::RightClickPassthrough { mode, revision }) => {
+            let payload = serde_json::json!({
+                "type": "right_click_passthrough",
+                "mode": mode,
+                "revision": revision,
+            });
+            let _ = send_websocket_message(
+                ws_sender,
+                Message::Text(payload.to_string().into()),
+                "terminal",
+            )
+            .await;
+            true
+        }
         Err(tokio::sync::broadcast::error::RecvError::Lagged(frames)) => {
             // Dropped frames would silently corrupt the stateful ANSI stream.
             // Close the socket without a "closed" frame so the client
@@ -4764,17 +4852,116 @@ async fn handle_terminal_output_message(
     }
 }
 
-fn handle_terminal_client_message(
+async fn handle_terminal_client_message(
     write_tx: &TerminalWriter,
     message: Result<Message, axum::Error>,
+    ws_sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    session: &SharedTerminalSession,
+    target: &MachineRouteTarget,
+    terminal_id: &str,
 ) -> bool {
     match message {
-        Ok(Message::Text(text)) => handle_terminal_text_frame(write_tx, text.as_str()).is_ok(),
+        Ok(Message::Text(text)) => match parse_terminal_client_frame(text.as_str()) {
+            Ok(TerminalClientFrame::SetRightClickPassthrough { mode, request_id }) => {
+                handle_set_right_click_passthrough(
+                    ws_sender,
+                    session,
+                    target,
+                    terminal_id,
+                    mode,
+                    request_id,
+                )
+                .await
+            }
+            Ok(frame) => dispatch_terminal_frame(write_tx, frame).is_ok(),
+            Err(_) => false,
+        },
         Ok(Message::Binary(bytes)) => send_terminal_input_chunks(write_tx, &bytes).is_ok(),
         Ok(Message::Close(_)) => false,
         Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => true,
         Err(_) => false,
     }
+}
+
+/// Strict persist → memory → broadcast order. A persist failure leaves the
+/// in-memory state untouched and answers the initiator with an error frame;
+/// the initiator also receives the broadcast like every other client (the
+/// frames are equivalent up to `requestId`; clients key off `revision`).
+async fn handle_set_right_click_passthrough(
+    ws_sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    session: &SharedTerminalSession,
+    target: &MachineRouteTarget,
+    terminal_id: &str,
+    mode: String,
+    request_id: u64,
+) -> bool {
+    if !is_valid_mode(&mode) {
+        return send_right_click_error(
+            ws_sender,
+            request_id,
+            &format!("unsupported right-click passthrough mode: {mode}"),
+        )
+        .await;
+    }
+    let prefs = Arc::clone(&target.terminal_prefs);
+    let machine_key = target.machine_key.clone();
+    let terminal_id = terminal_id.to_string();
+    let stored_mode = mode.clone();
+    let persisted = tokio::task::spawn_blocking(move || {
+        prefs.set(
+            &machine_key,
+            &terminal_id,
+            &stored_mode,
+            crate::store_util::now_unix_secs(),
+        )
+    })
+    .await
+    .unwrap_or_else(|join_err| {
+        Err(crate::terminal_prefs::TerminalPrefsError::Store(format!(
+            "terminal prefs task failed: {join_err}"
+        )))
+    });
+    if let Err(err) = persisted {
+        return send_right_click_error(ws_sender, request_id, &err.to_string()).await;
+    }
+    let mut state = session.right_click_passthrough.lock().await;
+    state.revision += 1;
+    state.mode = mode.clone();
+    let revision = state.revision;
+    let _ = session
+        .output_tx
+        .send(TerminalOutput::RightClickPassthrough {
+            mode: mode.clone(),
+            revision,
+        });
+    let ack = serde_json::json!({
+        "type": "right_click_passthrough",
+        "mode": mode,
+        "revision": revision,
+        "requestId": request_id,
+    });
+    send_websocket_message(ws_sender, Message::Text(ack.to_string().into()), "terminal")
+        .await
+        .is_ok()
+}
+
+async fn send_right_click_error(
+    ws_sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    request_id: u64,
+    error: &str,
+) -> bool {
+    let payload = serde_json::json!({
+        "type": "right_click_passthrough_error",
+        "requestId": request_id,
+        "error": error,
+    });
+    send_websocket_message(
+        ws_sender,
+        Message::Text(payload.to_string().into()),
+        "terminal",
+    )
+    .await
+    .is_ok()
 }
 
 /// Receiver reserved before a daemon reader starts (fresh attach) or created
@@ -4905,6 +5092,14 @@ async fn acquire_terminal_session(
                         protocol_version,
                         output_tx.clone(),
                     )?;
+                    // A read failure or a corrupt store falls back to the
+                    // default mode; a preference must never block a terminal.
+                    let stored_mode = target
+                        .terminal_prefs
+                        .get(&target.machine_key, &terminal_id)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| MODE_AUTO.to_string());
                     Ok((
                         SharedTerminalSession {
                             write_tx: attach.write_tx,
@@ -4912,6 +5107,12 @@ async fn acquire_terminal_session(
                             client_count: Arc::new(AtomicUsize::new(0)),
                             connection_closed: attach.connection_closed,
                             mouse_capture: Arc::new(AtomicBool::new(false)),
+                            right_click_passthrough: Arc::new(tokio::sync::Mutex::new(
+                                RightClickPassthroughState {
+                                    mode: stored_mode,
+                                    revision: 0,
+                                },
+                            )),
                         },
                         first_rx,
                     ))
@@ -5472,9 +5673,19 @@ fn send_terminal_input_chunks(
     Ok(stats)
 }
 
+#[cfg(test)]
 fn handle_terminal_text_frame(write_tx: &TerminalWriter, text: &str) -> Result<(), String> {
-    let frame = parse_terminal_client_frame(text)?;
+    dispatch_terminal_frame(write_tx, parse_terminal_client_frame(text)?)
+}
+
+fn dispatch_terminal_frame(
+    write_tx: &TerminalWriter,
+    frame: TerminalClientFrame,
+) -> Result<(), String> {
     match frame {
+        TerminalClientFrame::SetRightClickPassthrough { .. } => {
+            Err("right-click passthrough frames require an attached terminal session".to_string())
+        }
         TerminalClientFrame::Input { data } => {
             send_terminal_input_chunks(write_tx, data.as_bytes())?;
             Ok(())
@@ -5846,6 +6057,8 @@ mod tests {
             client_socket_path: PathBuf::from("/nonexistent-herdr-client.sock"),
             terminal_sessions: Arc::new(Mutex::new(TerminalSessions::default())),
             selected_pane_id: Arc::new(Mutex::new(None)),
+            terminal_prefs: Arc::new(TerminalPrefsManager::new().unwrap()),
+            machine_key: "local".to_string(),
         };
         async fn upgrade(
             ws: WebSocketUpgrade,
@@ -5891,6 +6104,541 @@ mod tests {
         };
         assert!(text.contains("\"closed\""), "unexpected frame: {text}");
         let _ = client.close(None).await;
+    }
+
+    // Fake Herdr daemon for right-click-passthrough transport tests: the
+    // API socket answers every request with a protocol-compatible pong, and
+    // the client socket completes one TerminalHello→Welcome→AttachTerminal
+    // handshake, then drains until the bridge disconnects.
+    #[cfg(unix)]
+    fn spawn_terminal_prefs_fake_daemon(
+        api_listener: std::os::unix::net::UnixListener,
+        client_listener: std::os::unix::net::UnixListener,
+    ) -> thread::JoinHandle<()> {
+        use std::io::{BufRead, BufReader, Write};
+        thread::spawn(move || {
+            let client = thread::spawn(move || {
+                let (mut sock, _) = client_listener
+                    .accept()
+                    .expect("bridge connects to fake daemon client socket");
+                sock.set_read_timeout(Some(Duration::from_secs(30)))
+                    .expect("set client socket read timeout");
+                let hello: ClientMessage =
+                    protocol::read_message(&mut sock, MAX_FRAME_SIZE).expect("read hello");
+                assert!(matches!(hello, ClientMessage::TerminalHello { .. }));
+                protocol::write_message(
+                    &mut sock,
+                    &ServerMessage::Welcome {
+                        version: PROTOCOL_VERSION,
+                        encoding: RenderEncoding::TerminalAnsi,
+                        error: None,
+                    },
+                )
+                .unwrap();
+                let attach: ClientMessage =
+                    protocol::read_message(&mut sock, MAX_FRAME_SIZE).unwrap();
+                assert!(matches!(attach, ClientMessage::AttachTerminal { .. }));
+                while protocol::read_message::<_, ClientMessage>(&mut sock, MAX_FRAME_SIZE).is_ok()
+                {
+                }
+            });
+            let api = thread::spawn(move || {
+                let Ok((mut socket, _)) = api_listener.accept() else {
+                    return;
+                };
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(30)))
+                    .unwrap();
+                let mut reader = BufReader::new(socket.try_clone().unwrap());
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                    let request: serde_json::Value = match serde_json::from_str(&line) {
+                        Ok(request) => request,
+                        Err(_) => break,
+                    };
+                    let _ = writeln!(
+                        socket,
+                        "{}",
+                        serde_json::json!({
+                            "id": request["id"],
+                            "result": {
+                                "type": "pong",
+                                "version": "0.9.0",
+                                "protocol": PROTOCOL_VERSION,
+                            }
+                        })
+                    );
+                    line.clear();
+                }
+            });
+            let _ = client.join();
+            let _ = api.join();
+        })
+    }
+
+    type TerminalPrefsTestWs = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    async fn next_terminal_prefs_text(ws: &mut TerminalPrefsTestWs) -> String {
+        let frame = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("frame within timeout")
+            .expect("socket stays open")
+            .expect("ws read ok");
+        match frame {
+            tokio_tungstenite::tungstenite::Message::Text(text) => text.to_string(),
+            other => panic!("expected a text frame, got {other:?}"),
+        }
+    }
+
+    async fn assert_no_terminal_prefs_text(ws: &mut TerminalPrefsTestWs) {
+        if let Ok(event) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await {
+            match event {
+                Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
+                    panic!("unexpected frame: {text}")
+                }
+                other => panic!("unexpected ws event: {other:?}"),
+            }
+        }
+    }
+
+    fn terminal_prefs_unique_dir(prefix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-web-terminal-prefs-ws-{prefix}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after epoch")
+                .as_nanos(),
+        ));
+        std::fs::create_dir_all(&dir).expect("create terminal prefs test dir");
+        dir
+    }
+
+    #[derive(Clone)]
+    struct TerminalPrefsWsTestState {
+        target: MachineRouteTarget,
+        terminal_id: String,
+    }
+
+    // Serves /ws upgrading to handle_terminal_socket with the given prefs
+    // manager and fake-daemon sockets.
+    #[cfg(unix)]
+    async fn spawn_terminal_prefs_ws_app(
+        prefs: Arc<TerminalPrefsManager>,
+        api_socket_path: PathBuf,
+        client_socket_path: PathBuf,
+        terminal_id: &str,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let state = TerminalPrefsWsTestState {
+            target: MachineRouteTarget {
+                api: ApiClient::for_socket_path(api_socket_path),
+                client_socket_path,
+                terminal_sessions: Arc::new(Mutex::new(TerminalSessions::default())),
+                selected_pane_id: Arc::new(Mutex::new(None)),
+                terminal_prefs: prefs,
+                machine_key: "local".to_string(),
+            },
+            terminal_id: terminal_id.to_string(),
+        };
+        async fn upgrade(
+            ws: WebSocketUpgrade,
+            State(state): State<TerminalPrefsWsTestState>,
+        ) -> Response {
+            let terminal_id = state.terminal_id.clone();
+            ws.on_upgrade(move |socket| {
+                handle_terminal_socket(
+                    socket,
+                    TerminalQuery {
+                        terminal_id,
+                        cols: None,
+                        rows: None,
+                        coalesce_ms: None,
+                        output_encoding: None,
+                        takeover: false,
+                    },
+                    state.target,
+                )
+            })
+            .into_response()
+        }
+        let app = Router::new().route("/ws", get(upgrade)).with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let address = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("ws app serves");
+        });
+        (address, server)
+    }
+
+    #[cfg(unix)]
+    async fn connect_terminal_prefs_client(address: std::net::SocketAddr) -> TerminalPrefsTestWs {
+        let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{address}/ws"))
+            .await
+            .expect("connect ws client");
+        ws
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_ws_seeds_passthrough_before_mouse_mode_and_reads_stored_mode() {
+        let prefs_dir = terminal_prefs_unique_dir("seed");
+        let prefs = TerminalPrefsManager::for_test(prefs_dir.clone()).expect("prefs manager");
+        prefs
+            .set("local", "term-prefs-seed", "off", 1_000_000_000)
+            .expect("seed stored mode");
+        let dir = terminal_prefs_unique_dir("sock");
+        let api_socket_path = dir.join("api.sock");
+        let client_socket_path = dir.join("client.sock");
+        let api_listener =
+            std::os::unix::net::UnixListener::bind(&api_socket_path).expect("bind api socket");
+        let client_listener = std::os::unix::net::UnixListener::bind(&client_socket_path)
+            .expect("bind client socket");
+        let daemon = spawn_terminal_prefs_fake_daemon(api_listener, client_listener);
+        let (address, server) = spawn_terminal_prefs_ws_app(
+            Arc::new(prefs),
+            api_socket_path.clone(),
+            client_socket_path.clone(),
+            "term-prefs-seed",
+        )
+        .await;
+
+        let mut client = connect_terminal_prefs_client(address).await;
+        let seed = next_terminal_prefs_text(&mut client).await;
+        assert!(
+            seed.contains("\"right_click_passthrough\"")
+                && seed.contains("\"mode\":\"off\"")
+                && seed.contains("\"revision\":0"),
+            "passthrough seed must arrive first with stored mode, got: {seed}"
+        );
+        let mouse = next_terminal_prefs_text(&mut client).await;
+        assert!(
+            mouse.contains("\"mouse_mode\""),
+            "mouse_mode seed follows the passthrough seed, got: {mouse}"
+        );
+
+        server.abort();
+        let _ = daemon.join();
+        let _ = std::fs::remove_file(&api_socket_path);
+        let _ = std::fs::remove_file(&client_socket_path);
+        let _ = std::fs::remove_dir(&prefs_dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_ws_set_passthrough_broadcasts_to_all_clients_and_grows_revision() {
+        let prefs_dir = terminal_prefs_unique_dir("broadcast");
+        let prefs = TerminalPrefsManager::for_test(prefs_dir.clone()).expect("prefs manager");
+        let dir = terminal_prefs_unique_dir("sock");
+        let api_socket_path = dir.join("api.sock");
+        let client_socket_path = dir.join("client.sock");
+        let api_listener =
+            std::os::unix::net::UnixListener::bind(&api_socket_path).expect("bind api socket");
+        let client_listener = std::os::unix::net::UnixListener::bind(&client_socket_path)
+            .expect("bind client socket");
+        let daemon = spawn_terminal_prefs_fake_daemon(api_listener, client_listener);
+        let (address, server) = spawn_terminal_prefs_ws_app(
+            Arc::new(prefs.clone()),
+            api_socket_path.clone(),
+            client_socket_path.clone(),
+            "term-prefs-broadcast",
+        )
+        .await;
+
+        let mut first = connect_terminal_prefs_client(address).await;
+        let seed = next_terminal_prefs_text(&mut first).await;
+        assert!(seed.contains("\"right_click_passthrough\""), "seed first");
+        assert!(next_terminal_prefs_text(&mut first)
+            .await
+            .contains("\"mouse_mode\""));
+
+        // Second client joins the now-active session without a daemon handshake.
+        let mut second = connect_terminal_prefs_client(address).await;
+        assert!(next_terminal_prefs_text(&mut second)
+            .await
+            .contains("\"right_click_passthrough\""));
+        assert!(next_terminal_prefs_text(&mut second)
+            .await
+            .contains("\"mouse_mode\""));
+
+        use futures_util::SinkExt;
+        first
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                serde_json::json!({
+                    "type": "set_right_click_passthrough",
+                    "mode": "off",
+                    "requestId": 7,
+                })
+                .to_string(),
+            ))
+            .await
+            .expect("send set request");
+
+        // Initiator sees its ack (and possibly the broadcast copy) with the new
+        // revision; the other client only sees the broadcast.
+        let mut first_revisions = Vec::new();
+        while first_revisions.len() < 2 {
+            let frame = next_terminal_prefs_text(&mut first).await;
+            if frame.contains("\"right_click_passthrough_error\"") {
+                panic!("unexpected error frame: {frame}");
+            }
+            if frame.contains("\"mode\":\"off\"") {
+                assert!(
+                    frame.contains("\"revision\":1"),
+                    "off revision, got: {frame}"
+                );
+                if frame.contains("\"requestId\":7") {
+                    first_revisions.push("ack");
+                } else {
+                    first_revisions.push("broadcast");
+                }
+            }
+        }
+        let broadcast = next_terminal_prefs_text(&mut second).await;
+        assert!(
+            broadcast.contains("\"right_click_passthrough\"")
+                && broadcast.contains("\"mode\":\"off\"")
+                && broadcast.contains("\"revision\":1")
+                && !broadcast.contains("requestId"),
+            "second client sees broadcast without requestId, got: {broadcast}"
+        );
+
+        first
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                serde_json::json!({
+                    "type": "set_right_click_passthrough",
+                    "mode": "auto",
+                    "requestId": 8,
+                })
+                .to_string(),
+            ))
+            .await
+            .expect("send second set request");
+        while !first_revisions.is_empty() {
+            first_revisions.pop();
+        }
+        let mut acks = 0;
+        while acks < 1 {
+            let frame = next_terminal_prefs_text(&mut first).await;
+            if frame.contains("\"mode\":\"auto\"") && frame.contains("\"requestId\":8") {
+                assert!(
+                    frame.contains("\"revision\":2"),
+                    "auto revision, got: {frame}"
+                );
+                acks += 1;
+            }
+        }
+        let second_update = next_terminal_prefs_text(&mut second).await;
+        assert!(
+            second_update.contains("\"mode\":\"auto\"") && second_update.contains("\"revision\":2"),
+            "second client sees revision 2, got: {second_update}"
+        );
+
+        // A third client attaching after the change is seeded with the
+        // fresh mode and revision straight from the session state.
+        let mut third = connect_terminal_prefs_client(address).await;
+        let late_seed = next_terminal_prefs_text(&mut third).await;
+        assert!(
+            late_seed.contains("\"right_click_passthrough\"")
+                && late_seed.contains("\"mode\":\"auto\"")
+                && late_seed.contains("\"revision\":2"),
+            "late joiner must seed the changed mode, got: {late_seed}"
+        );
+        assert!(next_terminal_prefs_text(&mut third)
+            .await
+            .contains("\"mouse_mode\""));
+
+        assert_eq!(
+            prefs
+                .get("local", "term-prefs-broadcast")
+                .expect("store read"),
+            Some("auto".to_string())
+        );
+
+        server.abort();
+        let _ = daemon.join();
+        let _ = std::fs::remove_file(&api_socket_path);
+        let _ = std::fs::remove_file(&client_socket_path);
+        let _ = std::fs::remove_dir(&prefs_dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_ws_rejects_invalid_passthrough_mode_without_broadcast() {
+        let prefs_dir = terminal_prefs_unique_dir("invalid");
+        let prefs = TerminalPrefsManager::for_test(prefs_dir.clone()).expect("prefs manager");
+        let dir = terminal_prefs_unique_dir("sock");
+        let api_socket_path = dir.join("api.sock");
+        let client_socket_path = dir.join("client.sock");
+        let api_listener =
+            std::os::unix::net::UnixListener::bind(&api_socket_path).expect("bind api socket");
+        let client_listener = std::os::unix::net::UnixListener::bind(&client_socket_path)
+            .expect("bind client socket");
+        let daemon = spawn_terminal_prefs_fake_daemon(api_listener, client_listener);
+        let (address, server) = spawn_terminal_prefs_ws_app(
+            Arc::new(prefs.clone()),
+            api_socket_path.clone(),
+            client_socket_path.clone(),
+            "term-prefs-invalid",
+        )
+        .await;
+
+        let mut first = connect_terminal_prefs_client(address).await;
+        assert!(next_terminal_prefs_text(&mut first)
+            .await
+            .contains("\"right_click_passthrough\""));
+        assert!(next_terminal_prefs_text(&mut first)
+            .await
+            .contains("\"mouse_mode\""));
+        let mut second = connect_terminal_prefs_client(address).await;
+        assert!(next_terminal_prefs_text(&mut second)
+            .await
+            .contains("\"right_click_passthrough\""));
+        assert!(next_terminal_prefs_text(&mut second)
+            .await
+            .contains("\"mouse_mode\""));
+
+        use futures_util::SinkExt;
+        first
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                serde_json::json!({
+                    "type": "set_right_click_passthrough",
+                    "mode": "bogus",
+                    "requestId": 9,
+                })
+                .to_string(),
+            ))
+            .await
+            .expect("send invalid set request");
+
+        let error = next_terminal_prefs_text(&mut first).await;
+        assert!(
+            error.contains("\"right_click_passthrough_error\"")
+                && error.contains("\"requestId\":9"),
+            "initiator gets the error frame, got: {error}"
+        );
+        assert_no_terminal_prefs_text(&mut second).await;
+
+        // The connection stays alive and the revision was not consumed.
+        first
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                serde_json::json!({
+                    "type": "set_right_click_passthrough",
+                    "mode": "off",
+                    "requestId": 10,
+                })
+                .to_string(),
+            ))
+            .await
+            .expect("send valid set request");
+        let ack = next_terminal_prefs_text(&mut first).await;
+        assert!(
+            ack.contains("\"mode\":\"off\"") && ack.contains("\"revision\":1"),
+            "next successful set uses revision 1, got: {ack}"
+        );
+        assert!(prefs
+            .get("local", "term-prefs-invalid")
+            .expect("store read")
+            .is_some());
+
+        server.abort();
+        let _ = daemon.join();
+        let _ = std::fs::remove_file(&api_socket_path);
+        let _ = std::fs::remove_file(&client_socket_path);
+        let _ = std::fs::remove_dir(&prefs_dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_ws_store_failure_reports_error_and_keeps_memory_unchanged() {
+        let prefs_dir = terminal_prefs_unique_dir("storefail");
+        let prefs = TerminalPrefsManager::for_test(prefs_dir.clone()).expect("prefs manager");
+        let dir = terminal_prefs_unique_dir("sock");
+        let api_socket_path = dir.join("api.sock");
+        let client_socket_path = dir.join("client.sock");
+        let api_listener =
+            std::os::unix::net::UnixListener::bind(&api_socket_path).expect("bind api socket");
+        let client_listener = std::os::unix::net::UnixListener::bind(&client_socket_path)
+            .expect("bind client socket");
+        let daemon = spawn_terminal_prefs_fake_daemon(api_listener, client_listener);
+        let (address, server) = spawn_terminal_prefs_ws_app(
+            Arc::new(prefs),
+            api_socket_path.clone(),
+            client_socket_path.clone(),
+            "term-prefs-storefail",
+        )
+        .await;
+
+        let mut first = connect_terminal_prefs_client(address).await;
+        let seed = next_terminal_prefs_text(&mut first).await;
+        assert!(
+            seed.contains("\"right_click_passthrough\""),
+            "seed still sent when the store is unreadable"
+        );
+        assert!(next_terminal_prefs_text(&mut first)
+            .await
+            .contains("\"mouse_mode\""));
+        let mut second = connect_terminal_prefs_client(address).await;
+        assert!(next_terminal_prefs_text(&mut second)
+            .await
+            .contains("\"right_click_passthrough\""));
+        assert!(next_terminal_prefs_text(&mut second)
+            .await
+            .contains("\"mouse_mode\""));
+
+        // Make the store unusable: a directory where the JSON file belongs.
+        let prefs_path = prefs_dir.join("terminal-prefs.json");
+        std::fs::create_dir_all(&prefs_path).expect("block prefs file");
+
+        use futures_util::SinkExt;
+        first
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                serde_json::json!({
+                    "type": "set_right_click_passthrough",
+                    "mode": "off",
+                    "requestId": 11,
+                })
+                .to_string(),
+            ))
+            .await
+            .expect("send set request");
+
+        let error = next_terminal_prefs_text(&mut first).await;
+        assert!(
+            error.contains("\"right_click_passthrough_error\"")
+                && error.contains("\"requestId\":11"),
+            "initiator gets the store error, got: {error}"
+        );
+        assert_no_terminal_prefs_text(&mut second).await;
+
+        // Repair the store; the next set must still use revision 1 because the
+        // failed attempt never touched the in-memory state.
+        std::fs::remove_dir(&prefs_path).expect("unblock prefs file");
+        first
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                serde_json::json!({
+                    "type": "set_right_click_passthrough",
+                    "mode": "off",
+                    "requestId": 12,
+                })
+                .to_string(),
+            ))
+            .await
+            .expect("send set request after repair");
+        let ack = next_terminal_prefs_text(&mut first).await;
+        assert!(
+            ack.contains("\"mode\":\"off\"") && ack.contains("\"revision\":1"),
+            "revision still 1 after a failed attempt, got: {ack}"
+        );
+
+        server.abort();
+        let _ = daemon.join();
+        let _ = std::fs::remove_file(&api_socket_path);
+        let _ = std::fs::remove_file(&client_socket_path);
+        let _ = std::fs::remove_dir(&prefs_dir);
     }
 
     #[derive(Clone)]
@@ -6044,6 +6792,7 @@ mod tests {
             selected_pane_id: Arc::new(Mutex::new(None)),
             agent_activity: Arc::new(AgentActivityManager::new()),
             agent_pins: Arc::new(AgentPinsManager::new()?),
+            terminal_prefs: Arc::new(TerminalPrefsManager::new()?),
             workspace_zones: Arc::new(WorkspaceZonesManager::new()?),
             machines: Arc::new(crate::machines::MachineManager::new()?),
             launcher_presets: Arc::new(LauncherPresetStore::load(None).map_err(io::Error::other)?),
@@ -6238,6 +6987,7 @@ mod tests {
             request_policy: request_policy.clone(),
             terminal_sessions: Arc::new(Mutex::new(TerminalSessions::default())),
             selected_pane_id: Arc::new(Mutex::new(None)),
+            terminal_prefs: Arc::new(TerminalPrefsManager::new().unwrap()),
             agent_activity: Arc::new(AgentActivityManager::new()),
             agent_pins: Arc::new(AgentPinsManager::new().unwrap()),
             workspace_zones: Arc::new(WorkspaceZonesManager::new().unwrap()),
@@ -6312,6 +7062,7 @@ mod tests {
             request_policy: request_policy.clone(),
             terminal_sessions: Arc::new(Mutex::new(TerminalSessions::default())),
             selected_pane_id: Arc::new(Mutex::new(None)),
+            terminal_prefs: Arc::new(TerminalPrefsManager::new().unwrap()),
             agent_activity: Arc::new(AgentActivityManager::new()),
             agent_pins: Arc::new(AgentPinsManager::new().unwrap()),
             workspace_zones: Arc::new(WorkspaceZonesManager::new().unwrap()),
@@ -7308,6 +8059,12 @@ mod tests {
                 client_count: Arc::new(AtomicUsize::new(1)),
                 connection_closed: Arc::new(ConnectionClosed::default()),
                 mouse_capture: Arc::new(AtomicBool::new(false)),
+                right_click_passthrough: Arc::new(tokio::sync::Mutex::new(
+                    RightClickPassthroughState {
+                        mode: MODE_AUTO.to_string(),
+                        revision: 0,
+                    },
+                )),
             },
             rx,
         )
