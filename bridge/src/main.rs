@@ -6,6 +6,7 @@ mod notes;
 mod remote_uploads;
 mod session;
 mod store_util;
+mod terminal_prefs;
 mod tls;
 mod web_bridge;
 mod websocket_heartbeat;

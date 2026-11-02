@@ -51,6 +51,13 @@ pub(crate) fn stable_hash(value: &str) -> u64 {
     hash
 }
 
+pub(crate) fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 pub(crate) fn now_ms_string() -> String {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -59,6 +59,7 @@ use crate::notes::{
     AttachNoteRequest, CreateNoteRequest, NoteResponse, NotesError, NotesListQuery,
     NotesListResponse, NotesManager, RevisionRequest, UpdateNoteRequest,
 };
+use crate::terminal_prefs::TerminalPrefsManager;
 use crate::websocket_heartbeat::{WebSocketHeartbeat, WebSocketHeartbeatAction};
 use crate::workspace_zones::{WorkspaceZonesError, WorkspaceZonesManager, WorkspaceZonesResponse};
 
@@ -119,6 +120,7 @@ struct BridgeState {
     selected_pane_id: Arc<Mutex<Option<String>>>,
     agent_activity: Arc<AgentActivityManager>,
     agent_pins: Arc<AgentPinsManager>,
+    terminal_prefs: Arc<TerminalPrefsManager>,
     workspace_zones: Arc<WorkspaceZonesManager>,
     machines: Arc<crate::machines::MachineManager>,
     launcher_presets: Arc<LauncherPresetStore>,
@@ -1138,6 +1140,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         selected_pane_id: Arc::new(Mutex::new(None)),
         agent_activity,
         agent_pins,
+        terminal_prefs: Arc::new(TerminalPrefsManager::new()?),
         workspace_zones,
         machines: Arc::new(crate::machines::MachineManager::new()?),
         launcher_presets,
@@ -6044,6 +6047,7 @@ mod tests {
             selected_pane_id: Arc::new(Mutex::new(None)),
             agent_activity: Arc::new(AgentActivityManager::new()),
             agent_pins: Arc::new(AgentPinsManager::new()?),
+            terminal_prefs: Arc::new(TerminalPrefsManager::new()?),
             workspace_zones: Arc::new(WorkspaceZonesManager::new()?),
             machines: Arc::new(crate::machines::MachineManager::new()?),
             launcher_presets: Arc::new(LauncherPresetStore::load(None).map_err(io::Error::other)?),
@@ -6238,6 +6242,7 @@ mod tests {
             request_policy: request_policy.clone(),
             terminal_sessions: Arc::new(Mutex::new(TerminalSessions::default())),
             selected_pane_id: Arc::new(Mutex::new(None)),
+            terminal_prefs: Arc::new(TerminalPrefsManager::new().unwrap()),
             agent_activity: Arc::new(AgentActivityManager::new()),
             agent_pins: Arc::new(AgentPinsManager::new().unwrap()),
             workspace_zones: Arc::new(WorkspaceZonesManager::new().unwrap()),
@@ -6312,6 +6317,7 @@ mod tests {
             request_policy: request_policy.clone(),
             terminal_sessions: Arc::new(Mutex::new(TerminalSessions::default())),
             selected_pane_id: Arc::new(Mutex::new(None)),
+            terminal_prefs: Arc::new(TerminalPrefsManager::new().unwrap()),
             agent_activity: Arc::new(AgentActivityManager::new()),
             agent_pins: Arc::new(AgentPinsManager::new().unwrap()),
             workspace_zones: Arc::new(WorkspaceZonesManager::new().unwrap()),
