@@ -1,6 +1,7 @@
 import { CommandDraftContext, createCommandDraftStore } from "./commandDrafts";
 import { linkedWorkspaceLabels } from "./workspaceClose";
-import { terminalMenuTarget, terminalPaneMenuItems, terminalPreferenceKey, seedRightClickPassthrough, parseRightClickPassthroughKeys, RIGHT_CLICK_PASSTHROUGH_STORAGE_KEY } from "./paneContextMenu";
+import { terminalMenuTarget, terminalPaneMenuItems, terminalPreferenceKey, parseRightClickPassthroughKeys, RIGHT_CLICK_PASSTHROUGH_STORAGE_KEY } from "./paneContextMenu";
+import type { TerminalPassthroughMode, TerminalPassthroughRequest } from "./terminalPassthroughMode";
 import type { TerminalMenuTarget } from "./paneContextMenu";
 import {
   MachineDisableFlow,
@@ -1123,6 +1124,13 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
       return new Set();
     }
   });
+  // Bridge-tracked right-click passthrough modes, keyed like the legacy
+  // preference; only panes whose bridge reported a mode live here.
+  const [terminalPassthroughModes, setTerminalPassthroughModes] =
+    useState<ReadonlyMap<string, TerminalPassthroughMode>>(new Map());
+  // Menu command for one pane's mode; token-deduped by each TerminalView.
+  const [terminalPassthroughRequest, setTerminalPassthroughRequest] =
+    useState<TerminalPassthroughRequest | null>(null);
   const [spaceReorderMode, setSpaceReorderMode] = useState<SpaceReorderMode | null>(null);
   const [spaceReorderAnnouncement, setSpaceReorderAnnouncement] = useState("");
   const spaceReorderAnnouncementFrameRef = useRef<number | null>(null);
@@ -1673,6 +1681,14 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
     ? menuConnectionState?.snapshot?.panes.find(pane =>
         pane.pane_id === menu.terminalContext?.sourcePaneId && pane.terminal_id === menu.terminalContext?.sourceTerminalId)
     : undefined;
+  const panePassthroughMode = (bridgeId: string, connectionKey: string, terminalId: string): TerminalPassthroughMode | undefined =>
+    terminalPassthroughModes.get(terminalPreferenceKey(bridgeId, connectionKey, terminalId));
+  // The bridge-tracked mode wins; the legacy localStorage preference only
+  // speaks for bridges that never sent a right_click_passthrough frame.
+  const isPaneRightClickAuto = (bridgeId: string, connectionKey: string, terminalId: string) =>
+    (panePassthroughMode(bridgeId, connectionKey, terminalId) ??
+      (rightClickTerminals.has(terminalPreferenceKey(bridgeId, connectionKey, terminalId)) ? "auto" : "off")) === "auto";
+
   const activeMenuItems = menu?.terminalContext
     ? terminalPaneMenuItems({
         pane: terminalMenuPane,
@@ -1680,7 +1696,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
         commands: menuSupportedCommands,
         zoomed: Boolean(menuConnectionState?.snapshot?.layouts.find(layout =>
           layout.workspace_id === terminalMenuPane?.workspace_id && layout.tab_id === terminalMenuPane?.tab_id)?.zoomed),
-        passthrough: rightClickTerminals.has(terminalPreferenceKey(menu.bridgeId, menu.terminalContext.connectionKey, menu.terminalContext.terminalId)),
+        passthrough: isPaneRightClickAuto(menu.bridgeId, menu.terminalContext.connectionKey, menu.terminalContext.terminalId),
         extras: baseMenuItems,
       })
     : baseMenuItems;
@@ -2357,8 +2373,11 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
       },
     });
   };
+  const rememberTerminalPassthrough = (bridgeId: string, connectionKey: string, terminalId: string, mode: TerminalPassthroughMode) => {
+    setTerminalPassthroughModes(current => new Map(current).set(terminalPreferenceKey(bridgeId, connectionKey, terminalId), mode));
+  };
   const isTerminalRightClickPassthrough = (pane: PaneInfo) => Boolean(selectedRuntime &&
-    rightClickTerminals.has(terminalPreferenceKey(selectedRuntime.id, selectedRuntime.connectionKey, pane.terminal_id)));
+    isPaneRightClickAuto(selectedRuntime.id, selectedRuntime.connectionKey, pane.terminal_id));
   const toggleRightClickPassthroughPreference = (bridgeId: string, connectionKey: string, terminalId: string) => {
     const preferenceKey = terminalPreferenceKey(bridgeId, connectionKey, terminalId);
     setRightClickTerminals(current => {
@@ -3763,12 +3782,12 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
     }
   }
 
-  // TTT uses right-click context menus, so panes it owns keep receiving
-  // right/middle clicks: seed the terminal's right-click passthrough
-  // preference at launch (the explicit menu toggle still overrides it).
+  // TTT right-click passthrough is tracked by the bridge (auto for TTT
+  // panes); this legacy localStorage preference only serves bridges that
+  // never send right_click_passthrough frames.
 
-  // Persist the per-terminal right-click preference so seeded TTT panes and
-  // manual toggles survive reloads; best-effort for locked-down storage.
+  // Persist the legacy per-terminal preference so manual toggles survive
+  // reloads; best-effort for locked-down storage.
   useEffect(() => {
     try {
       window.localStorage.setItem(RIGHT_CLICK_PASSTHROUGH_STORAGE_KEY, JSON.stringify([...rightClickTerminals]));
@@ -3776,18 +3795,6 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
       // Storage can be unavailable in private or locked-down contexts.
     }
   }, [rightClickTerminals]);
-
-  const seedTttRightClickPassthrough = (runtime: BridgeRuntime, paneId: string) => {
-    setRightClickTerminals((current) =>
-      seedRightClickPassthrough(
-        current,
-        connectionRefs.current[runtime.id]?.snapshot?.panes ?? [],
-        runtime.id,
-        runtime.connectionKey,
-        paneId,
-      ),
-    );
-  };
 
   async function reorderSpace(
     bridgeId: BridgeId,
@@ -3885,7 +3892,19 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
         return;
       }
       if (key === "toggle_right_click") {
-        toggleRightClickPassthroughPreference(bridgeId, menu.terminalContext.connectionKey, target.terminal_id);
+        const currentMode = panePassthroughMode(bridgeId, menu.terminalContext.connectionKey, target.terminal_id);
+        if (currentMode) {
+          // Bridge-owned mode: the switch travels over the terminal socket.
+          setTerminalPassthroughRequest({
+            bridgeId,
+            connectionKey: menu.terminalContext.connectionKey,
+            terminalId: target.terminal_id,
+            mode: currentMode === "auto" ? "off" : "auto",
+            token: (terminalPassthroughRequest?.token ?? 0) + 1,
+          });
+        } else {
+          toggleRightClickPassthroughPreference(bridgeId, menu.terminalContext.connectionKey, target.terminal_id);
+        }
         return;
       }
       if (key === "paste") {
@@ -4074,9 +4093,6 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
     void exec(runtime, action, true).then((result) => {
       if (!result) return;
       setLaunchTarget(null);
-      if (spec.presetId === TTT_PRESET_ID && typeof result.pane_id === "string") {
-        seedTttRightClickPassthrough(runtime, result.pane_id);
-      }
     });
   };
 
@@ -4120,10 +4136,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
       snapshot?.panes ?? [],
     );
     const launched = await exec(runtime, () => selectedCommands.launchPresetTab(workspaceId, resolvedSpec), true);
-    const paneId = launched && typeof launched.pane_id === "string" ? launched.pane_id : null;
-    if (paneId) {
-      seedTttRightClickPassthrough(runtime, paneId);
-    }
+    void launched;
   };
 
   const renderTerminal = !isCompactLayout || showDetail;
@@ -4507,6 +4520,8 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
             onPaneContextMenu={openTerminalPaneMenu}
             isRightClickPassthrough={isTerminalRightClickPassthrough}
             onToggleRightClickPassthrough={toggleRightClickPassthroughPreference}
+            onTerminalPassthroughMode={rememberTerminalPassthrough}
+            passthroughRequest={terminalPassthroughRequest}
             cells={splitCells}
             selectedPaneId={selectedPane?.pane_id ?? null}
             onSelectPane={(pane) => {
@@ -4550,6 +4565,8 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
             onContextMenu={selectedPane ? (x, y) => openTerminalPaneMenu(selectedPane, x, y) : undefined}
             rightClickPassthrough={selectedPane ? isTerminalRightClickPassthrough(selectedPane) : false}
             onToggleRightClickPassthrough={selectedPane && selectedRuntime ? () => toggleRightClickPassthroughPreference(selectedRuntime.id, selectedRuntime.connectionKey, selectedPane.terminal_id) : undefined}
+            onPassthroughChange={selectedPane && selectedRuntime ? (mode) => rememberTerminalPassthrough(selectedRuntime.id, selectedRuntime.connectionKey, selectedPane.terminal_id, mode) : undefined}
+            passthroughRequest={terminalPassthroughRequest}
             connectionKey={selectedRuntime?.connectionKey ?? "disconnected"}
             resumeToken={selectedRuntime?.resumeToken ?? 0}
             httpUrl={selectedHttpUrl}
@@ -6339,6 +6356,8 @@ function SplitGrid({
   onPaneContextMenu,
   isRightClickPassthrough,
   onToggleRightClickPassthrough,
+  onTerminalPassthroughMode,
+  passthroughRequest,
   cells,
   selectedPaneId,
   onSelectPane,
@@ -6372,6 +6391,8 @@ function SplitGrid({
   onPaneContextMenu: (pane: PaneInfo, x: number, y: number) => void;
   isRightClickPassthrough: (pane: PaneInfo) => boolean;
   onToggleRightClickPassthrough: (bridgeId: string, connectionKey: string, terminalId: string) => void;
+  onTerminalPassthroughMode: (bridgeId: string, connectionKey: string, terminalId: string, mode: TerminalPassthroughMode) => void;
+  passthroughRequest: TerminalPassthroughRequest | null;
   cells: { pane: PaneInfo; style: CSSProperties }[];
   selectedPaneId: string | null;
   onSelectPane: (pane: PaneInfo) => void;
@@ -6422,6 +6443,8 @@ function SplitGrid({
               onActivate={() => onSelectPane(pane)}
               rightClickPassthrough={isRightClickPassthrough(pane)}
               onToggleRightClickPassthrough={() => onToggleRightClickPassthrough(bridgeId, connectionKey, pane.terminal_id)}
+              onPassthroughChange={(mode) => onTerminalPassthroughMode(bridgeId, connectionKey, pane.terminal_id, mode)}
+              passthroughRequest={passthroughRequest}
               connectionKey={connectionKey}
               resumeToken={resumeToken}
               httpUrl={httpUrl}

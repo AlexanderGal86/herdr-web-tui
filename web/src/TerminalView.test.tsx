@@ -1220,3 +1220,162 @@ describe("right-click passthrough exit button", () => {
     expect(findExitButton()).toBeNull();
   });
 });
+
+describe("TerminalView right-click passthrough transport", () => {
+  const passthroughFrame = (mode: "auto" | "off", revision: number, extra = "") =>
+    `{"type":"right_click_passthrough","mode":"${mode}","revision":${revision}${extra}}`;
+  const setFrames = (socket: { sent: string[] }) =>
+    socket.sent.filter((frame) => frame.includes("set_right_click_passthrough"));
+
+  async function mountPassthroughPane(overrides: Partial<ComponentProps<typeof TerminalView>> = {}) {
+    const drafts = createCommandDraftStore();
+    const pane = testPane("terminal-passthrough-transport");
+    const root = await renderTerminalView(pane, drafts, overrides);
+    const renderer = terminalRenderers[0]!;
+    await act(async () => renderer.completeMount());
+    const socket = FakeWebSocket.instances.at(-1)!;
+    await act(async () => socket.open());
+    const rerender = (next: Partial<ComponentProps<typeof TerminalView>>) =>
+      renderPane(root, pane, drafts, next);
+    const deliver = (data: string) =>
+      act(async () => {
+        socket.dispatchEvent(new MessageEvent("message", { data }));
+      });
+    return { renderer, socket, rerender, deliver };
+  }
+
+  it("keeps forwarding off until the bridge's first passthrough frame", async () => {
+    const onPassthroughChange = vi.fn();
+    const { renderer, deliver } = await mountPassthroughPane({ onPassthroughChange });
+    await deliver('{"type":"mouse_mode","enabled":true}');
+    expect(renderer.mouseCapture).toBe(true);
+    expect(renderer.mousePassthrough).toBe(false);
+    expect(document.querySelector(".passthrough-exit-button")).toBeNull();
+    expect(onPassthroughChange).not.toHaveBeenCalled();
+  });
+
+  it("applies the bridge mode frame and shows the exit button while forwarding", async () => {
+    const onPassthroughChange = vi.fn();
+    const { renderer, deliver } = await mountPassthroughPane({ onPassthroughChange });
+    await deliver(passthroughFrame("auto", 0));
+    expect(onPassthroughChange).toHaveBeenCalledWith("auto");
+    await deliver('{"type":"mouse_mode","enabled":true}');
+    expect(renderer.mousePassthrough).toBe(true);
+    expect(document.querySelector(".passthrough-exit-button")).not.toBeNull();
+  });
+
+  it("sends mode switches with fresh request ids and applies one revision once", async () => {
+    const onPassthroughChange = vi.fn();
+    const { renderer, socket, deliver } = await mountPassthroughPane({ onPassthroughChange });
+    await deliver(passthroughFrame("auto", 0));
+    await deliver('{"type":"mouse_mode","enabled":true}');
+    const button = document.querySelector<HTMLButtonElement>(".passthrough-exit-button")!;
+    await act(async () => {
+      button.click();
+    });
+    expect(socket.sent.at(-1)).toBe(
+      JSON.stringify({ type: "set_right_click_passthrough", mode: "off", requestId: 1 }),
+    );
+    // The broadcast and the personal ack carry the same revision: applied once.
+    await deliver(passthroughFrame("off", 1));
+    await deliver(passthroughFrame("off", 1, ',"requestId":1'));
+    expect(onPassthroughChange).toHaveBeenCalledTimes(2);
+    expect(renderer.mousePassthrough).toBe(false);
+    expect(document.querySelector(".passthrough-exit-button")).toBeNull();
+  });
+
+  it("ignores stale passthrough revisions", async () => {
+    const onPassthroughChange = vi.fn();
+    const { renderer, deliver } = await mountPassthroughPane({ onPassthroughChange });
+    await deliver(passthroughFrame("auto", 2));
+    await deliver(passthroughFrame("off", 1));
+    expect(onPassthroughChange).toHaveBeenCalledTimes(1);
+    expect(renderer.mousePassthrough).toBe(true);
+  });
+
+  it("re-arms passthrough revisions per connection", async () => {
+    const onPassthroughChange = vi.fn();
+    const { socket, deliver } = await mountPassthroughPane({ onPassthroughChange });
+    await deliver(passthroughFrame("auto", 3));
+    await act(async () => {
+      socket.close();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    const nextSocket = FakeWebSocket.instances.at(-1)!;
+    expect(nextSocket).not.toBe(socket);
+    await act(async () => {
+      nextSocket.open();
+    });
+    // A restarted bridge restarts its revision series at 0.
+    await act(async () => {
+      nextSocket.dispatchEvent(
+        new MessageEvent("message", { data: passthroughFrame("auto", 0) }),
+      );
+    });
+    expect(onPassthroughChange).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports errors only for the latest request and keeps the mode untouched", async () => {
+    const onPassthroughChange = vi.fn();
+    const { renderer, deliver } = await mountPassthroughPane({ onPassthroughChange });
+    await deliver(passthroughFrame("auto", 0));
+    await deliver('{"type":"mouse_mode","enabled":true}');
+    // Errors for unknown or superseded requests stay silent.
+    await deliver('{"type":"right_click_passthrough_error","requestId":9,"error":"late"}');
+    expect(document.querySelector(".terminal-upload-status")).toBeNull();
+    const button = document.querySelector<HTMLButtonElement>(".passthrough-exit-button")!;
+    await act(async () => {
+      button.click();
+    });
+    await deliver('{"type":"right_click_passthrough_error","requestId":2,"error":"superseded"}');
+    expect(document.querySelector(".terminal-upload-status")).toBeNull();
+    await deliver('{"type":"right_click_passthrough_error","requestId":1,"error":"store unavailable"}');
+    const status = document.querySelector(".terminal-upload-status");
+    expect(status?.textContent).toContain("Right-click setting failed: store unavailable");
+    // No optimistic UI: a rejected switch leaves the known mode in place.
+    expect(onPassthroughChange).toHaveBeenCalledTimes(1);
+    expect(renderer.mousePassthrough).toBe(true);
+  });
+
+  it("keeps the legacy localStorage path for bridges that never send frames", async () => {
+    const onToggleRightClickPassthrough = vi.fn();
+    const { renderer, socket, deliver } = await mountPassthroughPane({
+      rightClickPassthrough: true,
+      onToggleRightClickPassthrough,
+    });
+    await deliver('{"type":"mouse_mode","enabled":true}');
+    expect(renderer.mousePassthrough).toBe(true);
+    const button = document.querySelector<HTMLButtonElement>(".passthrough-exit-button")!;
+    await act(async () => {
+      button.click();
+    });
+    expect(onToggleRightClickPassthrough).toHaveBeenCalledOnce();
+    expect(setFrames(socket)).toEqual([]);
+  });
+
+  it("routes menu requests to the matching pane once the bridge owns the mode", async () => {
+    const base = { onPassthroughChange: vi.fn() };
+    const { socket, rerender, deliver } = await mountPassthroughPane(base);
+    const matching = {
+      bridgeId: "bridge-1",
+      connectionKey: "test-connection",
+      terminalId: "terminal-passthrough-transport",
+    };
+    // Legacy bridge (no frame yet): the localStorage path owns toggles.
+    await rerender({ ...base, passthroughRequest: { ...matching, mode: "off" as const, token: 1 } });
+    expect(setFrames(socket)).toEqual([]);
+    await deliver(passthroughFrame("auto", 0));
+    // Another pane's request must not fire on this pane's socket.
+    await rerender({
+      ...base,
+      passthroughRequest: { ...matching, terminalId: "terminal-other", mode: "off" as const, token: 2 },
+    });
+    expect(setFrames(socket)).toEqual([]);
+    await rerender({ ...base, passthroughRequest: { ...matching, mode: "off" as const, token: 3 } });
+    expect(socket.sent.at(-1)).toBe(
+      JSON.stringify({ type: "set_right_click_passthrough", mode: "off", requestId: 1 }),
+    );
+  });
+});
