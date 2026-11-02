@@ -488,6 +488,57 @@ describe("TerminalView bridge-back wake", () => {
   });
 });
 
+describe("TerminalView attach-conflict stop and retry", () => {
+  const CONFLICT_CLOSE =
+    '{"type":"closed","reason":"terminal attach failed: terminal t-1 already has an attached client; retry with --takeover"}';
+
+  const attachConflictClose = (socket: FakeWebSocket) => {
+    socket.dispatchEvent(new MessageEvent("message", { data: CONFLICT_CLOSE }));
+    socket.close();
+  };
+
+  it("stops after repeated attach conflicts, stays stopped, and retries from the overlay button", async () => {
+    const drafts = createCommandDraftStore();
+    await renderTerminalView(testPane("terminal-conflict"), drafts);
+    await act(async () => {
+      terminalRenderers[0]!.completeMount();
+      await Promise.resolve();
+    });
+    FakeWebSocket.instances[0]!.open();
+
+    // Four consecutive conflicts: three retries (500ms, 1s, 2s backoff), then stop.
+    for (let round = 0; round < 4; round += 1) {
+      const socket = FakeWebSocket.instances.at(-1)!;
+      await act(async () => {
+        attachConflictClose(socket);
+        await vi.advanceTimersByTimeAsync(2500);
+      });
+    }
+    expect(FakeWebSocket.instances).toHaveLength(4);
+    expect(document.querySelector(".terminal-overlay")?.textContent).toContain("Attached elsewhere");
+
+    // Stopped panes neither retry on their own nor wake for bridge recovery.
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent("herdr:bridge-back", {
+          detail: { bridgeId: "bridge-1", connectionKey: "test-connection" },
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(4);
+
+    // The overlay button starts a fresh attach attempt immediately.
+    const retryButton = document.querySelector<HTMLButtonElement>(".terminal-overlay-retry");
+    expect(retryButton).not.toBeNull();
+    await act(async () => {
+      retryButton!.click();
+      await vi.advanceTimersByTimeAsync(10);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(5);
+  });
+});
+
 describe("TerminalView connection-lost signaling", () => {
   it("sends a queued command submit as one batch instead of pacing Enter 35ms behind", async () => {
     const drafts = createCommandDraftStore();

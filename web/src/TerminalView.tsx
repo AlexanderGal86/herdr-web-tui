@@ -240,6 +240,7 @@ export function TerminalView({
   rightClickPassthroughRef.current = rightClickPassthrough;
   const socketRef = useRef<WebSocket | null>(null);
   const requestReconnectRef = useRef<(reason: ReconnectReason) => void>(() => {});
+  const retryAttachRef = useRef<() => void>(() => {});
   const terminalInputBlockedRef = useRef(false);
   const uploadInputId = useId();
   const sendResizeRef = useRef<(size: TerminalSize) => void>(() => {});
@@ -751,6 +752,7 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
     if (!terminalId) {
       setConnectionState("idle");
       requestReconnectRef.current = () => {};
+      retryAttachRef.current = () => {};
       return;
     }
     if (
@@ -761,6 +763,7 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
     ) {
       setConnectionState("connecting");
       requestReconnectRef.current = () => {};
+      retryAttachRef.current = () => {};
       return;
     }
 
@@ -1179,6 +1182,18 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
     };
 
     requestReconnectRef.current = requestReconnect;
+    // The overlay's Retry button re-arms a pane stopped by an attach
+    // conflict — the one stop state that can never recover on its own.
+    retryAttachRef.current = () => {
+      if (disposed) {
+        return;
+      }
+      reconnectStopped = false;
+      attachConflictRetries = 0;
+      reconnectAttempts = 0;
+      setCloseReason(null);
+      requestReconnect("manual");
+    };
     const removeNativeResumeHandler = addNativeResumeHandler(() => requestReconnect("resume"));
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
@@ -1202,6 +1217,7 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
         window.clearTimeout(bridgeBackTimer);
       }
       requestReconnectRef.current = () => {};
+      retryAttachRef.current = () => {};
       flushBatchedTerminalInput();
       batchedInputRef.current = emptyTerminalInputBatch();
       clearReconnectTimer();
@@ -1773,6 +1789,15 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
       {pane && showConnectionOverlay && connectionState !== "attached" ? (
         <div className="terminal-overlay">
           {terminalConnectionCopy(connectionState, closeReason, hasAttachedForTerminal)}
+          {connectionState === "closed" && isTerminalAttachConflictClose(closeReason) ? (
+            <button
+              className="terminal-overlay-retry"
+              type="button"
+              onClick={() => retryAttachRef.current()}
+            >
+              Retry attach
+            </button>
+          ) : null}
         </div>
       ) : null}
       {uploadStatus ? (
