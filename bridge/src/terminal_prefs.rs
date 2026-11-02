@@ -92,7 +92,7 @@ impl TerminalPrefsManager {
     }
 
     #[cfg(test)]
-    fn for_test(dir: PathBuf) -> io::Result<Self> {
+    pub(crate) fn for_test(dir: PathBuf) -> io::Result<Self> {
         ensure_private_dir(&dir)?;
         Ok(Self {
             prefs_path: dir.join("terminal-prefs.json"),
