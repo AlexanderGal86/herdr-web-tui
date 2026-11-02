@@ -180,6 +180,11 @@
   [Will Hampson (@Whamp)](https://github.com/Whamp).
 
 ### Fixed
+- Bridge: the saved-machine capability probe (`remote-api-bridge --check`) now runs its ssh
+  child in its own process group and SIGKILLs the whole group on timeout or poll errors, so ssh
+  helper descendants (e.g. ProxyCommand helpers) can no longer outlive a timed-out probe and
+  accumulate inside the long-lived bridge process — matching the connection teardown's
+  process-group kill.
 - Bridge: an unreadable or corrupt saved-machines file (`endpoints.json`) no longer fails
   silently — the bridge logs a warning with the path and cause instead of quietly dropping the
   saved SSH machines.

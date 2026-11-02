@@ -1066,6 +1066,21 @@ fn copy_pipe<R: std::io::Read, W: std::io::Write>(
 /// The error string is for server-side logs only; callers must not forward
 /// it to browsers.
 pub fn probe_remote_support(endpoint: &SavedEndpoint, ssh_program: &str) -> Result<(), String> {
+    probe_remote_support_with_timeout(
+        endpoint,
+        ssh_program,
+        Duration::from_secs(PROBE_TIMEOUT_SECONDS),
+    )
+}
+
+/// `probe_remote_support` with an explicit timeout so tests can exercise
+/// the timeout teardown against stubs without waiting the production
+/// duration.
+fn probe_remote_support_with_timeout(
+    endpoint: &SavedEndpoint,
+    ssh_program: &str,
+    timeout: Duration,
+) -> Result<(), String> {
     if !is_valid_ssh_target(&endpoint.target) {
         return Err("invalid ssh target".to_string());
     }
@@ -1076,10 +1091,18 @@ pub fn probe_remote_support(endpoint: &SavedEndpoint, ssh_program: &str) -> Resu
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Own process group so a probe that outlives its deadline takes its
+    // whole ssh subtree (ProxyCommand helpers) with it: `Child::kill` only
+    // signals the ssh leader.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     let mut child: Child = command
         .spawn()
         .map_err(|err| format!("failed to start ssh: {err}"))?;
-    let deadline = Instant::now() + Duration::from_secs(PROBE_TIMEOUT_SECONDS);
+    let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -1106,11 +1129,17 @@ pub fn probe_remote_support(endpoint: &SavedEndpoint, ssh_program: &str) -> Resu
             }
             Ok(None) if Instant::now() < deadline => std::thread::sleep(PROBE_POLL),
             Ok(None) => {
+                kill_process_group(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err("remote machine probe timed out".to_string());
             }
-            Err(err) => return Err(format!("remote machine probe failed: {err}")),
+            Err(err) => {
+                kill_process_group(child.id());
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("remote machine probe failed: {err}"));
+            }
         }
     }
 }
