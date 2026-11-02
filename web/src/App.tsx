@@ -1002,6 +1002,19 @@ export function App() {
   );
 }
 
+// StrictMode remounts run the unmount cleanup before the second setup; the flag
+// must be restored or it stays false for the rest of the dev session.
+export function useMountedRef() {
+  const aliveRef = useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
+  return aliveRef;
+}
+
 function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof createCommandDraftStore> }) {
   const bridge = useBridge();
   const initialPrefs = useMemo(readDisplayPrefs, []);
@@ -1363,13 +1376,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
   ]);
 
   // addMachine can resolve after AppContent unmounts; guards post-unmount setState.
-  const machineAddAliveRef = useRef(true);
-  useEffect(
-    () => () => {
-      machineAddAliveRef.current = false;
-    },
-    [],
-  );
+  const machineAddAliveRef = useMountedRef();
 
   const submitMachineAdd = (input: MachineAddSubmit) => {
     setMachineAddBusy(true);
