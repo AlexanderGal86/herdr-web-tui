@@ -1421,6 +1421,23 @@ function SliderSettingControl({
   );
 }
 
+/** Empty drafts are not numbers: Number("") is 0, which would clamp to min. */
+export function resolveDraftNumberCommit(
+  draft: string,
+  value: number,
+  min: number,
+  max: number,
+): number | null {
+  if (draft.trim() === "") {
+    return null;
+  }
+  const next = Number(draft);
+  if (!Number.isFinite(next)) {
+    return null;
+  }
+  return Math.min(max, Math.max(min, next));
+}
+
 function DraftNumberInput({
   ariaLabel,
   value,
@@ -1444,14 +1461,13 @@ function DraftNumberInput({
   }, [value]);
 
   const commit = () => {
-    const next = Number(draft);
-    if (Number.isFinite(next)) {
-      const clamped = Math.min(max, Math.max(min, next));
-      setDraft(String(clamped));
-      onCommit(clamped);
+    const committed = resolveDraftNumberCommit(draft, value, min, max);
+    if (committed === null) {
+      setDraft(String(value));
       return;
     }
-    setDraft(String(value));
+    setDraft(String(committed));
+    onCommit(committed);
   };
 
   return (

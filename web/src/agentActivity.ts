@@ -1,6 +1,7 @@
 import { apiErrorMessage } from "./bridgeApi";
 import type { BridgeHttpUrl } from "./bridgeApi";
 import { fetchWithTimeout } from "./fetchWithTimeout";
+import { isRecord } from "./isRecord";
 import type { BridgeCapabilities } from "./bridge";
 import type { AgentStatus } from "./types";
 
@@ -127,6 +128,3 @@ function isAgentStatus(value: unknown): value is AgentStatus {
   return typeof value === "string" && agentStatuses.includes(value as AgentStatus);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}

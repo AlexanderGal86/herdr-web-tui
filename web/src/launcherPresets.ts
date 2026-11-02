@@ -1,6 +1,7 @@
 import type { BridgeCapabilities } from "./bridge";
 import type { BridgeHttpUrl } from "./bridgeApi";
 import { fetchWithTimeout } from "./fetchWithTimeout";
+import { isRecord } from "./isRecord";
 
 export type LauncherPresetOption = {
   id: string;
@@ -65,6 +66,3 @@ function parseLauncherPreset(value: unknown): LauncherPresetOption {
   };
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}

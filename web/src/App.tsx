@@ -101,6 +101,7 @@ import type { LaunchTarget } from "./launch";
 import { fetchLauncherPresets, supportsLauncherPresets } from "./launcherPresets";
 import type { LauncherPresetsResponse } from "./launcherPresets";
 import { fetchWithTimeout } from "./fetchWithTimeout";
+import { isRecord } from "./isRecord";
 import {
   DEFAULT_MOBILE_COMMAND_ENTER_NEWLINE,
   DEFAULT_MOBILE_COMMAND_FOCUS_AFTER_SUBMIT,
@@ -933,10 +934,6 @@ export function parseCollapsedSidebarGroups(value: unknown, fallback: string[] =
   ].slice(-MAX_COLLAPSED_SIDEBAR_GROUPS);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
 function isMobileDetailHistoryState(value: unknown) {
   return isRecord(value) && value[MOBILE_DETAIL_HISTORY_KEY] === true;
 }
@@ -1365,19 +1362,34 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
     spaceReorderMode,
   ]);
 
+  // addMachine can resolve after AppContent unmounts; guards post-unmount setState.
+  const machineAddAliveRef = useRef(true);
+  useEffect(
+    () => () => {
+      machineAddAliveRef.current = false;
+    },
+    [],
+  );
+
   const submitMachineAdd = (input: MachineAddSubmit) => {
     setMachineAddBusy(true);
     setMachineAddError(null);
     bridge
       .addMachine(input)
       .then(() => {
-        setMachineAddOpen(false);
+        if (machineAddAliveRef.current) {
+          setMachineAddOpen(false);
+        }
       })
       .catch((error: unknown) => {
-        setMachineAddError(error instanceof Error ? error.message : String(error));
+        if (machineAddAliveRef.current) {
+          setMachineAddError(error instanceof Error ? error.message : String(error));
+        }
       })
       .finally(() => {
-        setMachineAddBusy(false);
+        if (machineAddAliveRef.current) {
+          setMachineAddBusy(false);
+        }
       });
   };
 
@@ -3537,7 +3549,9 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
         let cancelled = false;
         void (async () => {
           try {
-            const response = await fetch(runtime.httpUrl("/api/workspace-zones"));
+            const response = await fetchWithTimeout(
+              runtime.httpUrl("/api/workspace-zones"),
+            );
             if (!response.ok) {
               throw new Error(`workspace zones request failed (${response.status})`);
             }
@@ -3570,7 +3584,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
       return;
     }
     try {
-      const response = await fetch(runtime.httpUrl("/api/workspace-zones"), {
+      const response = await fetchWithTimeout(runtime.httpUrl("/api/workspace-zones"), {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ mode }),
@@ -4861,6 +4875,9 @@ const SHARED_SELECTION_SETTLE_TIMEOUT_MS = 2000;
 const NOTES_REFRESH_INTERVAL_MS = 15000;
 const MAX_PENDING_CREATED_PANE_NOTES = 32;
 const NOTE_DRAFT_STORAGE_PREFIX = "herdr-web:note-draft:v1:";
+const NOTE_DRAFT_WRITE_DEBOUNCE_MS = 400;
+// Shared empty list keeps the reorder memos stable when no snapshot is loaded.
+const NO_REORDER_WORKSPACES: readonly WorkspaceInfo[] = [];
 const NOTE_EDITOR_MODE_STORAGE_KEY = "herdr-web:note-editor-mode:v1";
 
 export function resolveInitialSelectedBridgeId(
@@ -6707,7 +6724,8 @@ function Switcher({
   const reorderBridgeView = spaceReorderMode
     ? (hostBridgeViews.find((view) => view.runtime.id === spaceReorderMode.bridgeId) ?? null)
     : null;
-  const reorderWorkspaces = reorderBridgeView?.snapshot?.workspaces ?? [];
+  const reorderWorkspaces: readonly WorkspaceInfo[] =
+    reorderBridgeView?.snapshot?.workspaces ?? NO_REORDER_WORKSPACES;
   const reorderBlockIds = useMemo(
     () =>
       spaceReorderMode
@@ -9161,10 +9179,13 @@ export function NoteEditor({
       return;
     }
     if (dirty && (title !== entry.note.title || body !== entry.note.body)) {
-      writeNoteDraft(entry, title, body, baseRevision ?? entry.note.revision);
-    } else {
-      clearNoteDraft(entry);
+      // Debounced like the 700ms autosave: keystrokes must not hit localStorage directly.
+      const timer = window.setTimeout(() => {
+        writeNoteDraft(entry, title, body, baseRevision ?? entry.note.revision);
+      }, NOTE_DRAFT_WRITE_DEBOUNCE_MS);
+      return () => window.clearTimeout(timer);
     }
+    clearNoteDraft(entry);
   }, [baseRevision, body, dirty, entry, title]);
 
   useEffect(() => {
@@ -9833,7 +9854,17 @@ function DisconnectedBridgeRow({
       <span
         className="pane-word"
         data-status="working"
+        role="button"
+        tabIndex={0}
         onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          onRetry();
+        }}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter" && event.key !== " ") {
+            return;
+          }
           event.preventDefault();
           event.stopPropagation();
           onRetry();

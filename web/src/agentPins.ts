@@ -1,6 +1,7 @@
 import { apiErrorMessage } from "./bridgeApi";
 import type { BridgeHttpUrl } from "./bridgeApi";
 import { fetchWithTimeout } from "./fetchWithTimeout";
+import { isRecord } from "./isRecord";
 import type { BridgeCapabilities } from "./bridge";
 
 export type AgentPinContext = {
@@ -131,9 +132,6 @@ function parseAgentPinContext(value: unknown): AgentPinContext {
   return context;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 async function agentPinsApiError(response: Response) {
   const message = await apiErrorMessage(response);

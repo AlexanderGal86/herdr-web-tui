@@ -333,6 +333,13 @@
   tracking mid-drag, the drag's document mousemove/mouseup listeners stayed installed until the
   terminal was disposed and reported phantom moves once tracking came back; they are now removed
   on every drag-ending mouseup.
+- Web: the `retry` control on disconnected bridge rows is now keyboard-operable (focusable, with
+  Enter and Space activation) instead of mouse-only; its look and placement are unchanged.
+- Backend settings number fields no longer clamp an emptied field to the minimum: clearing a
+  percent field and leaving it now restores the previous value instead of committing the
+  minimum (an empty input is not a number, despite `Number("")` being 0).
+- Note editor drafts are persisted to local storage after a short typing pause (400ms, matching
+  the autosave debounce style) instead of on every keystroke.
 
 ### Removed
 

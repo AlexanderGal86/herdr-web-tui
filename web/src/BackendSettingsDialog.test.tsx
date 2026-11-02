@@ -4,7 +4,7 @@
 import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { BackendSettingsDialog } from "./BackendSettingsDialog";
+import { BackendSettingsDialog, resolveDraftNumberCommit } from "./BackendSettingsDialog";
 
 const bridge = vi.hoisted(() => ({
   store: {
@@ -47,6 +47,17 @@ afterEach(async () => {
   });
   document.body.innerHTML = "";
   vi.clearAllMocks();
+});
+
+describe("resolveDraftNumberCommit", () => {
+  it("treats an empty draft as no commit instead of clamping to min", () => {
+    expect(resolveDraftNumberCommit("", 70, 10, 90)).toBeNull();
+    expect(resolveDraftNumberCommit("   ", 70, 10, 90)).toBeNull();
+    expect(resolveDraftNumberCommit("not-a-number", 70, 10, 90)).toBeNull();
+    expect(resolveDraftNumberCommit("105", 70, 10, 90)).toBe(90);
+    expect(resolveDraftNumberCommit("5", 70, 10, 90)).toBe(10);
+    expect(resolveDraftNumberCommit("55", 70, 10, 90)).toBe(55);
+  });
 });
 
 describe("BackendSettingsDialog terminal accessibility", () => {

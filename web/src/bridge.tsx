@@ -10,6 +10,7 @@ import {
 import type { ReactNode } from "react";
 import { Capacitor } from "@capacitor/core";
 import { Preferences } from "@capacitor/preferences";
+import { isRecord } from "./isRecord";
 import { fetchWithTimeout } from "./fetchWithTimeout";
 import { apiErrorMessage } from "./bridgeApi";
 import {
@@ -1388,6 +1389,3 @@ export function duplicateBackend(
   );
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}

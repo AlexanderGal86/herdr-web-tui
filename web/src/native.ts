@@ -21,8 +21,12 @@ export function startNativeControls() {
     if (isActive) {
       emitNativeResume();
     }
+  }).catch((error) => {
+    console.warn("app state listener unavailable", error);
   });
-  void App.addListener("resume", emitNativeResume);
+  void App.addListener("resume", emitNativeResume).catch((error) => {
+    console.warn("resume listener unavailable", error);
+  });
   void App.addListener("backButton", ({ canGoBack }) => {
     for (const handler of [...nativeBackHandlers].reverse()) {
       if (handler()) {
@@ -34,6 +38,8 @@ export function startNativeControls() {
     } else {
       void App.exitApp();
     }
+  }).catch((error) => {
+    console.warn("back button listener unavailable", error);
   });
 }
 
