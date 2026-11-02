@@ -985,3 +985,38 @@ describe("TerminalView uploads gating", () => {
     expect(button?.disabled).toBe(false);
   });
 });
+
+describe("right-click passthrough exit button", () => {
+  async function mountExitButton(rightClickPassthrough: boolean) {
+    const onToggleRightClickPassthrough = vi.fn();
+    await renderTerminalView(testPane("terminal-passthrough-exit"), createCommandDraftStore(), {
+      onContextMenu: vi.fn(),
+      rightClickPassthrough,
+      onToggleRightClickPassthrough,
+    });
+    const renderer = terminalRenderers[0]!;
+    await act(async () => renderer.completeMount());
+    const socket = FakeWebSocket.instances.at(-1)!;
+    await act(async () => socket.open());
+    return onToggleRightClickPassthrough;
+  }
+
+  const findExitButton = () =>
+    document.querySelector<HTMLButtonElement>(".passthrough-exit-button");
+
+  it("shows an exit button in passthrough mode and toggles the preference off", async () => {
+    const onToggle = await mountExitButton(true);
+    const button = findExitButton();
+    if (!button) throw new Error("expected the passthrough exit button");
+    expect(button.getAttribute("aria-label")).toContain("right-click");
+    await act(async () => {
+      button.click();
+    });
+    expect(onToggle).toHaveBeenCalledOnce();
+  });
+
+  it("hides the exit button when the pane uses the Herdr menu", async () => {
+    await mountExitButton(false);
+    expect(findExitButton()).toBeNull();
+  });
+});

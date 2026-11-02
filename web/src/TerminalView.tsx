@@ -7,6 +7,7 @@ import {
   ExternalLink,
   Keyboard,
   Link,
+  MousePointerBan,
   Paperclip,
   Plus,
   Send,
@@ -143,6 +144,8 @@ type Props = {
   onContextMenu?: (x: number, y: number) => void;
   onActivate?: () => void;
   rightClickPassthrough?: boolean;
+  /** Turns the pane's right-click passthrough preference off (exit chip). */
+  onToggleRightClickPassthrough?: () => void;
   /** Creates a terminal renderer for each mounted terminal pane. */
   createTerminalRenderer?: TerminalRendererFactory;
 };
@@ -214,6 +217,7 @@ export function TerminalView({
   onContextMenu,
   onActivate,
   rightClickPassthrough = false,
+  onToggleRightClickPassthrough,
   createTerminalRenderer = createGhosttyTerminalRenderer,
 }: Props) {
   const contextKeyRef = useRef<string | null>(null);  const middlePointerDownRef = useRef(false);
@@ -1763,6 +1767,21 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
           onClick={openFilePicker}
         >
           <Paperclip size={16} />
+        </button>
+      ) : null}
+      {rightClickPassthrough && onToggleRightClickPassthrough ? (
+        <button
+          className="passthrough-exit-button"
+          type="button"
+          aria-label="Stop sending right-clicks to the pane"
+          title="Right-clicks and mouse events go to the pane app. Click to restore the Herdr menu (Shift+right-click works too)."
+          onClick={(event) => {
+            event.stopPropagation();
+            event.preventDefault();
+            onToggleRightClickPassthrough();
+          }}
+        >
+          <MousePointerBan size={15} />
         </button>
       ) : null}
       {showCommandControls && pane ? (

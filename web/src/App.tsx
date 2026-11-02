@@ -2359,6 +2359,14 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
   };
   const isTerminalRightClickPassthrough = (pane: PaneInfo) => Boolean(selectedRuntime &&
     rightClickTerminals.has(terminalPreferenceKey(selectedRuntime.id, selectedRuntime.connectionKey, pane.terminal_id)));
+  const toggleRightClickPassthroughPreference = (bridgeId: string, connectionKey: string, terminalId: string) => {
+    const preferenceKey = terminalPreferenceKey(bridgeId, connectionKey, terminalId);
+    setRightClickTerminals(current => {
+      const next = new Set(current);
+      if (next.has(preferenceKey)) next.delete(preferenceKey); else next.add(preferenceKey);
+      return next;
+    });
+  };
 
   useEffect(() => {
     if (isCompactLayout) {
@@ -3877,12 +3885,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
         return;
       }
       if (key === "toggle_right_click") {
-        const preferenceKey = terminalPreferenceKey(bridgeId, menu.terminalContext.connectionKey, target.terminal_id);
-        setRightClickTerminals(current => {
-          const next = new Set(current);
-          if (next.has(preferenceKey)) next.delete(preferenceKey); else next.add(preferenceKey);
-          return next;
-        });
+        toggleRightClickPassthroughPreference(bridgeId, menu.terminalContext.connectionKey, target.terminal_id);
         return;
       }
       if (key === "paste") {
@@ -4503,6 +4506,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
             bridgeId={selectedRuntime?.id ?? ""}
             onPaneContextMenu={openTerminalPaneMenu}
             isRightClickPassthrough={isTerminalRightClickPassthrough}
+            onToggleRightClickPassthrough={toggleRightClickPassthroughPreference}
             cells={splitCells}
             selectedPaneId={selectedPane?.pane_id ?? null}
             onSelectPane={(pane) => {
@@ -4545,6 +4549,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
             pane={selectedPane}
             onContextMenu={selectedPane ? (x, y) => openTerminalPaneMenu(selectedPane, x, y) : undefined}
             rightClickPassthrough={selectedPane ? isTerminalRightClickPassthrough(selectedPane) : false}
+            onToggleRightClickPassthrough={selectedPane && selectedRuntime ? () => toggleRightClickPassthroughPreference(selectedRuntime.id, selectedRuntime.connectionKey, selectedPane.terminal_id) : undefined}
             connectionKey={selectedRuntime?.connectionKey ?? "disconnected"}
             resumeToken={selectedRuntime?.resumeToken ?? 0}
             httpUrl={selectedHttpUrl}
@@ -6328,6 +6333,7 @@ function SplitGrid({
   bridgeId,
   onPaneContextMenu,
   isRightClickPassthrough,
+  onToggleRightClickPassthrough,
   cells,
   selectedPaneId,
   onSelectPane,
@@ -6360,6 +6366,7 @@ function SplitGrid({
   bridgeId: string;
   onPaneContextMenu: (pane: PaneInfo, x: number, y: number) => void;
   isRightClickPassthrough: (pane: PaneInfo) => boolean;
+  onToggleRightClickPassthrough: (bridgeId: string, connectionKey: string, terminalId: string) => void;
   cells: { pane: PaneInfo; style: CSSProperties }[];
   selectedPaneId: string | null;
   onSelectPane: (pane: PaneInfo) => void;
@@ -6409,6 +6416,7 @@ function SplitGrid({
               onContextMenu={(x, y) => onPaneContextMenu(pane, x, y)}
               onActivate={() => onSelectPane(pane)}
               rightClickPassthrough={isRightClickPassthrough(pane)}
+              onToggleRightClickPassthrough={() => onToggleRightClickPassthrough(bridgeId, connectionKey, pane.terminal_id)}
               connectionKey={connectionKey}
               resumeToken={resumeToken}
               httpUrl={httpUrl}

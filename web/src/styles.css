@@ -1858,6 +1858,33 @@ button {
   opacity: 0.42;
 }
 
+/* Exit chip for right-click passthrough: shown while the pane app owns
+   right-clicks/mouse, sits right under the upload FAB so the mode always
+   has a visible way out (Shift+right-click opens the menu too). */
+.passthrough-exit-button {
+  position: absolute;
+  right: 12px;
+  top: 54px;
+  z-index: 3;
+  display: inline-grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--line));
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--mantle) 86%, black);
+  color: var(--accent);
+  opacity: 0.85;
+  touch-action: manipulation;
+}
+
+.passthrough-exit-button:hover,
+.passthrough-exit-button:focus-visible {
+  border-color: var(--accent);
+  opacity: 1;
+}
+
 .terminal-upload-status {
   position: absolute;
   right: 12px;
