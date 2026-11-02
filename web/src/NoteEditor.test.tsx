@@ -209,6 +209,57 @@ describe("NoteEditor draft persistence", () => {
     expect(raw).not.toBeNull();
     expect(JSON.parse(raw as string)).toMatchObject({ body: "a", baseRevision: 5 });
   });
+
+  it("flushes the pending draft when switching notes before the debounce window", async () => {
+    const { container, render } = createEditorHarness(vi.fn(() => Promise.resolve(6)));
+    const noteA = noteEntry({ noteId: "note-1", revision: 5, body: "" });
+    const noteB = noteEntry({ noteId: "note-2", revision: 3, body: "" });
+    await render(noteA);
+    await changeTextarea(container, "switched");
+    expect(localStorage.getItem(noteDraftStorageKey(noteA))).toBeNull();
+
+    await render(noteB);
+
+    const raw = localStorage.getItem(noteDraftStorageKey(noteA));
+    expect(raw).not.toBeNull();
+    expect(JSON.parse(raw as string)).toMatchObject({ body: "switched", baseRevision: 5 });
+    expect(localStorage.getItem(noteDraftStorageKey(noteB))).toBeNull();
+  });
+
+  it("flushes the pending draft on unmount", async () => {
+    const { container, render, root } = createEditorHarness(vi.fn(() => Promise.resolve(6)));
+    const entry = noteEntry({ revision: 5, body: "" });
+    await render(entry);
+    await changeTextarea(container, "unmounted");
+    expect(localStorage.getItem(noteDraftStorageKey(entry))).toBeNull();
+
+    await act(async () => {
+      root.unmount();
+    });
+
+    const raw = localStorage.getItem(noteDraftStorageKey(entry));
+    expect(raw).not.toBeNull();
+    expect(JSON.parse(raw as string)).toMatchObject({ body: "unmounted", baseRevision: 5 });
+  });
+
+  it("collapses a keystroke series into one draft write", async () => {
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+    const { container, render } = createEditorHarness(vi.fn(() => Promise.resolve(6)));
+    const entry = noteEntry({ revision: 5, body: "" });
+    await render(entry);
+
+    for (const value of ["a", "ab", "abc"]) {
+      await changeTextarea(container, value);
+    }
+    await act(async () => {
+      vi.advanceTimersByTime(500);
+      await Promise.resolve();
+    });
+
+    const draftWrites = setItem.mock.calls.filter(([key]) => key === noteDraftStorageKey(entry));
+    expect(draftWrites).toHaveLength(1);
+    expect(JSON.parse(draftWrites[0][1] as string)).toMatchObject({ body: "abc", baseRevision: 5 });
+  });
 });
 
 describe("NoteEditor autosave conflicts", () => {
@@ -553,7 +604,7 @@ function createEditorHarness(
     });
   };
 
-  return { container, render };
+  return { container, render, root };
 }
 
 function noteEntry({

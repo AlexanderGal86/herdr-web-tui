@@ -1002,6 +1002,19 @@ export function App() {
   );
 }
 
+// StrictMode remounts run the unmount cleanup before the second setup; the flag
+// must be restored or it stays false for the rest of the dev session.
+export function useMountedRef() {
+  const aliveRef = useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
+  return aliveRef;
+}
+
 function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof createCommandDraftStore> }) {
   const bridge = useBridge();
   const initialPrefs = useMemo(readDisplayPrefs, []);
@@ -1363,13 +1376,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
   ]);
 
   // addMachine can resolve after AppContent unmounts; guards post-unmount setState.
-  const machineAddAliveRef = useRef(true);
-  useEffect(
-    () => () => {
-      machineAddAliveRef.current = false;
-    },
-    [],
-  );
+  const machineAddAliveRef = useMountedRef();
 
   const submitMachineAdd = (input: MachineAddSubmit) => {
     setMachineAddBusy(true);
@@ -9031,6 +9038,7 @@ export function NoteEditor({
   const noteSaveInFlightRef = useRef<NoteSaveInFlight | null>(null);
   const titleInputRef = useRef<HTMLInputElement | null>(null);
   const entryRef = useRef(entry);
+  const pendingDraftWriteRef = useRef<{ key: string; run: () => void } | null>(null);
   const onSaveRef = useRef(onSave);
   const noteIdentity = entry ? noteDraftStorageKey(entry) : "";
   const noteKey = entry ? `${entry.bridgeId}:${entry.note.note_id}:${entry.note.revision}` : "";
@@ -9179,14 +9187,44 @@ export function NoteEditor({
       return;
     }
     if (dirty && (title !== entry.note.title || body !== entry.note.body)) {
+      // The entry prop swaps before the state reset lands, so state still belongs
+      // to the previous note here; flush that note's pending write, then wait for
+      // the reset before scheduling anything under the new identity.
+      const pending = pendingDraftWriteRef.current;
+      if (pending && pending.key !== noteIdentity) {
+        pending.run();
+      }
+      if (editorNoteIdentity !== noteIdentity) {
+        return;
+      }
       // Debounced like the 700ms autosave: keystrokes must not hit localStorage directly.
-      const timer = window.setTimeout(() => {
+      const writeThisDraft = () => {
+        pendingDraftWriteRef.current = null;
         writeNoteDraft(entry, title, body, baseRevision ?? entry.note.revision);
-      }, NOTE_DRAFT_WRITE_DEBOUNCE_MS);
+      };
+      const timer = window.setTimeout(writeThisDraft, NOTE_DRAFT_WRITE_DEBOUNCE_MS);
+      pendingDraftWriteRef.current = {
+        key: noteIdentity,
+        run: () => {
+          window.clearTimeout(timer);
+          writeThisDraft();
+        },
+      };
       return () => window.clearTimeout(timer);
     }
     clearNoteDraft(entry);
-  }, [baseRevision, body, dirty, entry, title]);
+    if (pendingDraftWriteRef.current?.key === noteIdentity) {
+      pendingDraftWriteRef.current = null;
+    }
+  }, [baseRevision, body, dirty, editorNoteIdentity, entry, noteIdentity, title]);
+
+  // The debounce timer never fires after unmount; flush whatever is still pending.
+  useEffect(
+    () => () => {
+      pendingDraftWriteRef.current?.run();
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!noteIdentity || !dirty) {
@@ -9833,7 +9871,7 @@ function NoteRow({
   );
 }
 
-function DisconnectedBridgeRow({
+export function DisconnectedBridgeRow({
   label,
   message,
   onSelect,
@@ -9845,34 +9883,42 @@ function DisconnectedBridgeRow({
   onRetry: () => void;
 }) {
   return (
-    <button className="pane-row" type="button" data-status="unknown" onClick={onSelect}>
+    <div
+      className="pane-row"
+      role="button"
+      tabIndex={0}
+      data-status="unknown"
+      onClick={onSelect}
+      onKeyDown={(event) => {
+        // The nested retry button activates natively; row keys must not double-fire.
+        if (event.target !== event.currentTarget) {
+          return;
+        }
+        if (event.key !== "Enter" && event.key !== " ") {
+          return;
+        }
+        event.preventDefault();
+        onSelect();
+      }}
+    >
       <span className="dot" data-status="unknown" />
       <span className="pane-body">
         <span className="pane-name">{label}</span>
         <span className="pane-meta mono">{message}</span>
       </span>
-      <span
+      <button
         className="pane-word"
+        type="button"
         data-status="working"
-        role="button"
-        tabIndex={0}
         onClick={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          onRetry();
-        }}
-        onKeyDown={(event) => {
-          if (event.key !== "Enter" && event.key !== " ") {
-            return;
-          }
           event.preventDefault();
           event.stopPropagation();
           onRetry();
         }}
       >
         retry
-      </span>
-    </button>
+      </button>
+    </div>
   );
 }
 
