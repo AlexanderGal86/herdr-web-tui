@@ -3438,6 +3438,36 @@ mod tests {
         );
     }
 
+    // If the nonblocking switch fails, the drain must fail the probe with a
+    // distinct error instead of degrading to a blocking read — the exact
+    // hang this drain exists to prevent. The reader's fd is invalid, so
+    // fcntl fails before any read() is attempted.
+    #[cfg(unix)]
+    #[test]
+    fn probe_output_drain_fails_fast_when_nonblocking_switch_fails() {
+        struct BrokenFdReader;
+        impl std::io::Read for BrokenFdReader {
+            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                unreachable!("read must not run when the fd switch fails");
+            }
+        }
+        impl std::os::unix::io::AsRawFd for BrokenFdReader {
+            fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
+                -1
+            }
+        }
+
+        let err = read_probe_output(
+            Some(BrokenFdReader),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .expect_err("a failed nonblocking switch must fail the drain, not read");
+        assert!(
+            err.starts_with("remote machine probe failed to switch ssh output to nonblocking mode"),
+            "unexpected error: {err}"
+        );
+    }
+
     // Cleanup: option-like and control-character targets are rejected before
     // any probe or bridge starts, even though the catalog is trusted.
     #[test]
