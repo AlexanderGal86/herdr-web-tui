@@ -1113,10 +1113,8 @@ fn probe_remote_support_with_timeout(
                     read_probe_output(child.stdout.take(), deadline),
                     read_probe_output(child.stderr.take(), deadline),
                 ) {
-                    (Some(stdout), Some(stderr)) => (stdout, stderr),
-                    _ => {
-                        return Err("remote machine probe timed out reading ssh output".to_string())
-                    }
+                    (Ok(stdout), Ok(stderr)) => (stdout, stderr),
+                    (Err(message), _) | (_, Err(message)) => return Err(message),
                 };
                 let stderr = stderr.trim();
                 if status.success() && stdout.trim() == REMOTE_API_BRIDGE_CAPABILITY {
@@ -1139,6 +1137,13 @@ fn probe_remote_support_with_timeout(
                 return Err("remote machine probe timed out".to_string());
             }
             Err(err) => {
+                // ECHILD: the child is no longer ours (reaped elsewhere), so
+                // its pid — and the whole process group — may already be
+                // recycled: signalling by number could kill an unrelated
+                // process. Return the failure without any signals.
+                if err.raw_os_error() == Some(libc::ECHILD) {
+                    return Err(format!("remote machine probe failed: {err}"));
+                }
                 kill_process_group(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
@@ -1158,33 +1163,44 @@ fn probe_remote_support_with_timeout(
 fn read_probe_output<R: std::io::Read + std::os::unix::io::AsRawFd>(
     pipe: Option<R>,
     deadline: Instant,
-) -> Option<String> {
+) -> Result<String, String> {
     let mut pipe = match pipe {
         Some(pipe) => pipe,
-        None => return Some(String::new()),
+        None => return Ok(String::new()),
     };
     // Nonblocking reads let the poll loop below enforce the deadline
-    // (same fcntl dance as the machine-add stderr drain).
-    let fd = pipe.as_raw_fd();
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL, 0) };
-    if flags >= 0 {
-        unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    // (same fcntl dance as the machine-add stderr drain). A pipe left in
+    // blocking mode would hang past the deadline — the exact bug this
+    // drain exists to prevent — so a failed switch must fail the probe
+    // instead of degrading to a blocking read.
+    fn nonblocking_or_bust(fd: std::os::unix::io::RawFd) -> Result<(), String> {
+        // SAFETY: fcntl on a pipe fd with F_GETFL/F_SETFL is
+        // async-signal-safe and cannot mutate the caller's memory.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL, 0) };
+        if flags >= 0 && unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } >= 0 {
+            return Ok(());
+        }
+        Err(format!(
+            "remote machine probe failed to switch ssh output to nonblocking mode: {}",
+            std::io::Error::last_os_error()
+        ))
     }
+    nonblocking_or_bust(pipe.as_raw_fd())?;
     let mut out = Vec::new();
     let mut buf = [0u8; 4096];
     loop {
         if Instant::now() >= deadline {
-            return None;
+            return Err("remote machine probe timed out reading ssh output".to_string());
         }
         match pipe.read(&mut buf) {
-            Ok(0) => return Some(String::from_utf8_lossy(&out).into_owned()),
+            Ok(0) => return Ok(String::from_utf8_lossy(&out).into_owned()),
             Ok(n) => out.extend_from_slice(&buf[..n]),
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(PROBE_POLL);
             }
             // Hard read errors end the drain like the old `let _ =`
             // read_to_string: whatever arrived is kept.
-            Err(_) => return Some(String::from_utf8_lossy(&out).into_owned()),
+            Err(_) => return Ok(String::from_utf8_lossy(&out).into_owned()),
         }
     }
 }
@@ -1192,12 +1208,15 @@ fn read_probe_output<R: std::io::Read + std::os::unix::io::AsRawFd>(
 /// Non-unix twin: no deadline enforcement is possible without a portable
 /// nonblocking story, so the read stays blocking as it always was.
 #[cfg(not(unix))]
-fn read_probe_output<R: std::io::Read>(pipe: Option<R>, _deadline: Instant) -> Option<String> {
+fn read_probe_output<R: std::io::Read>(
+    pipe: Option<R>,
+    _deadline: Instant,
+) -> Result<String, String> {
     let mut out = String::new();
     if let Some(mut pipe) = pipe {
         let _ = pipe.read_to_string(&mut out);
     }
-    Some(out)
+    Ok(out)
 }
 
 /// Runs the native `herdr machine add` registration on the bridge host.
