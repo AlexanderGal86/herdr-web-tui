@@ -1,5 +1,10 @@
+/**
+ * @vitest-environment jsdom
+ */
 import { describe, expect, it } from "vitest";
 import {
+  BRIDGE_BACK_EVENT,
+  createBridgeBackSignal,
   MAX_TERMINAL_ATTACH_CONFLICT_RETRIES,
   TERMINAL_CONNECTION_OVERLAY_DELAY_MS,
   isNonRetryableTerminalClose,
@@ -44,6 +49,27 @@ describe("terminalConnectionStatus", () => {
     expect(isTerminalAttachConflictClose("terminal attach taken over")).toBe(false);
     expect(isTerminalAttachConflictClose(null)).toBe(false);
     expect(MAX_TERMINAL_ATTACH_CONFLICT_RETRIES).toBeGreaterThan(0);
+  });
+
+  it("signals bridge recovery only on the unavailable-to-available transition", () => {
+    const signal = createBridgeBackSignal();
+    const events: CustomEvent[] = [];
+    const listener = (event: Event) => events.push(event as CustomEvent);
+    window.addEventListener(BRIDGE_BACK_EVENT, listener);
+    try {
+      // A healthy bridge's periodic snapshot successes must not spam wakes.
+      expect(signal.markAvailable("bridge-1", "key-1")).toBe(false);
+      expect(events).toEqual([]);
+
+      signal.markUnavailable();
+      expect(signal.markAvailable("bridge-1", "key-1")).toBe(true);
+      // Repeated successes after the recovery are the same outage ending.
+      expect(signal.markAvailable("bridge-1", "key-1")).toBe(false);
+    } finally {
+      window.removeEventListener(BRIDGE_BACK_EVENT, listener);
+    }
+    expect(events).toHaveLength(1);
+    expect(events[0]!.detail).toEqual({ bridgeId: "bridge-1", connectionKey: "key-1" });
   });
 
   it("maps terminal connection states to status copy", () => {

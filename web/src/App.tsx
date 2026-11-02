@@ -232,7 +232,7 @@ import {
   workspaceReorderRoots,
 } from "./workspaceReorder";
 import type { WorkspaceReorderDirection } from "./workspaceReorder";
-import { TERMINAL_CONNECTION_LOST_EVENT } from "./terminalConnectionStatus";
+import { createBridgeBackSignal, TERMINAL_CONNECTION_LOST_EVENT } from "./terminalConnectionStatus";
 import { supportsUploads } from "./terminalUploads";
 
 const NoteMarkdownPreview = lazy(() => import("./NoteMarkdownPreview"));
@@ -5001,13 +5001,15 @@ export function BridgeConnectionController({
         connectionRefs.current[runtime.id]?.connectionKey ?? "",
         requestConnectionKey,
       );
+    const bridgeBackSignal = createBridgeBackSignal();
     const refreshController = createSnapshotRefreshController({
       fetchSnapshot: () => fetchSnapshot(httpUrlRef.current),
       getGeneration: () => connectionRefs.current[runtime.id]?.activityGeneration ?? 0,
       getBarrierGeneration: () =>
         connectionRefs.current[runtime.id]?.resyncBarrierGeneration ?? 0,
       isCurrent: isCurrentConnection,
-      onError: () =>
+      onError: () => {
+        bridgeBackSignal.markUnavailable();
         setConnectionStates((current) => ({
           ...current,
           [runtime.id]: {
@@ -5018,7 +5020,8 @@ export function BridgeConnectionController({
                 : null,
             loadState: "error",
           },
-        })),
+        }));
+      },
       applySnapshot: (next, refreshGeneration) => {
         const currentRef = connectionRefs.current[runtime.id];
         if (!currentRef || currentRef.connectionKey !== requestConnectionKey) {
@@ -5034,6 +5037,8 @@ export function BridgeConnectionController({
             loadState: "ready",
           },
         }));
+        // Terminal panes listen for this to fast-reconnect out of backoff.
+        bridgeBackSignal.markAvailable(runtime.id, requestConnectionKey);
       },
     });
     const refresh = () => refreshController.request();

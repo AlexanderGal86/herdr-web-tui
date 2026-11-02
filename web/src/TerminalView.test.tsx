@@ -430,6 +430,64 @@ describe("TerminalView reconnect timing", () => {
   });
 });
 
+describe("TerminalView bridge-back wake", () => {
+  const BRIDGE_BACK_EVENT = "herdr:bridge-back";
+
+  const renderClosedTerminal = async (terminalId: string) => {
+    const drafts = createCommandDraftStore();
+    await renderTerminalView(testPane(terminalId), drafts);
+    await act(async () => {
+      terminalRenderers[0]!.completeMount();
+      await Promise.resolve();
+    });
+    const socket = FakeWebSocket.instances.at(-1)!;
+    await act(async () => {
+      socket.close(); // reconnect scheduled on the 500ms backoff
+    });
+    return socket;
+  };
+
+  it("fast-reconnects on bridge-back for its own bridge before the backoff fires", async () => {
+    await renderClosedTerminal("terminal-bridge-back");
+    const instancesBeforeWake = FakeWebSocket.instances.length;
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent(BRIDGE_BACK_EVENT, {
+          detail: { bridgeId: "bridge-1", connectionKey: "test-connection" },
+        }),
+      );
+      // The 0–300ms jitter always lands before the 500ms backoff would.
+      await vi.advanceTimersByTimeAsync(450);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(instancesBeforeWake + 1);
+  });
+
+  it("ignores bridge-back for other bridges and connections", async () => {
+    await renderClosedTerminal("terminal-bridge-back-foreign");
+    const instancesBefore = FakeWebSocket.instances.length;
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent(BRIDGE_BACK_EVENT, {
+          detail: { bridgeId: "other-bridge", connectionKey: "test-connection" },
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(450);
+      window.dispatchEvent(
+        new CustomEvent(BRIDGE_BACK_EVENT, {
+          detail: { bridgeId: "bridge-1", connectionKey: "other-connection" },
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(40);
+    });
+    // Neither foreign signal woke the terminal before its normal backoff.
+    expect(FakeWebSocket.instances).toHaveLength(instancesBefore);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(instancesBefore + 1);
+  });
+});
+
 describe("TerminalView connection-lost signaling", () => {
   it("sends a queued command submit as one batch instead of pacing Enter 35ms behind", async () => {
     const drafts = createCommandDraftStore();

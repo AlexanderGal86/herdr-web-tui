@@ -23,6 +23,9 @@ export const TERMINAL_CONNECT_TIMEOUT_MS = 10000;
 export const TERMINAL_FOREGROUND_CONNECT_TIMEOUT_MS = 1200;
 export const TERMINAL_FOREGROUND_FAST_ATTEMPTS = 2;
 export const TERMINAL_FOREGROUND_SIGNAL_COALESCE_MS = 400;
+// Wake jitter for bridge-back signals, so every terminal pane of a bridge
+// does not reconnect in the same instant the app announces recovery.
+export const TERMINAL_BRIDGE_BACK_JITTER_MAX_MS = 300;
 
 export function terminalReconnectPolicy({
   attempt,

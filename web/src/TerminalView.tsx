@@ -35,11 +35,12 @@ import {
   isTerminalAttachConflictClose,
   MAX_TERMINAL_ATTACH_CONFLICT_RETRIES,
   parseTerminalCloseReason,
+  BRIDGE_BACK_EVENT,
   TERMINAL_CONNECTION_LOST_EVENT,
   terminalConnectionCopy,
   terminalConnectionOverlayDelayMs,
 } from "./terminalConnectionStatus";
-import type { TerminalConnectionState } from "./terminalConnectionStatus";
+import type { BridgeBackDetail, TerminalConnectionState } from "./terminalConnectionStatus";
 import {
   findFirstUrlInSelection,
   normalizeMobileTerminalCopyText,
@@ -65,6 +66,7 @@ import { DEFAULT_TERMINAL_FONT_SIZE_PX } from "./terminalPrefs";
 import {
   TERMINAL_FOREGROUND_FAST_ATTEMPTS,
   TERMINAL_FOREGROUND_SIGNAL_COALESCE_MS,
+  TERMINAL_BRIDGE_BACK_JITTER_MAX_MS,
   terminalReconnectPolicy,
 } from "./terminalReconnectPolicy";
 import type { TerminalReconnectMode } from "./terminalReconnectPolicy";
@@ -167,6 +169,7 @@ type ReconnectReason =
   | "visible"
   | "online"
   | "resize"
+  | "bridge-back"
   | "manual";
 type TerminalRendererReady = {
   terminalId: string;
@@ -765,6 +768,7 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
     let socket: WebSocket | null = null;
     let reconnectTimer: number | null = null;
     let connectTimer: number | null = null;
+    let bridgeBackTimer: number | null = null;
     let foregroundCoalesceTimer: number | null = null;
     let reconnectAttempts = 0;
     let foregroundFastAttemptsRemaining = 0;
@@ -1156,6 +1160,24 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
       scheduleConnect(reason, "normal", reason === "initial" || reason === "manual");
     };
 
+    const handleBridgeBack = (event: Event) => {
+      const detail = (event as CustomEvent<BridgeBackDetail>).detail;
+      if (reconnectStopped || !detail || detail.bridgeId !== bridgeId || detail.connectionKey !== connectionKey) {
+        return;
+      }
+      // Accelerator, not a replacement for backoff: wake the terminal out of
+      // its backoff wait, with jitter so a bridge's panes do not all reconnect
+      // in the same instant.
+      if (bridgeBackTimer !== null) {
+        window.clearTimeout(bridgeBackTimer);
+      }
+      const jitterMs = Math.random() * TERMINAL_BRIDGE_BACK_JITTER_MAX_MS;
+      bridgeBackTimer = window.setTimeout(() => {
+        bridgeBackTimer = null;
+        requestForegroundReconnect("bridge-back");
+      }, jitterMs);
+    };
+
     requestReconnectRef.current = requestReconnect;
     const removeNativeResumeHandler = addNativeResumeHandler(() => requestReconnect("resume"));
     const handleVisibilityChange = () => {
@@ -1166,6 +1188,7 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
     const handleOnline = () => requestReconnect("online");
     document.addEventListener("visibilitychange", handleVisibilityChange);
     window.addEventListener("online", handleOnline);
+    window.addEventListener(BRIDGE_BACK_EVENT, handleBridgeBack);
 
     requestReconnect("initial");
 
@@ -1174,6 +1197,10 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
       removeNativeResumeHandler();
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("online", handleOnline);
+      window.removeEventListener(BRIDGE_BACK_EVENT, handleBridgeBack);
+      if (bridgeBackTimer !== null) {
+        window.clearTimeout(bridgeBackTimer);
+      }
       requestReconnectRef.current = () => {};
       flushBatchedTerminalInput();
       batchedInputRef.current = emptyTerminalInputBatch();
@@ -1184,6 +1211,7 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
       sendResizeRef.current = () => {};
     };
   }, [
+    bridgeId,
     connectionKey,
     clearQueuedTerminalInput,
     flushBatchedTerminalInput,

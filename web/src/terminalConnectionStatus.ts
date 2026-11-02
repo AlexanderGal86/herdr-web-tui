@@ -10,6 +10,44 @@ export const TERMINAL_CONNECTION_OVERLAY_DELAY_MS = 500;
  */
 export const TERMINAL_CONNECTION_LOST_EVENT = "herdr-web:terminal-connection-lost";
 
+/**
+ * Dispatched on `window` when a bridge runtime's app-level connection
+ * recovers — a snapshot fetch succeeds again after a failure. Terminal
+ * panes use it to fast-reconnect instead of waiting out their backoff.
+ */
+export const BRIDGE_BACK_EVENT = "herdr:bridge-back";
+
+export type BridgeBackDetail = {
+  bridgeId: string;
+  connectionKey: string;
+};
+
+/**
+ * Transition-only bridge recovery signal: wakes listeners when a snapshot
+ * succeeds after a failure was seen, never on periodic healthy refreshes,
+ * so each outage ends in exactly one event.
+ */
+export function createBridgeBackSignal() {
+  let unavailable = false;
+  return {
+    markUnavailable() {
+      unavailable = true;
+    },
+    markAvailable(bridgeId: string, connectionKey: string) {
+      if (!unavailable) {
+        return false;
+      }
+      unavailable = false;
+      window.dispatchEvent(
+        new CustomEvent<BridgeBackDetail>(BRIDGE_BACK_EVENT, {
+          detail: { bridgeId, connectionKey },
+        }),
+      );
+      return true;
+    },
+  };
+}
+
 export function parseTerminalCloseReason(message: string) {
   try {
     const parsed = JSON.parse(message) as { type?: unknown; reason?: unknown };
