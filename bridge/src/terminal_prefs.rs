@@ -1,7 +1,10 @@
 //! Bridge-side persistent preference store for per-terminal client settings.
 //!
-//! Currently stores the "Send right-clicks to the pane" mode (`auto`/`off`)
-//! per (machine key, terminal id). `terminal_id` is only unique within one
+//! Stores the "Send right-clicks to the pane" mode (`auto`/`off`) per
+//! (machine key, terminal id). Contract until a forwarding protocol with
+//! Herdr is settled: `off` means no right-click frames are forwarded (the
+//! legacy fallback applies); afterwards it will be the server-side mode
+//! or legacy. `terminal_id` is only unique within one
 //! Herdr daemon, so every record is namespaced by the machine key of the
 //! route that owns the pane ("local" or a saved SSH machine id) — colliding
 //! terminal ids on different machines must never share a preference.
