@@ -2183,7 +2183,7 @@ mod tests {
     fn machine_gate_recovers_registry_after_poison() {
         let root = home_test_root("gate-poison");
         let manager = manager_with(MachineManagerConfig {
-            socket_dir: Some(root),
+            socket_dir: Some(root.to_path_buf()),
             probe: ok_probe(),
             ..MachineManagerConfig::default()
         });
