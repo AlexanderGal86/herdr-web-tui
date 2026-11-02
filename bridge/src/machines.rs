@@ -3183,6 +3183,91 @@ mod tests {
         );
     }
 
+    // Probe teardown: `Child::kill` only signals the ssh leader, so a
+    // ProxyCommand-style descendant would outlive a timed-out probe and
+    // accumulate in the long-lived bridge process. The grandchild ignores
+    // SIGTERM on purpose (a stubborn nc/socat helper) to pin the teardown
+    // to a group SIGKILL, not a mere leader kill or group SIGTERM.
+    #[cfg(unix)]
+    #[test]
+    fn probe_timeout_kills_the_ssh_process_group() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let endpoint = test_endpoint(&hex_id(19), "root@198.51.100.20");
+        let root = home_test_root("pt");
+        let script = root.join("fake-ssh.sh");
+        let pid_file = root.join("grandchild.pid");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n[ \"$1\" = warmup ] && exit 0\n\
+                 python3 -c 'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(600)' &\n\
+                 echo $! > {}\nsleep 60\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+        // ETXTBSY warm-up (see machine_disable_runner): exec the just-written
+        // stub until the overlayfs window passes, so the probe's own spawn is
+        // proven good and cannot shortcut the scenario.
+        for _ in 0..40 {
+            match std::process::Command::new(&script).arg("warmup").status() {
+                Ok(status) if status.success() => break,
+                Err(err) if err.to_string().contains("Text file busy") => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                other => panic!("warmup failed: {other:?}"),
+            }
+        }
+        let probe = std::thread::spawn(move || {
+            probe_remote_support_with_timeout(
+                &endpoint,
+                script.to_str().unwrap(),
+                Duration::from_secs(3),
+            )
+        });
+        let grandchild_pid: i32 = {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                    if let Ok(pid) = text.trim().parse() {
+                        break pid;
+                    }
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "fake ssh never wrote its grandchild pid"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        assert!(
+            process_alive(grandchild_pid),
+            "grandchild must be alive before the probe times out"
+        );
+
+        let error = probe
+            .join()
+            .unwrap()
+            .expect_err("a sleeping probe stub must time out");
+        assert_eq!(error, "remote machine probe timed out");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if !process_alive(grandchild_pid) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "grandchild pid {grandchild_pid} survived the probe teardown"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     // Cleanup: option-like and control-character targets are rejected before
     // any probe or bridge starts, even though the catalog is trusted.
     #[test]
