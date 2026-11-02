@@ -348,7 +348,9 @@ pub(crate) struct MachineManagerConfig {
 impl Default for MachineManagerConfig {
     fn default() -> Self {
         Self {
-            probe: Arc::new(probe_remote_support) as ProbeFn,
+            // Real deployments resolve "ssh" from PATH; tests inject a stub.
+            probe: Arc::new(|endpoint: &SavedEndpoint| probe_remote_support(endpoint, "ssh"))
+                as ProbeFn,
             negative_cache_ttl: DEFAULT_NEGATIVE_CACHE_TTL,
             max_bridge_connections: DEFAULT_MAX_BRIDGE_CONNECTIONS,
             socket_dir: None,
@@ -1046,12 +1048,12 @@ fn copy_pipe<R: std::io::Read, W: std::io::Write>(
 /// closed unless the remote Herdr reports the exact supported marker.
 /// The error string is for server-side logs only; callers must not forward
 /// it to browsers.
-pub fn probe_remote_support(endpoint: &SavedEndpoint) -> Result<(), String> {
+pub fn probe_remote_support(endpoint: &SavedEndpoint, ssh_program: &str) -> Result<(), String> {
     if !is_valid_ssh_target(&endpoint.target) {
         return Err("invalid ssh target".to_string());
     }
     let args = ssh_remote_herdr_check_args(endpoint);
-    let mut command = Command::new("ssh");
+    let mut command = Command::new(ssh_program);
     command
         .args(&args)
         .stdin(Stdio::null())
@@ -3037,6 +3039,44 @@ mod tests {
             "nothing listens after stop"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Cleanup: the capability probe must spawn the ssh program supplied by
+    // the caller (tests inject a stub), never a PATH-resolved "ssh".
+    #[cfg(unix)]
+    #[test]
+    fn probe_runs_injected_ssh_program_with_check_args() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let endpoint = test_endpoint(&hex_id(18), "root@198.51.100.20");
+        let root = home_test_root("pv");
+        let script = root.join("fake-ssh.sh");
+        let argv_file = root.join("probe-argv.txt");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\necho {}\n",
+                argv_file.display(),
+                REMOTE_API_BRIDGE_CAPABILITY
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        probe_remote_support(&endpoint, script.to_str().unwrap())
+            .expect("probe must succeed via the injected program");
+
+        let recorded = std::fs::read_to_string(&argv_file).unwrap();
+        assert_eq!(
+            recorded.lines().collect::<Vec<_>>(),
+            ssh_remote_herdr_check_args(&endpoint)
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            "the injected program must receive exactly the check argv"
+        );
     }
 
     // Cleanup: option-like and control-character targets are rejected before
