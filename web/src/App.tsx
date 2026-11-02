@@ -4875,6 +4875,8 @@ const SHARED_SELECTION_SETTLE_TIMEOUT_MS = 2000;
 const NOTES_REFRESH_INTERVAL_MS = 15000;
 const MAX_PENDING_CREATED_PANE_NOTES = 32;
 const NOTE_DRAFT_STORAGE_PREFIX = "herdr-web:note-draft:v1:";
+// Shared empty list keeps the reorder memos stable when no snapshot is loaded.
+const NO_REORDER_WORKSPACES: readonly WorkspaceInfo[] = [];
 const NOTE_EDITOR_MODE_STORAGE_KEY = "herdr-web:note-editor-mode:v1";
 
 export function resolveInitialSelectedBridgeId(
@@ -6721,7 +6723,8 @@ function Switcher({
   const reorderBridgeView = spaceReorderMode
     ? (hostBridgeViews.find((view) => view.runtime.id === spaceReorderMode.bridgeId) ?? null)
     : null;
-  const reorderWorkspaces = reorderBridgeView?.snapshot?.workspaces ?? [];
+  const reorderWorkspaces: readonly WorkspaceInfo[] =
+    reorderBridgeView?.snapshot?.workspaces ?? NO_REORDER_WORKSPACES;
   const reorderBlockIds = useMemo(
     () =>
       spaceReorderMode
