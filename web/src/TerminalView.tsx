@@ -42,6 +42,13 @@ import {
 } from "./terminalConnectionStatus";
 import type { BridgeBackDetail, TerminalConnectionState } from "./terminalConnectionStatus";
 import {
+  isForwardingActive,
+  parseRightClickPassthroughErrorFrame,
+  parseRightClickPassthroughFrame,
+  shouldApplyRevision,
+} from "./terminalPassthroughMode";
+import type { TerminalPassthroughMode, TerminalPassthroughRequest } from "./terminalPassthroughMode";
+import {
   findFirstUrlInSelection,
   normalizeMobileTerminalCopyText,
   openableHttpUrl,
@@ -142,9 +149,14 @@ type Props = {
   selected?: boolean;
   onContextMenu?: (x: number, y: number) => void;
   onActivate?: () => void;
+  /** Legacy localStorage opt-in for bridges that never send right_click_passthrough frames. */
   rightClickPassthrough?: boolean;
-  /** Turns the pane's right-click passthrough preference off (exit chip). */
+  /** Turns the legacy right-click passthrough preference off (legacy bridges only). */
   onToggleRightClickPassthrough?: () => void;
+  /** Reports the bridge-tracked right-click passthrough mode whenever it changes. */
+  onPassthroughChange?: (mode: TerminalPassthroughMode) => void;
+  /** Menu command to switch this pane's mode; token-deduped and identity-matched. */
+  passthroughRequest?: TerminalPassthroughRequest | null;
   /** Creates a terminal renderer for each mounted terminal pane. */
   createTerminalRenderer?: TerminalRendererFactory;
 };
@@ -218,6 +230,8 @@ export function TerminalView({
   onActivate,
   rightClickPassthrough = false,
   onToggleRightClickPassthrough,
+  onPassthroughChange,
+  passthroughRequest = null,
   createTerminalRenderer = createGhosttyTerminalRenderer,
 }: Props) {
   const contextKeyRef = useRef<string | null>(null);  const middlePointerDownRef = useRef(false);
@@ -236,6 +250,19 @@ export function TerminalView({
   const rendererReadyRef = useRef<TerminalRendererReady | null>(null);
   const rightClickPassthroughRef = useRef(rightClickPassthrough);
   rightClickPassthroughRef.current = rightClickPassthrough;
+  // Bridge-tracked right-click passthrough: null until the bridge's first
+  // right_click_passthrough frame (legacy bridges never send one).
+  const [bridgePassthroughMode, setBridgePassthroughMode] = useState<TerminalPassthroughMode | null>(null);
+  const bridgePassthroughModeRef = useRef<TerminalPassthroughMode | null>(null);
+  // Revisions are per-connection: the bridge restarts them at 0.
+  const passthroughRevisionRef = useRef<number | null>(null);
+  const passthroughRequestIdRef = useRef(0);
+  const lastPassthroughRequestTokenRef = useRef(0);
+  const onPassthroughChangeRef = useRef(onPassthroughChange);
+  onPassthroughChangeRef.current = onPassthroughChange;
+  // Mirrors the pane's mouse_mode tracking so the exit button follows
+  // effective forwarding (tracking AND auto mode).
+  const [paneMouseCapture, setPaneMouseCapture] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
   const requestReconnectRef = useRef<(reason: ReconnectReason) => void>(() => {});
   const retryAttachRef = useRef<() => void>(() => {});
@@ -291,6 +318,12 @@ export function TerminalView({
   terminalInputBatchDelayMsRef.current = terminalInputBatchDelayMs;
   connectionKeyRef.current = connectionKey;
   terminalIdRef.current = pane?.terminal_id ?? null;
+  // Bridge mode wins once seen; the legacy localStorage flag only speaks for
+  // bridges that never sent a frame.
+  const effectivePassthroughMode: TerminalPassthroughMode =
+    bridgePassthroughMode ?? (rightClickPassthrough ? "auto" : "off");
+  const rightClickForwarding = effectivePassthroughMode === "auto";
+  const passthroughEffective = isForwardingActive(paneMouseCapture, effectivePassthroughMode);
 
   const focusCommandInput = useCallback(() => {
     if (!mobileControlsRef.current && !desktopCommandComposerRef.current) {
@@ -342,6 +375,19 @@ export function TerminalView({
         setUploadStatus(null);
       }, timeoutMs);
     }
+  }, []);
+
+  const sendSetRightClickPassthrough = useCallback((mode: TerminalPassthroughMode) => {
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    passthroughRequestIdRef.current += 1;
+    socket.send(
+      JSON.stringify({
+        type: "set_right_click_passthrough",
+        mode,
+        requestId: passthroughRequestIdRef.current,
+      }),
+    );
   }, []);
 
   const copyText = useCallback(
@@ -747,6 +793,12 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
   useEffect(() => {
     const terminalId = pane?.terminal_id ?? null;
     const ready = rendererReady;
+    // A new terminal or renderer re-seeds passthrough truth from the bridge;
+    // forwarding stays off until its first frame.
+    bridgePassthroughModeRef.current = null;
+    setBridgePassthroughMode(null);
+    passthroughRevisionRef.current = null;
+    setPaneMouseCapture(false);
     if (!terminalId) {
       setConnectionState("idle");
       requestReconnectRef.current = () => {};
@@ -892,6 +944,9 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
         clearConnectTimer();
         clearReconnectTimer();
         reconnectAttempts = 0;
+        // Each connection carries its own revision series; the bridge
+        // restarts them at 0 after a restart.
+        passthroughRevisionRef.current = null;
         reconnectScheduledForSocket.delete(currentSocketGeneration);
         lastCloseReason = null;
         connectionLostNotified = false;
@@ -928,9 +983,37 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
           const mouseMode = parseTerminalMouseMode(event.data);
           if (mouseMode !== null) {
             ready.renderer.setMouseCapture(mouseMode);
+            setPaneMouseCapture(mouseMode);
             // Re-seed the gate with every mouse_mode frame: a pane that
             // starts/stops tracking must not lose (or gain) forwarding.
-            ready.renderer.setMousePassthrough(rightClickPassthroughRef.current);
+            ready.renderer.setMousePassthrough(
+              (bridgePassthroughModeRef.current ??
+                (rightClickPassthroughRef.current ? "auto" : "off")) === "auto",
+            );
+            return;
+          }
+          const passthroughFrame = parseRightClickPassthroughFrame(event.data);
+          if (passthroughFrame) {
+            // The broadcast and the personal ack share one revision; apply once.
+            if (shouldApplyRevision(passthroughRevisionRef.current, passthroughFrame.revision)) {
+              passthroughRevisionRef.current = passthroughFrame.revision;
+              bridgePassthroughModeRef.current = passthroughFrame.mode;
+              setBridgePassthroughMode(passthroughFrame.mode);
+              // The renderer ANDs this with its own mouseCapture tracking.
+              ready.renderer.setMousePassthrough(passthroughFrame.mode === "auto");
+              onPassthroughChangeRef.current?.(passthroughFrame.mode);
+            }
+            return;
+          }
+          const passthroughError = parseRightClickPassthroughErrorFrame(event.data);
+          if (passthroughError) {
+            // Only the latest request matters; older rejections are superseded.
+            if (
+              passthroughRequestIdRef.current > 0 &&
+              passthroughError.requestId === passthroughRequestIdRef.current
+            ) {
+              showUploadStatus(`Right-click setting failed: ${passthroughError.error}`, 4000);
+            }
             return;
           }
           lastCloseReason = parseTerminalCloseReason(event.data) ?? lastCloseReason;
@@ -1218,6 +1301,7 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
     flushQueuedTerminalInput,
     pane?.terminal_id,
     rendererReady,
+    showUploadStatus,
     terminalOutputCoalesceMs,
     wsUrl,
   ]);
@@ -1546,10 +1630,30 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
   }, [pasteToken]);
 
   // The pane's mouse-passthrough opt-in (TTT) can flip at runtime via the pane
-  // menu; keep the renderer's forwarding gate in sync.
+  // menu; keep the renderer's forwarding gate in sync. Once the bridge
+  // reported a mode it owns the gate (its frames drive it instead).
   useEffect(() => {
-    rendererRef.current?.setMousePassthrough(rightClickPassthrough);
+    if (bridgePassthroughModeRef.current === null) {
+      rendererRef.current?.setMousePassthrough(rightClickPassthrough);
+    }
   }, [rightClickPassthrough]);
+
+  // Menu commands arrive as tokens so a single mounted pane can be targeted.
+  useEffect(() => {
+    if (!passthroughRequest || passthroughRequest.token <= lastPassthroughRequestTokenRef.current) {
+      return;
+    }
+    lastPassthroughRequestTokenRef.current = passthroughRequest.token;
+    if (
+      bridgePassthroughModeRef.current === null || // legacy bridge: localStorage path owns it
+      passthroughRequest.bridgeId !== bridgeId ||
+      passthroughRequest.connectionKey !== connectionKeyRef.current ||
+      passthroughRequest.terminalId !== terminalIdRef.current
+    ) {
+      return;
+    }
+    sendSetRightClickPassthrough(passthroughRequest.mode);
+  }, [passthroughRequest, bridgeId, sendSetRightClickPassthrough]);
 
 
   const captureTerminalMouse = (event: ReactMouseEvent<HTMLDivElement>) => {
@@ -1559,7 +1663,7 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
     // the browser-like gestures below even while an app tracks the mouse.
     const paneAppGatePasses =
       event.button !== 0 &&
-      rightClickPassthrough &&
+      rightClickForwarding &&
       Boolean(rendererRef.current?.hasActiveMouseTracking()) &&
       !event.shiftKey;
     if (event.button !== 0 && (event.type === "pointerdown" || event.type === "mousedown")) {
@@ -1621,7 +1725,7 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
         // Passthrough only reroutes the click when the pane app actually
         // tracks the mouse; a non-tracking pane keeps the Herdr menu.
         const appOwnsRightClick =
-          rightClickPassthrough && Boolean(rendererRef.current?.hasActiveMouseTracking());
+          rightClickForwarding && Boolean(rendererRef.current?.hasActiveMouseTracking());
         gesture.blocked = !appOwnsRightClick || event.shiftKey;
         gesture.opened = false;
       }
@@ -1629,7 +1733,7 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
     }
     if (
       !gesture.blocked &&
-      rightClickPassthrough &&
+      rightClickForwarding &&
       rendererRef.current?.hasActiveMouseTracking() &&
       !event.shiftKey
     ) {
@@ -1657,7 +1761,7 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
       return;
     }
     if (
-      rightClickPassthrough &&
+      rightClickForwarding &&
       rendererRef.current?.hasActiveMouseTracking() &&
       !event.shiftKey
     ) {
@@ -1670,7 +1774,7 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
     event.stopPropagation();
     if (
       contextGestureRef.current.opened ||
-      (rightClickPassthrough && rendererRef.current?.hasActiveMouseTracking() && !event.shiftKey)
+      (rightClickForwarding && rendererRef.current?.hasActiveMouseTracking() && !event.shiftKey)
     ) {
       return;
     }
@@ -1801,7 +1905,7 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
           <Paperclip size={16} />
         </button>
       ) : null}
-      {rightClickPassthrough && onToggleRightClickPassthrough ? (
+      {(bridgePassthroughMode !== null ? passthroughEffective : rightClickPassthrough && onToggleRightClickPassthrough) ? (
         <button
           className="passthrough-exit-button"
           type="button"
@@ -1810,7 +1914,11 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
           onClick={(event) => {
             event.stopPropagation();
             event.preventDefault();
-            onToggleRightClickPassthrough();
+            if (bridgePassthroughMode !== null) {
+              sendSetRightClickPassthrough("off");
+            } else {
+              onToggleRightClickPassthrough?.();
+            }
           }}
         >
           <MousePointerBan size={15} />
