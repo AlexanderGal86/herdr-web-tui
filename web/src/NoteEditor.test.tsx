@@ -260,6 +260,32 @@ describe("NoteEditor draft persistence", () => {
     expect(draftWrites).toHaveLength(1);
     expect(JSON.parse(draftWrites[0][1] as string)).toMatchObject({ body: "abc", baseRevision: 5 });
   });
+
+  it("does not resurrect a cleared draft when unmounting right after a clean save", async () => {
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+    const removeItem = vi.spyOn(Storage.prototype, "removeItem");
+    const { container, render, root } = createEditorHarness(vi.fn(() => Promise.resolve(6)));
+    const entry = noteEntry({ revision: 5, body: "" });
+    const draftKey = noteDraftStorageKey(entry);
+    await render(entry);
+
+    await changeTextarea(container, "cleaned");
+    expect(localStorage.getItem(draftKey)).toBeNull();
+
+    // Parent updates the note with the saved content: editor state matches, so the
+    // clean branch clears the draft and drops the pending write for this key.
+    await render(noteEntry({ revision: 6, body: "cleaned" }));
+    expect(localStorage.getItem(draftKey)).toBeNull();
+    expect(removeItem.mock.calls.some(([key]) => key === draftKey)).toBe(true);
+
+    // No timer advance: unmount immediately, the unmount flush must not resurrect.
+    await act(async () => {
+      root.unmount();
+    });
+
+    expect(localStorage.getItem(draftKey)).toBeNull();
+    expect(setItem.mock.calls.filter(([key]) => key === draftKey)).toHaveLength(0);
+  });
 });
 
 describe("NoteEditor autosave conflicts", () => {
