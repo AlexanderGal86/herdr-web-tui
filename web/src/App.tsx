@@ -101,6 +101,7 @@ import type { LaunchTarget } from "./launch";
 import { fetchLauncherPresets, supportsLauncherPresets } from "./launcherPresets";
 import type { LauncherPresetsResponse } from "./launcherPresets";
 import { fetchWithTimeout } from "./fetchWithTimeout";
+import { isRecord } from "./isRecord";
 import {
   DEFAULT_MOBILE_COMMAND_ENTER_NEWLINE,
   DEFAULT_MOBILE_COMMAND_FOCUS_AFTER_SUBMIT,
@@ -931,10 +932,6 @@ export function parseCollapsedSidebarGroups(value: unknown, fallback: string[] =
       value.filter((item): item is string => typeof item === "string" && item.length > 0),
     ),
   ].slice(-MAX_COLLAPSED_SIDEBAR_GROUPS);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
 }
 
 function isMobileDetailHistoryState(value: unknown) {

@@ -1,4 +1,5 @@
 import { aggregateStatus } from "./state";
+import { isRecord } from "./isRecord";
 import type { ActivityMessage, AgentStatus, PaneAgentStatusChangedMessage, Snapshot } from "./types";
 
 export type ActivityLogEntry = {
@@ -167,6 +168,4 @@ function isStringRecord(value: unknown): value is Record<string, string> {
   return isRecord(value) && Object.values(value).every((item) => typeof item === "string");
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+
