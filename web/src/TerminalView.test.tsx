@@ -1405,6 +1405,55 @@ describe("TerminalView right-click passthrough transport", () => {
     expect(onPassthroughChange).toHaveBeenCalledTimes(2);
   });
 
+  it("replaces a stale auto mode with the server's off on reconnect", async () => {
+    const onContextMenu = vi.fn();
+    const { renderer, socket, deliver } = await mountPassthroughPane({
+      onContextMenu,
+    });
+    await deliver(passthroughFrame("auto", 3));
+    await deliver('{"type":"mouse_mode","enabled":true}');
+    expect(renderer.mousePassthrough).toBe(true);
+    await act(async () => {
+      socket.close();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    const nextSocket = FakeWebSocket.instances.at(-1)!;
+    expect(nextSocket).not.toBe(socket);
+    await act(async () => {
+      nextSocket.open();
+    });
+    // A contract-C bridge always seeds the mode before any mouse_mode frame
+    // (see terminal_ws_seeds_passthrough_before_mouse_mode); the gap between
+    // socket open and the seed is a legacy-bridge window, not modeled here.
+    await act(async () => {
+      nextSocket.dispatchEvent(new MessageEvent("message", { data: passthroughFrame("off", 0) }));
+    });
+    // Before any new mouse_mode frame: the fresh server off replaces the
+    // stale auto at both gates.
+    expect(renderer.mousePassthrough).toBe(false);
+    let menuEvent: MouseEvent | undefined;
+    await act(async () => {
+      menuEvent = contextMenuOn(renderer.input);
+    });
+    expect(menuEvent!.defaultPrevented).toBe(true);
+    expect(onContextMenu).toHaveBeenCalledOnce();
+    expect(document.querySelector(".passthrough-exit-button")).toBeNull();
+    await act(async () => {
+      nextSocket.dispatchEvent(new MessageEvent("message", { data: '{"type":"mouse_mode","enabled":true}' }));
+    });
+    expect(renderer.mouseCapture).toBe(true);
+    expect(renderer.mousePassthrough).toBe(false);
+    await act(async () => {
+      menuEvent = contextMenuOn(renderer.input);
+    });
+    expect(menuEvent!.defaultPrevented).toBe(true);
+    expect(onContextMenu).toHaveBeenCalledTimes(2);
+    expect(document.querySelector(".passthrough-exit-button")).toBeNull();
+    expect(setFrames(nextSocket)).toEqual([]);
+  });
+
   it("reports errors only for the latest request and keeps the mode untouched", async () => {
     const onPassthroughChange = vi.fn();
     const { renderer, deliver } = await mountPassthroughPane({ onPassthroughChange });
