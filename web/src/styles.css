@@ -3552,14 +3552,14 @@ button {
   bottom: calc(var(--terminal-command-controls-height) + 8px * var(--mobile-controls-scale));
 }
 
-/* Bottom-right shortcut opening the TTT editor pane via the bridge's
-   builtin:ttt plugin preset. Hidden unless the bridge offers it. Sits above
-   the stage bar (56px, 60px touch) and, on touch, above the mobile terminal
-   controls strip so no bar control or quick key is covered. */
+/* Top-left shortcut opening the TTT editor pane via the bridge's
+   builtin:ttt plugin preset. Hidden unless the bridge offers it. Mirrors the
+   terminal upload FAB (top-right of the terminal area) from the top-left, so
+   both controls sit on the same row. */
 .ttt-launch-button {
   position: fixed;
-  right: 16px;
-  bottom: calc(56px + 10px);
+  top: calc(var(--content-inset-top, 0px) + 46px);
+  left: calc(var(--sidebar-w) + 20px);
   z-index: 90;
   padding: 8px 14px;
   border: 1px solid var(--surface1);
@@ -3587,6 +3587,6 @@ button {
   cursor: default;
 }
 
-.app[data-touch="true"] .ttt-launch-button {
-  bottom: calc(60px + 82px * var(--mobile-controls-scale, 1) + 10px);
+.app[data-sidebar="closed"] .ttt-launch-button {
+  left: 20px;
 }
