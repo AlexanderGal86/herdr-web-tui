@@ -180,6 +180,8 @@
   [Will Hampson (@Whamp)](https://github.com/Whamp).
 
 ### Fixed
+- Web: pressing Enter in the rename dialog while a rename is already in flight no longer
+  re-fires the rename submit (the form now ignores submits while busy, like the buttons).
 - Web: reject malformed snapshot and note payloads element-by-element instead of accepting
   arrays with non-object entries, so a malformed bridge response is treated as a retryable error
   rather than crashing the workspace view or echoing bad attachment history back to the bridge.
