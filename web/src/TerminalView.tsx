@@ -35,11 +35,12 @@ import {
   isTerminalAttachConflictClose,
   MAX_TERMINAL_ATTACH_CONFLICT_RETRIES,
   parseTerminalCloseReason,
+  BRIDGE_BACK_EVENT,
   TERMINAL_CONNECTION_LOST_EVENT,
   terminalConnectionCopy,
   terminalConnectionOverlayDelayMs,
 } from "./terminalConnectionStatus";
-import type { TerminalConnectionState } from "./terminalConnectionStatus";
+import type { BridgeBackDetail, TerminalConnectionState } from "./terminalConnectionStatus";
 import {
   findFirstUrlInSelection,
   normalizeMobileTerminalCopyText,
@@ -63,12 +64,10 @@ import {
 } from "./terminalOutputEncoding";
 import { DEFAULT_TERMINAL_FONT_SIZE_PX } from "./terminalPrefs";
 import {
-  TERMINAL_FOREGROUND_FAST_ATTEMPTS,
-  TERMINAL_FOREGROUND_CONNECT_TIMEOUT_MS,
   TERMINAL_FOREGROUND_SIGNAL_COALESCE_MS,
+  TERMINAL_BRIDGE_BACK_JITTER_MAX_MS,
   terminalReconnectPolicy,
 } from "./terminalReconnectPolicy";
-import type { TerminalReconnectMode } from "./terminalReconnectPolicy";
 import { DEFAULT_MOBILE_TOUCH_SELECTION_ENDPOINT_TIMEOUT_MS } from "./mobileTerminalPrefs";
 import type {
   MobileLongPressBehavior,
@@ -168,6 +167,7 @@ type ReconnectReason =
   | "visible"
   | "online"
   | "resize"
+  | "bridge-back"
   | "manual";
 type TerminalRendererReady = {
   terminalId: string;
@@ -238,6 +238,7 @@ export function TerminalView({
   rightClickPassthroughRef.current = rightClickPassthrough;
   const socketRef = useRef<WebSocket | null>(null);
   const requestReconnectRef = useRef<(reason: ReconnectReason) => void>(() => {});
+  const retryAttachRef = useRef<() => void>(() => {});
   const terminalInputBlockedRef = useRef(false);
   const uploadInputId = useId();
   const sendResizeRef = useRef<(size: TerminalSize) => void>(() => {});
@@ -749,6 +750,7 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
     if (!terminalId) {
       setConnectionState("idle");
       requestReconnectRef.current = () => {};
+      retryAttachRef.current = () => {};
       return;
     }
     if (
@@ -759,6 +761,7 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
     ) {
       setConnectionState("connecting");
       requestReconnectRef.current = () => {};
+      retryAttachRef.current = () => {};
       return;
     }
 
@@ -766,14 +769,13 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
     let socket: WebSocket | null = null;
     let reconnectTimer: number | null = null;
     let connectTimer: number | null = null;
+    let bridgeBackTimer: number | null = null;
     let foregroundCoalesceTimer: number | null = null;
     let reconnectAttempts = 0;
-    let foregroundFastAttemptsRemaining = 0;
     let attachConflictRetries = 0;
     let lastCloseReason: string | null = null;
     let connectionLostNotified = false;
     let socketGeneration = 0;
-    let socketStartedAt = 0;
     let lastForegroundReconnectAt = Number.NEGATIVE_INFINITY;
     let reconnectStopped = false;
     const reconnectScheduledForSocket = new Set<number>();
@@ -872,9 +874,12 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
       socket = nextSocket;
       socketRef.current = nextSocket;
       nextSocket.binaryType = "arraybuffer";
-      socketStartedAt = performance.now();
       setConnectionState("connecting");
       debugReconnect("connect_start", { reason, socketGeneration, connectTimeoutMs });
+      // The timeout guards only the CONNECTING phase (the HTTP upgrade): it
+      // is cleared by "open", and retryStalledConnect ignores sockets that
+      // are no longer CONNECTING — so it never cuts an established socket,
+      // it only bounds how long a stuck upgrade may hang.
       connectTimer = window.setTimeout(
         () => retryStalledConnect(nextSocket, currentSocketGeneration),
         connectTimeoutMs,
@@ -887,7 +892,6 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
         clearConnectTimer();
         clearReconnectTimer();
         reconnectAttempts = 0;
-        foregroundFastAttemptsRemaining = 0;
         reconnectScheduledForSocket.delete(currentSocketGeneration);
         lastCloseReason = null;
         connectionLostNotified = false;
@@ -1003,11 +1007,7 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
       });
     };
 
-    const scheduleConnect = (
-      reason: ReconnectReason,
-      mode: TerminalReconnectMode,
-      immediate: boolean,
-    ) => {
+    const scheduleConnect = (reason: ReconnectReason, immediate: boolean) => {
       if (disposed || reconnectStopped) {
         return;
       }
@@ -1019,16 +1019,12 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
       }
       const policy = terminalReconnectPolicy({
         attempt: reconnectAttempts,
-        mode,
         immediate,
-        foregroundFastAttemptsRemaining,
       });
       reconnectAttempts = policy.nextAttempt;
-      foregroundFastAttemptsRemaining = policy.nextForegroundFastAttemptsRemaining;
       setConnectionState("connecting");
       debugReconnect("scheduled", {
         reason,
-        mode,
         delayMs: policy.delayMs,
         connectTimeoutMs: policy.connectTimeoutMs,
       });
@@ -1044,9 +1040,7 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
     };
 
     function scheduleReconnect(reason: ReconnectReason) {
-      const mode: TerminalReconnectMode =
-        foregroundFastAttemptsRemaining > 0 ? "foreground" : "normal";
-      scheduleConnect(reason, mode, false);
+      scheduleConnect(reason, false);
     }
 
     function scheduleSocketReconnect(reason: ReconnectReason, socketId: number) {
@@ -1092,26 +1086,18 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
         }
         return;
       }
-      if (
-        currentSocket?.readyState === WebSocket.CONNECTING &&
-        now - socketStartedAt < TERMINAL_FOREGROUND_CONNECT_TIMEOUT_MS
-      ) {
-        const socketId = socketGeneration;
-        const remainingMs = Math.max(1, TERMINAL_FOREGROUND_CONNECT_TIMEOUT_MS - (now - socketStartedAt));
-        clearConnectTimer();
-        connectTimer = window.setTimeout(
-          () => retryStalledConnect(currentSocket, socketId),
-          remainingMs,
-        );
+      if (currentSocket?.readyState === WebSocket.CONNECTING) {
+        // An in-flight attempt runs to the timeout its own policy gave it
+        // (10s): re-arming a slow upgrade mid-flight would only discard a
+        // socket that is about to open against the rising bridge.
         return;
       }
       reconnectAttempts = 0;
-      foregroundFastAttemptsRemaining = TERMINAL_FOREGROUND_FAST_ATTEMPTS;
       clearReconnectTimer();
       if (currentSocket) {
         closeActiveSocket();
       }
-      scheduleConnect(reason, "foreground", true);
+      scheduleConnect(reason, true);
     };
 
     const requestForegroundReconnect = (reason: ReconnectReason) => {
@@ -1158,10 +1144,40 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
         scheduleReconnect(reason);
         return;
       }
-      scheduleConnect(reason, "normal", reason === "initial" || reason === "manual");
+      scheduleConnect(reason, reason === "initial" || reason === "manual");
+    };
+
+    const handleBridgeBack = (event: Event) => {
+      const detail = (event as CustomEvent<BridgeBackDetail>).detail;
+      if (reconnectStopped || !detail || detail.bridgeId !== bridgeId || detail.connectionKey !== connectionKey) {
+        return;
+      }
+      // Accelerator, not a replacement for backoff: wake the terminal out of
+      // its backoff wait, with jitter so a bridge's panes do not all reconnect
+      // in the same instant.
+      if (bridgeBackTimer !== null) {
+        window.clearTimeout(bridgeBackTimer);
+      }
+      const jitterMs = Math.random() * TERMINAL_BRIDGE_BACK_JITTER_MAX_MS;
+      bridgeBackTimer = window.setTimeout(() => {
+        bridgeBackTimer = null;
+        requestForegroundReconnect("bridge-back");
+      }, jitterMs);
     };
 
     requestReconnectRef.current = requestReconnect;
+    // The overlay's Retry button re-arms a pane stopped by an attach
+    // conflict — the one stop state that can never recover on its own.
+    retryAttachRef.current = () => {
+      if (disposed) {
+        return;
+      }
+      reconnectStopped = false;
+      attachConflictRetries = 0;
+      reconnectAttempts = 0;
+      setCloseReason(null);
+      requestReconnect("manual");
+    };
     const removeNativeResumeHandler = addNativeResumeHandler(() => requestReconnect("resume"));
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
@@ -1171,6 +1187,7 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
     const handleOnline = () => requestReconnect("online");
     document.addEventListener("visibilitychange", handleVisibilityChange);
     window.addEventListener("online", handleOnline);
+    window.addEventListener(BRIDGE_BACK_EVENT, handleBridgeBack);
 
     requestReconnect("initial");
 
@@ -1179,7 +1196,12 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
       removeNativeResumeHandler();
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("online", handleOnline);
+      window.removeEventListener(BRIDGE_BACK_EVENT, handleBridgeBack);
+      if (bridgeBackTimer !== null) {
+        window.clearTimeout(bridgeBackTimer);
+      }
       requestReconnectRef.current = () => {};
+      retryAttachRef.current = () => {};
       flushBatchedTerminalInput();
       batchedInputRef.current = emptyTerminalInputBatch();
       clearReconnectTimer();
@@ -1189,6 +1211,7 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
       sendResizeRef.current = () => {};
     };
   }, [
+    bridgeId,
     connectionKey,
     clearQueuedTerminalInput,
     flushBatchedTerminalInput,
@@ -1750,6 +1773,15 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
       {pane && showConnectionOverlay && connectionState !== "attached" ? (
         <div className="terminal-overlay">
           {terminalConnectionCopy(connectionState, closeReason, hasAttachedForTerminal)}
+          {connectionState === "closed" && isTerminalAttachConflictClose(closeReason) ? (
+            <button
+              className="terminal-overlay-retry"
+              type="button"
+              onClick={() => retryAttachRef.current()}
+            >
+              Retry attach
+            </button>
+          ) : null}
         </div>
       ) : null}
       {uploadStatus ? (

@@ -373,6 +373,206 @@ function testPane(terminalId: string): PaneInfo {
 }
 
 
+describe("TerminalView reconnect timing", () => {
+  const renderConnectingTerminal = async (terminalId: string) => {
+    const drafts = createCommandDraftStore();
+    await renderTerminalView(testPane(terminalId), drafts);
+    await act(async () => {
+      terminalRenderers[0]!.completeMount();
+      await Promise.resolve();
+    });
+    return FakeWebSocket.instances.at(-1)!;
+  };
+
+  it("keeps a slow CONNECTING upgrade alive past 3.5s and only stalls it at 10s", async () => {
+    const socket = await renderConnectingTerminal("terminal-slow-upgrade");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3500);
+    });
+    // Old behavior: the 3.5s connect timeout burned this attempt while the
+    // restarting bridge was still completing the HTTP upgrade.
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(socket.readyState).toBe(FakeWebSocket.CONNECTING);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(socket.readyState).toBe(FakeWebSocket.CONNECTING);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(socket.readyState).toBe(FakeWebSocket.CLOSED);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+  });
+
+  it("does not let a foreground signal cut an in-flight connect attempt short", async () => {
+    const socket = await renderConnectingTerminal("terminal-foreground-patient");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    await act(async () => {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => "visible",
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    // The in-flight attempt runs to the 10s timeout every attempt gets:
+    // a foreground signal must not re-arm a slow upgrade mid-flight.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(socket.readyState).toBe(FakeWebSocket.CONNECTING);
+  });
+});
+
+describe("TerminalView bridge-back wake", () => {
+  const BRIDGE_BACK_EVENT = "herdr:bridge-back";
+
+  const renderClosedTerminal = async (terminalId: string) => {
+    const drafts = createCommandDraftStore();
+    await renderTerminalView(testPane(terminalId), drafts);
+    await act(async () => {
+      terminalRenderers[0]!.completeMount();
+      await Promise.resolve();
+    });
+    const socket = FakeWebSocket.instances.at(-1)!;
+    await act(async () => {
+      socket.close(); // reconnect scheduled on the 500ms backoff
+    });
+    return socket;
+  };
+
+  it("fast-reconnects on bridge-back for its own bridge before the backoff fires", async () => {
+    await renderClosedTerminal("terminal-bridge-back");
+    const instancesBeforeWake = FakeWebSocket.instances.length;
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent(BRIDGE_BACK_EVENT, {
+          detail: { bridgeId: "bridge-1", connectionKey: "test-connection" },
+        }),
+      );
+      // The 0–300ms jitter always lands before the 500ms backoff would.
+      await vi.advanceTimersByTimeAsync(450);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(instancesBeforeWake + 1);
+  });
+
+  it("gives the bridge-back foreground attempt the full 10s connect timeout", async () => {
+    const closedSocket = await renderClosedTerminal("terminal-bridge-back-slow-open");
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent(BRIDGE_BACK_EVENT, {
+          detail: { bridgeId: "bridge-1", connectionKey: "test-connection" },
+        }),
+      );
+      // The 0–300ms jitter always lands before the 500ms backoff would.
+      await vi.advanceTimersByTimeAsync(450);
+    });
+    const socket = FakeWebSocket.instances.at(-1)!;
+    expect(socket).not.toBe(closedSocket);
+    // Old behavior: the 1.2s foreground fast timeout killed this attempt
+    // while the restarting bridge was still completing the HTTP upgrade.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    expect(socket.readyState).toBe(FakeWebSocket.CONNECTING);
+    await act(async () => {
+      socket.open(); // the slow upgrade completes, well past 1.2s
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(socket.readyState).toBe(FakeWebSocket.OPEN);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    // The open socket kept its place: no attempt got rescheduled past it.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(8000);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    expect(socket.readyState).toBe(FakeWebSocket.OPEN);
+  });
+
+  it("ignores bridge-back for other bridges and connections", async () => {
+    await renderClosedTerminal("terminal-bridge-back-foreign");
+    const instancesBefore = FakeWebSocket.instances.length;
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent(BRIDGE_BACK_EVENT, {
+          detail: { bridgeId: "other-bridge", connectionKey: "test-connection" },
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(450);
+      window.dispatchEvent(
+        new CustomEvent(BRIDGE_BACK_EVENT, {
+          detail: { bridgeId: "bridge-1", connectionKey: "other-connection" },
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(40);
+    });
+    // Neither foreign signal woke the terminal before its normal backoff.
+    expect(FakeWebSocket.instances).toHaveLength(instancesBefore);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(instancesBefore + 1);
+  });
+});
+
+describe("TerminalView attach-conflict stop and retry", () => {
+  const CONFLICT_CLOSE =
+    '{"type":"closed","reason":"terminal attach failed: terminal t-1 already has an attached client; retry with --takeover"}';
+
+  const attachConflictClose = (socket: FakeWebSocket) => {
+    socket.dispatchEvent(new MessageEvent("message", { data: CONFLICT_CLOSE }));
+    socket.close();
+  };
+
+  it("stops after repeated attach conflicts, stays stopped, and retries from the overlay button", async () => {
+    const drafts = createCommandDraftStore();
+    await renderTerminalView(testPane("terminal-conflict"), drafts);
+    await act(async () => {
+      terminalRenderers[0]!.completeMount();
+      await Promise.resolve();
+    });
+    FakeWebSocket.instances[0]!.open();
+
+    // Four consecutive conflicts: three retries (500ms, 1s, 2s backoff), then stop.
+    for (let round = 0; round < 4; round += 1) {
+      const socket = FakeWebSocket.instances.at(-1)!;
+      await act(async () => {
+        attachConflictClose(socket);
+        await vi.advanceTimersByTimeAsync(2500);
+      });
+    }
+    expect(FakeWebSocket.instances).toHaveLength(4);
+    expect(document.querySelector(".terminal-overlay")?.textContent).toContain("Attached elsewhere");
+
+    // Stopped panes neither retry on their own nor wake for bridge recovery.
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent("herdr:bridge-back", {
+          detail: { bridgeId: "bridge-1", connectionKey: "test-connection" },
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(4);
+
+    // The overlay button starts a fresh attach attempt immediately.
+    const retryButton = document.querySelector<HTMLButtonElement>(".terminal-overlay-retry");
+    expect(retryButton).not.toBeNull();
+    await act(async () => {
+      retryButton!.click();
+      await vi.advanceTimersByTimeAsync(10);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(5);
+  });
+});
+
 describe("TerminalView connection-lost signaling", () => {
   it("sends a queued command submit as one batch instead of pacing Enter 35ms behind", async () => {
     const drafts = createCommandDraftStore();

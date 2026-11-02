@@ -2419,6 +2419,23 @@ button {
   color: var(--peach);
 }
 
+.terminal-overlay-retry {
+  flex: 0 0 auto;
+  padding: 3px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--line));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--mantle) 86%, black);
+  color: var(--accent);
+  font-size: 12px;
+  line-height: 1.4;
+  touch-action: manipulation;
+}
+
+.terminal-overlay-retry:hover,
+.terminal-overlay-retry:focus-visible {
+  border-color: var(--accent);
+}
+
 /* --------------------------------------------------- create + tab head */
 
 .sec-add {
