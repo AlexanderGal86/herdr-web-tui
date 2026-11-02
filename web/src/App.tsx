@@ -4875,6 +4875,7 @@ const SHARED_SELECTION_SETTLE_TIMEOUT_MS = 2000;
 const NOTES_REFRESH_INTERVAL_MS = 15000;
 const MAX_PENDING_CREATED_PANE_NOTES = 32;
 const NOTE_DRAFT_STORAGE_PREFIX = "herdr-web:note-draft:v1:";
+const NOTE_DRAFT_WRITE_DEBOUNCE_MS = 400;
 // Shared empty list keeps the reorder memos stable when no snapshot is loaded.
 const NO_REORDER_WORKSPACES: readonly WorkspaceInfo[] = [];
 const NOTE_EDITOR_MODE_STORAGE_KEY = "herdr-web:note-editor-mode:v1";
@@ -9178,10 +9179,13 @@ export function NoteEditor({
       return;
     }
     if (dirty && (title !== entry.note.title || body !== entry.note.body)) {
-      writeNoteDraft(entry, title, body, baseRevision ?? entry.note.revision);
-    } else {
-      clearNoteDraft(entry);
+      // Debounced like the 700ms autosave: keystrokes must not hit localStorage directly.
+      const timer = window.setTimeout(() => {
+        writeNoteDraft(entry, title, body, baseRevision ?? entry.note.revision);
+      }, NOTE_DRAFT_WRITE_DEBOUNCE_MS);
+      return () => window.clearTimeout(timer);
     }
+    clearNoteDraft(entry);
   }, [baseRevision, body, dirty, entry, title]);
 
   useEffect(() => {

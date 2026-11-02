@@ -191,6 +191,26 @@ describe("QuickPaneNoteDialog", () => {
   });
 });
 
+describe("NoteEditor draft persistence", () => {
+  it("debounces local draft writes instead of writing on every keystroke", async () => {
+    const onSave = vi.fn(() => Promise.resolve(6));
+    const { container, render } = createEditorHarness(onSave);
+    const entry = noteEntry({ revision: 5, body: "" });
+    await render(entry);
+
+    await changeTextarea(container, "a");
+    expect(localStorage.getItem(noteDraftStorageKey(entry))).toBeNull();
+
+    await act(async () => {
+      vi.advanceTimersByTime(500);
+      await Promise.resolve();
+    });
+    const raw = localStorage.getItem(noteDraftStorageKey(entry));
+    expect(raw).not.toBeNull();
+    expect(JSON.parse(raw as string)).toMatchObject({ body: "a", baseRevision: 5 });
+  });
+});
+
 describe("NoteEditor autosave conflicts", () => {
   it("keeps continued typing pending when the user's in-flight save appears in a refetch", async () => {
     const saves: Array<{
