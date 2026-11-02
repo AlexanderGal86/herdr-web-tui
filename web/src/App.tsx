@@ -3537,7 +3537,9 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
         let cancelled = false;
         void (async () => {
           try {
-            const response = await fetch(runtime.httpUrl("/api/workspace-zones"));
+            const response = await fetchWithTimeout(
+              runtime.httpUrl("/api/workspace-zones"),
+            );
             if (!response.ok) {
               throw new Error(`workspace zones request failed (${response.status})`);
             }
@@ -3570,7 +3572,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
       return;
     }
     try {
-      const response = await fetch(runtime.httpUrl("/api/workspace-zones"), {
+      const response = await fetchWithTimeout(runtime.httpUrl("/api/workspace-zones"), {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ mode }),
