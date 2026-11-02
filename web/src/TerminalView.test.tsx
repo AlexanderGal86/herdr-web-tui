@@ -373,6 +373,63 @@ function testPane(terminalId: string): PaneInfo {
 }
 
 
+describe("TerminalView reconnect timing", () => {
+  const renderConnectingTerminal = async (terminalId: string) => {
+    const drafts = createCommandDraftStore();
+    await renderTerminalView(testPane(terminalId), drafts);
+    await act(async () => {
+      terminalRenderers[0]!.completeMount();
+      await Promise.resolve();
+    });
+    return FakeWebSocket.instances.at(-1)!;
+  };
+
+  it("keeps a slow CONNECTING upgrade alive past 3.5s and only stalls it at 10s", async () => {
+    const socket = await renderConnectingTerminal("terminal-slow-upgrade");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3500);
+    });
+    // Old behavior: the 3.5s connect timeout burned this attempt while the
+    // restarting bridge was still completing the HTTP upgrade.
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(socket.readyState).toBe(FakeWebSocket.CONNECTING);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(socket.readyState).toBe(FakeWebSocket.CONNECTING);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(socket.readyState).toBe(FakeWebSocket.CLOSED);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+  });
+
+  it("does not let a foreground signal cut an in-flight connect attempt short", async () => {
+    const socket = await renderConnectingTerminal("terminal-foreground-patient");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    await act(async () => {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => "visible",
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    // The in-flight attempt keeps its own 10s connect timeout: the 1.2s
+    // foreground fast timeout only governs attempts the signal starts.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(socket.readyState).toBe(FakeWebSocket.CONNECTING);
+  });
+});
+
 describe("TerminalView connection-lost signaling", () => {
   it("sends a queued command submit as one batch instead of pacing Enter 35ms behind", async () => {
     const drafts = createCommandDraftStore();

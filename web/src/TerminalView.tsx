@@ -64,7 +64,6 @@ import {
 import { DEFAULT_TERMINAL_FONT_SIZE_PX } from "./terminalPrefs";
 import {
   TERMINAL_FOREGROUND_FAST_ATTEMPTS,
-  TERMINAL_FOREGROUND_CONNECT_TIMEOUT_MS,
   TERMINAL_FOREGROUND_SIGNAL_COALESCE_MS,
   terminalReconnectPolicy,
 } from "./terminalReconnectPolicy";
@@ -773,7 +772,6 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
     let lastCloseReason: string | null = null;
     let connectionLostNotified = false;
     let socketGeneration = 0;
-    let socketStartedAt = 0;
     let lastForegroundReconnectAt = Number.NEGATIVE_INFINITY;
     let reconnectStopped = false;
     const reconnectScheduledForSocket = new Set<number>();
@@ -872,9 +870,12 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
       socket = nextSocket;
       socketRef.current = nextSocket;
       nextSocket.binaryType = "arraybuffer";
-      socketStartedAt = performance.now();
       setConnectionState("connecting");
       debugReconnect("connect_start", { reason, socketGeneration, connectTimeoutMs });
+      // The timeout guards only the CONNECTING phase (the HTTP upgrade): it
+      // is cleared by "open", and retryStalledConnect ignores sockets that
+      // are no longer CONNECTING — so it never cuts an established socket,
+      // it only bounds how long a stuck upgrade may hang.
       connectTimer = window.setTimeout(
         () => retryStalledConnect(nextSocket, currentSocketGeneration),
         connectTimeoutMs,
@@ -1092,17 +1093,11 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
         }
         return;
       }
-      if (
-        currentSocket?.readyState === WebSocket.CONNECTING &&
-        now - socketStartedAt < TERMINAL_FOREGROUND_CONNECT_TIMEOUT_MS
-      ) {
-        const socketId = socketGeneration;
-        const remainingMs = Math.max(1, TERMINAL_FOREGROUND_CONNECT_TIMEOUT_MS - (now - socketStartedAt));
-        clearConnectTimer();
-        connectTimer = window.setTimeout(
-          () => retryStalledConnect(currentSocket, socketId),
-          remainingMs,
-        );
+      if (currentSocket?.readyState === WebSocket.CONNECTING) {
+        // An in-flight attempt keeps the connect timeout its policy gave it
+        // (10s for normal attempts): a foreground signal must not shorten a
+        // slow upgrade mid-flight. The 1.2s foreground fast timeout only
+        // governs attempts the foreground path itself starts below.
         return;
       }
       reconnectAttempts = 0;

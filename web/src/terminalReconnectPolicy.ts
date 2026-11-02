@@ -15,8 +15,11 @@ export type TerminalReconnectPolicy = {
 };
 
 export const TERMINAL_RECONNECT_BASE_DELAY_MS = 500;
-export const TERMINAL_RECONNECT_MAX_DELAY_MS = 5000;
-export const TERMINAL_CONNECT_TIMEOUT_MS = 3500;
+// A restarting bridge can take several seconds to complete the terminal
+// socket's HTTP upgrade; a 10s ceiling lets such attempts finish instead of
+// burning and re-scheduling against a bridge that is already coming up.
+export const TERMINAL_RECONNECT_MAX_DELAY_MS = 3000;
+export const TERMINAL_CONNECT_TIMEOUT_MS = 10000;
 export const TERMINAL_FOREGROUND_CONNECT_TIMEOUT_MS = 1200;
 export const TERMINAL_FOREGROUND_FAST_ATTEMPTS = 2;
 export const TERMINAL_FOREGROUND_SIGNAL_COALESCE_MS = 400;

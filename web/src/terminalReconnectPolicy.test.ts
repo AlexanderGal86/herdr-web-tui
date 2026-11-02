@@ -43,6 +43,29 @@ describe("terminalReconnectPolicy", () => {
     ).toBe(TERMINAL_RECONNECT_MAX_DELAY_MS);
   });
 
+  // Wave-8 measurement: a restarting bridge left the terminal dead ~23s
+  // because attempts burned on 3.5s connect timeouts against a slow HTTP
+  // upgrade and the 5s backoff cap stretched the gaps.
+  it("keeps a normal connect attempt alive for 10s against a slow upgrade", () => {
+    expect(TERMINAL_CONNECT_TIMEOUT_MS).toBe(10000);
+  });
+
+  it("caps normal reconnect backoff at 3s", () => {
+    const delays: number[] = [];
+    let attempt = 0;
+    for (let i = 0; i < 6; i += 1) {
+      const policy = terminalReconnectPolicy({
+        attempt,
+        mode: "normal",
+        immediate: false,
+        foregroundFastAttemptsRemaining: 0,
+      });
+      delays.push(policy.delayMs);
+      attempt = policy.nextAttempt;
+    }
+    expect(delays).toEqual([500, 1000, 2000, 3000, 3000, 3000]);
+  });
+
   it("keeps the foreground fast-attempt transition in the pure policy", () => {
     const first = terminalReconnectPolicy({
       attempt: 0,
