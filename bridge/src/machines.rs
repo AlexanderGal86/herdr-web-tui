@@ -3324,6 +3324,89 @@ mod tests {
         }
     }
 
+    // Probe output drain: the ssh leader can exit while a surviving
+    // helper (a ProxyCommand-style descendant) still holds the stdout /
+    // stderr write ends — a blocking read there would hang the probe past
+    // its deadline and leave the machine unavailable until the bridge
+    // restarts. Cleanup kills the helper by its RECORDED pid (never a
+    // pkill pattern) before any assert, so even a hung run unwinds the
+    // probe thread without leaving orphans behind.
+    #[cfg(unix)]
+    #[test]
+    fn probe_returns_within_the_deadline_when_a_helper_holds_the_output_pipe() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let endpoint = test_endpoint(&hex_id(20), "root@198.51.100.20");
+        let root = home_test_root("pr");
+        let script = root.join("fake-ssh.sh");
+        let pid_file = root.join("helper.pid");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n[ \"$1\" = warmup ] && exit 0\n\
+                 python3 -c 'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(600)' &\n\
+                 echo $! > {}\nexit 0\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+        // ETXTBSY warm-up (see machine_disable_runner): exec the just-written
+        // stub until the overlayfs window passes, so the probe's own spawn is
+        // proven good and cannot shortcut the scenario.
+        for _ in 0..40 {
+            match std::process::Command::new(&script).arg("warmup").status() {
+                Ok(status) if status.success() => break,
+                Err(err) if err.to_string().contains("Text file busy") => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                other => panic!("warmup failed: {other:?}"),
+            }
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let probe = std::thread::spawn(move || {
+            let _ = tx.send(probe_remote_support_with_timeout(
+                &endpoint,
+                script.to_str().unwrap(),
+                Duration::from_secs(2),
+            ));
+        });
+        let helper_pid: i32 = {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                    if let Ok(pid) = text.trim().parse() {
+                        break pid;
+                    }
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "fake ssh never wrote its helper pid"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        assert!(
+            process_alive(helper_pid),
+            "helper must be alive while it holds the output pipe"
+        );
+        let outcome = rx.recv_timeout(Duration::from_secs(5));
+        // Cleanup FIRST, by the recorded pid: closing the pipe unwinds even
+        // a probe hung on the pre-fix blocking read.
+        unsafe { libc::kill(helper_pid, libc::SIGKILL) };
+        probe.join().unwrap();
+
+        let result = outcome.expect(
+            "probe must return within its deadline; it hung on the output pipe held by the surviving helper",
+        );
+        assert_eq!(
+            result,
+            Err("remote machine probe timed out reading ssh output".to_string())
+        );
+    }
+
     // Cleanup: option-like and control-character targets are rejected before
     // any probe or bridge starts, even though the catalog is trusted.
     #[test]
