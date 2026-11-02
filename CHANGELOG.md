@@ -180,6 +180,12 @@
   [Will Hampson (@Whamp)](https://github.com/Whamp).
 
 ### Fixed
+- Bridge: the saved-machine capability probe no longer hangs forever when its ssh leader
+  exits while a surviving helper (e.g. a ProxyCommand descendant) still holds the probe's
+  output pipes open: the output drain now shares the probe's single deadline and fails with a
+  timeout error instead of blocking the probe thread — and leaving the machine unavailable —
+  until the bridge restarts. The helper itself is left running: after the leader is reaped its
+  pid could already be recycled, so killing it is unsafe.
 - Bridge: the saved-machine capability probe (`remote-api-bridge --check`) now runs its ssh
   child in its own process group and SIGKILLs the whole group on timeout or poll errors, so ssh
   helper descendants (e.g. ProxyCommand helpers) can no longer outlive a timed-out probe and

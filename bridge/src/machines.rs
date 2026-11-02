@@ -1106,14 +1106,18 @@ fn probe_remote_support_with_timeout(
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let mut stdout = String::new();
-                if let Some(mut pipe) = child.stdout.take() {
-                    let _ = pipe.read_to_string(&mut stdout);
-                }
-                let mut stderr = String::new();
-                if let Some(mut pipe) = child.stderr.take() {
-                    let _ = pipe.read_to_string(&mut stderr);
-                }
+                // The leader is already reaped here, so nothing may be killed
+                // to close these pipes: a surviving helper holding the write
+                // ends must instead run out of the probe's shared deadline.
+                let (stdout, stderr) = match (
+                    read_probe_output(child.stdout.take(), deadline),
+                    read_probe_output(child.stderr.take(), deadline),
+                ) {
+                    (Some(stdout), Some(stderr)) => (stdout, stderr),
+                    _ => {
+                        return Err("remote machine probe timed out reading ssh output".to_string())
+                    }
+                };
                 let stderr = stderr.trim();
                 if status.success() && stdout.trim() == REMOTE_API_BRIDGE_CAPABILITY {
                     return Ok(());
@@ -1142,6 +1146,58 @@ fn probe_remote_support_with_timeout(
             }
         }
     }
+}
+
+/// Drains one probe output pipe under the probe's deadline. The ssh
+/// leader is already reaped when this runs, so a surviving ProxyCommand
+/// descendant holding the pipe's write end is the only thing that can
+/// keep it open — a plain blocking read would hang the probe thread (and
+/// leave the machine unavailable) until the bridge restarts. Nothing is
+/// killed here: after the reap the pid could already be recycled.
+#[cfg(unix)]
+fn read_probe_output<R: std::io::Read + std::os::unix::io::AsRawFd>(
+    pipe: Option<R>,
+    deadline: Instant,
+) -> Option<String> {
+    let mut pipe = match pipe {
+        Some(pipe) => pipe,
+        None => return Some(String::new()),
+    };
+    // Nonblocking reads let the poll loop below enforce the deadline
+    // (same fcntl dance as the machine-add stderr drain).
+    let fd = pipe.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL, 0) };
+    if flags >= 0 {
+        unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    }
+    let mut out = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        match pipe.read(&mut buf) {
+            Ok(0) => return Some(String::from_utf8_lossy(&out).into_owned()),
+            Ok(n) => out.extend_from_slice(&buf[..n]),
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(PROBE_POLL);
+            }
+            // Hard read errors end the drain like the old `let _ =`
+            // read_to_string: whatever arrived is kept.
+            Err(_) => return Some(String::from_utf8_lossy(&out).into_owned()),
+        }
+    }
+}
+
+/// Non-unix twin: no deadline enforcement is possible without a portable
+/// nonblocking story, so the read stays blocking as it always was.
+#[cfg(not(unix))]
+fn read_probe_output<R: std::io::Read>(pipe: Option<R>, _deadline: Instant) -> Option<String> {
+    let mut out = String::new();
+    if let Some(mut pipe) = pipe {
+        let _ = pipe.read_to_string(&mut out);
+    }
+    Some(out)
 }
 
 /// Runs the native `herdr machine add` registration on the bridge host.
