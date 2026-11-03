@@ -124,7 +124,8 @@
   describes the bridge-tracked mode (`auto`/`off`, surviving reloads and origin changes) and the
   crossed-out-pointer exit button; a new section documents the New tab launch dialog with its
   built-in agent presets (Shell, Codex, Claude, pi, omp, Grok, OpenCode) and
-  `HERDR_WEB_LAUNCHER_PRESETS`; Shift+Insert paste and the reverse-proxy path prefix are covered;
+  `HERDR_WEB_LAUNCHER_PRESETS`; Shift+Insert paste, clipboard image/file paste without intermediate saving, and the reverse-proxy path
+  prefix are covered;
   Linux verification counts updated (624 frontend / 287 bridge tests); the preview image is
   replaced with a screenshot of the live working interface.
 - The duplicated selection column-range ternaries in `selectedTextFromVisibleRows` and the
