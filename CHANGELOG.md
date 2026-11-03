@@ -120,6 +120,13 @@
 
 ### Changed
 
+- README refreshed to match current behavior: the right-click passthrough section now
+  describes the bridge-tracked mode (`auto`/`off`, surviving reloads and origin changes) and the
+  crossed-out-pointer exit button; a new section documents the New tab launch dialog with its
+  built-in agent presets (Shell, Codex, Claude, pi, omp, Grok, OpenCode) and
+  `HERDR_WEB_LAUNCHER_PRESETS`; Shift+Insert paste and the reverse-proxy path prefix are covered;
+  Linux verification counts updated (624 frontend / 287 bridge tests); the preview image is
+  replaced with a screenshot of the live working interface.
 - The duplicated selection column-range ternaries in `selectedTextFromVisibleRows` and the
   renderer's viewport selection text are extracted into a shared tested `selectionRowColRange`
   helper (anchor rows clamp to their endpoint, intermediate rows span to the caller's row end);
