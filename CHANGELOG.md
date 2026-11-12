@@ -1,6 +1,4 @@
-## [Unreleased]
-
-### Breaking Changes
+## [0.7.0] - 2026-11-12
 
 ### Added
 
@@ -373,8 +371,6 @@
   minimum (an empty input is not a number, despite `Number("")` being 0).
 - Note editor drafts are persisted to local storage after a short typing pause (400ms, matching
   the autosave debounce style) instead of on every keystroke.
-
-### Removed
 
 ## [0.6.1] - 2026-09-12
 
