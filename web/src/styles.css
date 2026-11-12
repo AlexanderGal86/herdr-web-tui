@@ -2675,6 +2675,72 @@ button {
   width: min(420px, 100%);
 }
 
+.paste-modal {
+  width: min(560px, 100%);
+}
+
+.paste-textarea {
+  min-height: 140px;
+  max-height: 40dvh;
+  resize: vertical;
+  padding: 10px;
+  border: 1px solid var(--surface0);
+  border-radius: var(--r-sm);
+  color: var(--text);
+  background: var(--mantle);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+  overflow-wrap: normal;
+}
+
+.paste-textarea:focus {
+  outline: none;
+  border-color: var(--lavender);
+}
+
+.paste-stats {
+  color: var(--subtext0);
+  font-size: 11px;
+}
+
+.paste-modes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.paste-mode {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  cursor: pointer;
+}
+
+.paste-mode input {
+  margin-top: 2px;
+  accent-color: var(--lavender);
+}
+
+.paste-mode-label {
+  display: block;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.paste-mode-hint {
+  display: block;
+  color: var(--subtext0);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.paste-error {
+  color: var(--red);
+  font-size: 12px;
+}
+
 .launch-grid {
   display: flex;
   gap: 6px;

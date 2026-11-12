@@ -1,5 +1,7 @@
 /** @vitest-environment jsdom */
 import { describe, expect, it, vi } from "vitest";
+import { Terminal } from "ghostty-web";
+import { buildPastePayload } from "./terminalPastePayload";
 import {
   disableGhosttySelectionClipboardWrites,
   GhosttyRenderer,
@@ -436,6 +438,29 @@ function dispatchCtrlC(
   }
   return handled;
 }
+
+describe("GhosttyRenderer paste", () => {
+  it("pasteBracketed sends the prepared payload exactly as built (no double wrap)", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const inputSpy = vi.spyOn(Terminal.prototype, "input");
+    try {
+      const renderer = new GhosttyRenderer(14, true);
+      await renderer.mount(container);
+      const payload = buildPastePayload("a\nb", "bracketed");
+      if (!payload.ok) {
+        throw new Error("expected a paste payload");
+      }
+      renderer.pasteBracketed(payload.data);
+      // Regression: pasteBracketed must not add its own 200~/201~ markers on
+      // top of the ones buildPastePayload already emitted.
+      expect(inputSpy).toHaveBeenCalledExactlyOnceWith("\u001b[200~a\nb\u001b[201~", true);
+    } finally {
+      inputSpy.mockRestore();
+      container.remove();
+    }
+  });
+});
 
 describe("GhosttyRenderer dispose", () => {
   it("cancels the pending focus-retry timeout so it cannot fire after dispose", async () => {

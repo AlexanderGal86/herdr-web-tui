@@ -166,6 +166,10 @@ export type TerminalRenderer = {
   getSelection(): string;
   clearSelection(): void;
   paste(text: string): void;
+  /** Send an already-framed bracketed-paste payload (built by
+   * buildPastePayload) as user input, bypassing the VT's own mode detection
+   * (the pane's 2004 answer may never reach us — see terminalPastePayload.ts). */
+  pasteBracketed(text: string): void;
   /** Server-reported pane mouse state (daemon MouseCapture truth). */
   setMouseCapture(enabled: boolean): void;
   /** Pane opt-in (TTT-style) that lets the tracked app receive mouse reports. */
@@ -308,6 +312,12 @@ export class GhosttyRenderer implements TerminalRenderer {
 
   paste(text: string) {
     this.#terminal?.paste(text);
+  }
+
+  pasteBracketed(text: string) {
+    // text is a fully prepared payload — buildPastePayload already added the
+    // 200~/201~ markers. Wrapping here again would corrupt the paste.
+    this.#terminal?.input(text, true);
   }
 
   onScroll(callback: (lines: number) => void) {
