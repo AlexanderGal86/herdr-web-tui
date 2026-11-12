@@ -102,6 +102,8 @@ class FakeTerminalRenderer implements TerminalRenderer {
 
   paste = vi.fn();
 
+  pasteBracketed = vi.fn();
+
   setScrollSensitivity() {}
 
   dispose() {}
@@ -796,7 +798,7 @@ describe("TerminalView context menu capture", () => {
     return event;
   }
 
-  it("pastes middle-click clipboard text once and intercepts native mouse input", async () => {
+  it("opens the paste dialog for middle-click multiline clipboard text and sends it bracketed", async () => {
     const readText = vi.fn().mockResolvedValue("one\ntwo");
     vi.stubGlobal("navigator", { clipboard: { readText } });
     const { renderer, onContextMenu, onActivate } = await mountMenu();
@@ -806,11 +808,19 @@ describe("TerminalView context menu capture", () => {
       }
     });
     expect(readText).toHaveBeenCalledOnce();
-    expect(renderer.paste).toHaveBeenCalledExactlyOnceWith("one\ntwo");
+    expect(renderer.paste).not.toHaveBeenCalled();
     expect(onActivate).toHaveBeenCalledOnce();
-    expect(document.activeElement).toBe(renderer.input);
+    // Focus moves into the dialog textarea (selected for quick trimming).
+    expect(document.activeElement).toBe(document.querySelector(".paste-textarea"));
     expect(renderer.childEvents).not.toHaveBeenCalled();
     expect(onContextMenu).not.toHaveBeenCalled();
+    // Multiline clipboard text opens the mode dialog instead of pasting raw lines.
+    expect(document.body.textContent).toContain("Paste to terminal");
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>(".paste-modal .btn-primary")!.click();
+    });
+    expect(renderer.pasteBracketed).toHaveBeenCalledExactlyOnceWith("\u001b[200~one\ntwo\u001b[201~");
+    expect(document.body.textContent).not.toContain("Paste to terminal");
   });
 
   it("does not paste after the target terminal is replaced while clipboard access is pending", async () => {
@@ -830,6 +840,122 @@ describe("TerminalView context menu capture", () => {
     await act(async () => { mouse(renderer.input, "mousedown", { button: 1 }); });
     expect(renderer.paste).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain("Clipboard unavailable");
+  });
+
+  function nativePaste(input: HTMLElement, text: string | null) {
+    // jsdom has no clipboard support; duck-type the DataTransfer the handlers read.
+    const clipboardData = {
+      items: [],
+      getData: () => text ?? "",
+    };
+    const event = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clipboardData", { value: clipboardData });
+    input.dispatchEvent(event);
+    return event;
+  }
+
+  it("intercepts native multiline paste and sends the chosen mode", async () => {
+    const { renderer } = await mountMenu();
+    await act(async () => {
+      expect(nativePaste(renderer.input, "alpha\r\nbeta").defaultPrevented).toBe(true);
+    });
+    expect(document.body.textContent).toContain("Paste to terminal");
+    expect(document.querySelector<HTMLTextAreaElement>(".paste-textarea")!.value).toBe("alpha\nbeta");
+    // Automatic mode sends the text unwrapped through the regular paste path.
+    document.querySelector<HTMLInputElement>(".paste-mode input[value=auto]")!.click();
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>(".paste-modal .btn-primary")!.click();
+    });
+    expect(renderer.paste).toHaveBeenCalledExactlyOnceWith("alpha\nbeta");
+    expect(renderer.pasteBracketed).not.toHaveBeenCalled();
+  });
+
+  it("lets single-line native paste reach the terminal unchanged", async () => {
+    const { renderer } = await mountMenu();
+    await act(async () => {
+      expect(nativePaste(renderer.input, "plain line").defaultPrevented).toBe(false);
+    });
+    expect(document.body.textContent).not.toContain("Paste to terminal");
+  });
+
+  it("refuses oversized paste drafts without sending", async () => {
+    vi.stubGlobal("navigator", {
+      clipboard: { readText: vi.fn().mockResolvedValue("x".repeat(1024 * 1024 + 1)) },
+    });
+    const { renderer } = await mountMenu();
+    await act(async () => { mouse(renderer.input, "mousedown", { button: 1 }); });
+    expect(document.body.textContent).toContain("larger than 1 MiB");
+    expect(document.querySelector<HTMLButtonElement>(".paste-modal .btn-primary")!.disabled).toBe(true);
+    expect(renderer.pasteBracketed).not.toHaveBeenCalled();
+  });
+
+  it("keeps native paste inside the preview dialog textarea", async () => {
+    const readText = vi.fn().mockResolvedValue("one\ntwo");
+    vi.stubGlobal("navigator", { clipboard: { readText } });
+    const { renderer } = await mountMenu();
+    await act(async () => { mouse(renderer.input, "mousedown", { button: 1 }); });
+    const textarea = document.querySelector<HTMLTextAreaElement>(".paste-textarea")!;
+    let event: Event;
+    await act(async () => {
+      event = nativePaste(textarea, "replacement\ntext");
+    });
+    // Not intercepted: the dialog keeps its own edit surface.
+    expect(event!.defaultPrevented).toBe(false);
+    expect(document.querySelector<HTMLTextAreaElement>(".paste-textarea")!.value).toBe("one\ntwo");
+  });
+
+  it("cancels the paste draft when the terminal is replaced while the dialog is open", async () => {
+    const readText = vi.fn().mockResolvedValue("one\ntwo");
+    vi.stubGlobal("navigator", { clipboard: { readText } });
+    const { renderer, root, drafts } = await mountMenu();
+    await act(async () => { mouse(renderer.input, "mousedown", { button: 1 }); });
+    expect(document.body.textContent).toContain("Paste to terminal");
+    await renderPane(root, testPane("replacement"), drafts);
+    // The replacement renderer invalidates the bound draft: dialog closes,
+    // nothing is delivered to either pane.
+    expect(document.body.textContent).not.toContain("Paste to terminal");
+    expect(renderer.pasteBracketed).not.toHaveBeenCalled();
+    expect(terminalRenderers.at(-1)!.pasteBracketed).not.toHaveBeenCalled();
+  });
+
+  it("shows a reconnected error when the socket closes before the paste is sent", async () => {
+    const readText = vi.fn().mockResolvedValue("one\ntwo");
+    vi.stubGlobal("navigator", { clipboard: { readText } });
+    const { renderer, socket } = await mountMenu();
+    await act(async () => { mouse(renderer.input, "mousedown", { button: 1 }); });
+    await act(async () => { socket.close(); });
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>(".paste-modal .btn-primary")!.click();
+    });
+    expect(document.body.textContent).toContain("Pane reconnected — paste cancelled");
+    expect(renderer.pasteBracketed).not.toHaveBeenCalled();
+  });
+
+  it("refuses the draft after the socket was replaced by a reconnect while the dialog was open", async () => {
+    const readText = vi.fn().mockResolvedValue("one\ntwo");
+    vi.stubGlobal("navigator", { clipboard: { readText } });
+    const { renderer } = await mountMenu();
+    const staleSocket = FakeWebSocket.instances.at(-1)!;
+    await act(async () => { mouse(renderer.input, "mousedown", { button: 1 }); });
+    expect(document.body.textContent).toContain("Paste to terminal");
+
+    // The pane reconnects underneath the open dialog: same renderer, new socket.
+    await act(async () => {
+      staleSocket.close();
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    const replacementSocket = FakeWebSocket.instances.at(-1)!;
+    expect(replacementSocket).not.toBe(staleSocket);
+    await act(async () => { replacementSocket.open(); });
+
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>(".paste-modal .btn-primary")!.click();
+    });
+    expect(document.body.textContent).toContain("Pane reconnected — paste cancelled");
+    expect(renderer.pasteBracketed).not.toHaveBeenCalled();
+    const inputFrames = (socket: FakeWebSocket) => socket.sent.filter((f) => f.includes('"type":"input"'));
+    expect(inputFrames(staleSocket)).toHaveLength(0);
+    expect(inputFrames(replacementSocket)).toHaveLength(0);
   });
 
   it("blocks right mouse and pointer input before native child capture, preserves focus target and connection", async () => {

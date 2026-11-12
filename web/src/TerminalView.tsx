@@ -28,6 +28,7 @@ import {
 import type { MobileTerminalChordKey } from "./mobileTerminalControls";
 import { MobileTerminalKeyButton } from "./MobileTerminalKeyButton";
 import { ConfirmDialog } from "./overlays";
+import { TerminalPasteDialog } from "./TerminalPasteDialog";
 import { addNativeResumeHandler } from "./native";
 import { shellQuote } from "./shell";
 import {
@@ -64,6 +65,8 @@ import {
 } from "./terminalInputTransport";
 import type { TerminalInputTransport } from "./terminalInputTransport";
 import { DEFAULT_TERMINAL_OUTPUT_COALESCE_MS } from "./terminalOutputCoalescing";
+import { buildPastePayload, needsPasteDialog, normalizePasteText } from "./terminalPastePayload";
+import type { PasteSendMode } from "./terminalPastePayload";
 import {
   createTerminalOutputFrameDecoder,
   isTerminalOutputGzipAcknowledgement,
@@ -295,6 +298,11 @@ export function TerminalView({
   const terminalAttachCountRef = useRef(0);
   const [showConnectionOverlay, setShowConnectionOverlay] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
+  const [pasteDraft, setPasteDraft] = useState<{
+    text: string;
+    renderer: TerminalRenderer;
+    socket: WebSocket;
+  } | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadConflict, setUploadConflict] = useState<UploadConflictState | null>(null);
   const [mobileSelectionAction, setMobileSelectionAction] =
@@ -1552,8 +1560,20 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
   };
 
   const handlePaste = (event: ClipboardEvent<HTMLElement>) => {
+    // Only the terminal surface: overlay dialogs (paste preview, mobile composer)
+    // and other editables inside this section must keep native paste behavior.
+    if (!hostRef.current?.contains(event.target as Node)) {
+      return;
+    }
     const files = uploadCandidatesFromClipboard(event.clipboardData);
     if (files.length === 0) {
+      const text = event.clipboardData?.getData("text/plain") ?? "";
+      if (text.length > 0 && needsPasteDialog(text)) {
+        // The VT's own paste turns every newline into Enter; let the user pick a mode.
+        event.preventDefault();
+        event.stopPropagation();
+        openPasteDialog(normalizePasteText(text));
+      }
       return;
     }
     event.preventDefault();
@@ -1620,7 +1640,13 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
       // Permission prompts may outlive the pane or its connection.
       if (rendererRef.current !== renderer || socketRef.current !== socket ||
           socket.readyState !== WebSocket.OPEN || terminalInputBlockedRef.current) return;
-      if (text) renderer.paste(text);
+      if (text) {
+        if (needsPasteDialog(text)) {
+          openPasteDialog(normalizePasteText(text));
+        } else {
+          renderer.paste(text);
+        }
+      }
     } catch {
       if (rendererRef.current === renderer && socketRef.current === socket) {
         showUploadStatus("Clipboard unavailable. Allow clipboard access or use Ctrl+Shift+V.", 4500);
@@ -1629,6 +1655,46 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
   };
   const pasteClipboardRef = useRef(pasteClipboard);
   pasteClipboardRef.current = pasteClipboard;
+
+  const openPasteDialog = (text: string) => {
+    // Bind the draft to the connection it was captured on: a pane swap or
+    // reconnect while the dialog is open must not deliver the text elsewhere.
+    const renderer = rendererRef.current;
+    const socket = socketRef.current;
+    if (!renderer || !socket) {
+      showUploadStatus("Terminal detached", 2500);
+      return;
+    }
+    setPasteDraft({ text, renderer, socket });
+  };
+
+  // A remount/replacement renderer invalidates an open draft (the effect runs
+  // after rendererRef points at the new instance).
+  useEffect(() => {
+    if (pasteDraft && rendererRef.current !== pasteDraft.renderer) {
+      setPasteDraft(null);
+    }
+  }, [pasteDraft, rendererReady]);
+
+  const sendPasteDraft = (mode: PasteSendMode, text: string): string | null => {
+    const payload = buildPastePayload(text, mode);
+    if (!payload.ok) {
+      return payload.reason === "too_large" ? "Text is larger than 1 MiB" : "Nothing to paste";
+    }
+    const renderer = rendererRef.current;
+    const socket = socketRef.current;
+    if (renderer !== pasteDraft?.renderer || socket !== pasteDraft.socket ||
+        socket.readyState !== WebSocket.OPEN || terminalInputBlockedRef.current) {
+      return "Pane reconnected — paste cancelled";
+    }
+    if (mode === "bracketed") {
+      renderer.pasteBracketed(payload.data);
+    } else {
+      renderer.paste(payload.data);
+    }
+    setPasteDraft(null);
+    return null;
+  };
 
   useEffect(() => {
     if (pasteToken <= 0) return;
@@ -1898,6 +1964,13 @@ const TERMINAL_INPUT_QUEUE_MAX_BYTES_PER_TICK = 4096;
         <div className="terminal-upload-status" role="status" aria-live="polite">
           {uploadStatus}
         </div>
+      ) : null}
+      {pasteDraft !== null ? (
+        <TerminalPasteDialog
+          text={pasteDraft.text}
+          onSend={sendPasteDraft}
+          onCancel={() => setPasteDraft(null)}
+        />
       ) : null}
       {!mobileControls ? (
         <button
